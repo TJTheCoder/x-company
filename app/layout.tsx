@@ -9,7 +9,7 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata: Metadata = {
   metadataBase: new URL(defaultUrl),
-  title: "X Company",
+  title: "The Dragon Lord",
   description: "All-in-one companion platform for the Dragon Lord campaign.",
 };
 

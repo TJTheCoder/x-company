@@ -26,7 +26,7 @@ type Character = {
   spirits: number;
 };
 
-// All skills mapped to their attribute
+// Skills mapping
 const allSkills: Skill[] = [
   { name: "MIGHT", description: "Push, pull, or lift.", points: 0, attribute: "STR" },
   { name: "ENDURANCE", description: "Push through extended travel or extreme weather.", points: 0, attribute: "STR" },
@@ -52,6 +52,12 @@ const allSkills: Skill[] = [
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"character" | "combat">("character");
   const [character, setCharacter] = useState<Character | null>(null);
+  const [diceResults, setDiceResults] = useState<Record<string, number[]>>({
+    STR: [],
+    AGL: [],
+    WIT: [],
+    EMP: [],
+  });
 
   useEffect(() => {
     async function fetchCharacter() {
@@ -76,13 +82,27 @@ export default function Dashboard() {
     fetchCharacter();
   }, []);
 
-  // Map skills with character points
   const characterSkills = allSkills.map(skill => ({
     ...skill,
     points: character?.skills[skill.name] ?? 0,
   }));
 
   const attributesOrder: (keyof Attributes)[] = ["STR", "AGL", "WIT", "EMP"];
+
+  // Roll dice for an attribute
+  const rollDice = (attr: keyof Attributes) => {
+    if (!character) return;
+    const count = character.attributes[attr];
+    const results = Array.from({ length: count }, () => Math.floor(Math.random() * 6) + 1);
+    setDiceResults(prev => ({ ...prev, [attr]: results }));
+  };
+
+  // Convert dice number to icon
+  const renderDie = (num: number) => {
+    if (num === 6) return <span className="text-green-400 font-bold text-xl">✅</span>;
+    if (num === 1) return <span className="text-red-500 font-bold text-xl">❌</span>;
+    return <span className="text-gray-400 font-bold text-xl">⚪</span>;
+  };
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
@@ -134,18 +154,37 @@ export default function Dashboard() {
                       return (
                         <div key={attr}>
                           {/* Attribute */}
-                          <div className="bg-gray-700 rounded-lg p-4 flex flex-col items-center shadow-md hover:shadow-amber-500 transition">
+                          <div
+                            className="bg-gray-700 rounded-lg p-4 flex flex-col items-center shadow-md hover:shadow-amber-500 transition cursor-pointer"
+                            onClick={() => rollDice(attr)}
+                          >
                             <span className="text-lg font-bold text-amber-200">{attr}</span>
                             <div className="w-full bg-gray-600 h-4 rounded-full mt-2">
                               <div
                                 className="bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 h-4 rounded-full transition-all"
-                                style={{ width: `${(character.attributes[attr] / character.attributes[attr]) * 100}%` }}
+                                style={{
+                                  width: `${(character.attributes[attr] / character.attributes[attr]) * 100}%`,
+                                }}
                               />
                             </div>
                             <span className="mt-1 text-amber-100 font-semibold">
                               {character.attributes[attr]}
                             </span>
                           </div>
+
+                          {/* Dice Results */}
+                          {diceResults[attr].length > 0 && (
+                            <div className="flex gap-2 mt-4 flex-wrap justify-center">
+                              {diceResults[attr].map((die, i) => (
+                                <div
+                                  key={i}
+                                  className="w-10 h-10 bg-gray-700 rounded-full flex items-center justify-center shadow-lg animate-bounce"
+                                >
+                                  {renderDie(die)}
+                                </div>
+                              ))}
+                            </div>
+                          )}
 
                           {/* Skills */}
                           <div className="mt-4 grid grid-rows-4 gap-4">

@@ -1,43 +1,54 @@
-import { redirect } from "next/navigation";
+"use client";
 
-import { createClient } from "@/lib/supabase/server";
-import { InfoIcon } from "lucide-react";
-import { FetchDataSteps } from "@/components/tutorial/fetch-data-steps";
-import { Suspense } from "react";
+import { useState } from "react";
 
-async function UserDetails() {
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.getClaims();
+export default function Dashboard() {
+  const [activeTab, setActiveTab] = useState<"character" | "combat">("character");
 
-  if (error || !data?.claims) {
-    redirect("/auth/login");
-  }
-
-  return JSON.stringify(data.claims, null, 2);
-}
-
-export default function ProtectedPage() {
   return (
-    <div className="flex-1 w-full flex flex-col gap-12">
-      <div className="w-full">
-        <div className="bg-accent text-sm p-3 px-5 rounded-md text-foreground flex gap-3 items-center">
-          <InfoIcon size="16" strokeWidth={2} />
-          This is a protected page that you can only see as an authenticated
-          user
+    <main className="min-h-screen bg-gray-900 text-amber-50 font-serif p-8">
+      <div className="max-w-6xl mx-auto flex flex-col gap-6">
+        {/* Tabs */}
+        <div className="flex gap-4 border-b border-amber-500 mb-6">
+          <button
+            onClick={() => setActiveTab("character")}
+            className={`px-4 py-2 font-semibold rounded-t-lg ${
+              activeTab === "character"
+                ? "bg-amber-500 text-gray-900"
+                : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+            }`}
+          >
+            Character
+          </button>
+          <button
+            onClick={() => setActiveTab("combat")}
+            className={`px-4 py-2 font-semibold rounded-t-lg ${
+              activeTab === "combat"
+                ? "bg-amber-500 text-gray-900"
+                : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+            }`}
+          >
+            Combat
+          </button>
+        </div>
+
+        {/* Tab Content */}
+        <div className="bg-gray-800 p-6 rounded-lg min-h-[300px]">
+          {activeTab === "character" && (
+            <div className="flex flex-col gap-4">
+              {/* Character tab content goes here */}
+              <p className="text-amber-300">Character tab (empty for now)</p>
+            </div>
+          )}
+
+          {activeTab === "combat" && (
+            <div className="flex flex-col gap-4">
+              {/* Combat tab content goes here */}
+              <p className="text-amber-300">Combat tab (empty for now)</p>
+            </div>
+          )}
         </div>
       </div>
-      <div className="flex flex-col gap-2 items-start">
-        <h2 className="font-bold text-2xl mb-4">Your user details</h2>
-        <pre className="text-xs font-mono p-3 rounded border max-h-32 overflow-auto">
-          <Suspense>
-            <UserDetails />
-          </Suspense>
-        </pre>
-      </div>
-      <div>
-        <h2 className="font-bold text-2xl mb-4">Next steps</h2>
-        <FetchDataSteps />
-      </div>
-    </div>
+    </main>
   );
 }

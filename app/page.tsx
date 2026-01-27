@@ -1,58 +1,46 @@
-import { DeployButton } from "@/components/deploy-button";
-import { EnvVarWarning } from "@/components/env-var-warning";
 import { AuthButton } from "@/components/auth-button";
-import { Hero } from "@/components/hero";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { ConnectSupabaseSteps } from "@/components/tutorial/connect-supabase-steps";
-import { SignUpUserSteps } from "@/components/tutorial/sign-up-user-steps";
+import { EnvVarWarning } from "@/components/env-var-warning";
+import { Hero } from "@/components/hero";
 import { hasEnvVars } from "@/lib/utils";
-import Link from "next/link";
 import { Suspense } from "react";
 
 export default function Home() {
   return (
-    <main className="min-h-screen flex flex-col items-center">
-      <div className="flex-1 w-full flex flex-col gap-20 items-center">
-        <nav className="w-full flex justify-center border-b border-b-foreground/10 h-16">
-          <div className="w-full max-w-5xl flex justify-between items-center p-3 px-5 text-sm">
-            <div className="flex gap-5 items-center font-semibold">
-              <Link href={"/"}>Next.js Supabase Starter</Link>
-              <div className="flex items-center gap-2">
-                <DeployButton />
-              </div>
-            </div>
-            {!hasEnvVars ? (
-              <EnvVarWarning />
-            ) : (
-              <Suspense>
-                <AuthButton />
-              </Suspense>
-            )}
-          </div>
-        </nav>
-        <div className="flex-1 flex flex-col gap-20 max-w-5xl p-5">
-          <Hero />
-          <main className="flex-1 flex flex-col gap-6 px-4">
-            <h2 className="font-medium text-xl mb-4">Next steps</h2>
-            {hasEnvVars ? <SignUpUserSteps /> : <ConnectSupabaseSteps />}
-          </main>
-        </div>
-
-        <footer className="w-full flex items-center justify-center border-t mx-auto text-center text-xs gap-8 py-16">
-          <p>
-            Powered by{" "}
-            <a
-              href="https://supabase.com/?utm_source=create-next-app&utm_medium=template&utm_term=nextjs"
-              target="_blank"
-              className="font-bold hover:underline"
-              rel="noreferrer"
-            >
-              Supabase
-            </a>
-          </p>
-          <ThemeSwitcher />
-        </footer>
+    <main className="relative min-h-screen flex flex-col items-center font-serif text-amber-50 bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 overflow-hidden">
+      
+      {/* Background Layers */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute w-[900px] h-[900px] bg-amber-700/20 rounded-full top-10 left-1/3 animate-pulse-slow blur-3xl"></div>
+        <div className="absolute w-[650px] h-[650px] bg-amber-600/10 rounded-full bottom-20 right-1/4 animate-pulse-slow blur-2xl"></div>
       </div>
+
+      {/* Navigation */}
+      <nav className="w-full z-10 flex justify-between items-center max-w-6xl px-8 py-6 border-b border-amber-600/20 backdrop-blur-sm">
+        <h1 className="text-4xl lg:text-5xl font-black tracking-wider text-amber-400 drop-shadow-lg animate-fade-in">
+          The Dragon Lord
+        </h1>
+        <div className="flex items-center gap-4">
+          {!hasEnvVars ? (
+            <EnvVarWarning />
+          ) : (
+            <Suspense fallback={null}>
+              <AuthButton />
+            </Suspense>
+          )}
+          <ThemeSwitcher />
+        </div>
+      </nav>
+
+      {/* Hero Section */}
+      <div className="flex-1 flex flex-col items-center justify-center z-10 w-full px-6 mt-16">
+        <Hero />
+      </div>
+
+      {/* Footer */}
+      <footer className="w-full flex items-center justify-center text-sm text-amber-200 gap-6 py-12 mt-20 border-t border-amber-600/20 backdrop-blur-sm">
+        <p>Powered by mystical forces</p>
+      </footer>
     </main>
   );
 }

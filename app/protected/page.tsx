@@ -29,6 +29,15 @@ type Character = {
   spirits: number;
 };
 
+type DicePool = "attribute" | "skill" | "both";
+
+type RollState = {
+  attributeDice: number[];
+  skillDice: number[];
+  poolUsed: DicePool;
+  hasBeenPushed: boolean;
+};
+
 const allSkills: Skill[] = [
   { name: "MIGHT", description: "Push, pull, or lift.", points: 0, attribute: "STR" },
   { name: "ENDURANCE", description: "Push through extended travel or extreme weather.", points: 0, attribute: "STR" },
@@ -51,13 +60,15 @@ const allSkills: Skill[] = [
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"character" | "combat">("character");
   const [character, setCharacter] = useState<Character | null>(null);
-  const [diceResults, setDiceResults] = useState<Record<string, number[]>>({
-    STR: [],
-    AGL: [],
-    WIT: [],
-    EMP: [],
+  const [rollStates, setRollStates] = useState<Record<string, RollState>>({
+    STR: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    AGL: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    WIT: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    EMP: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
   });
-  const [pushActive, setPushActive] = useState<keyof Attributes | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
+  const [selectedAttribute, setSelectedAttribute] = useState<keyof Attributes | null>(null);
+  const [showPoolSelector, setShowPoolSelector] = useState<keyof Attributes | null>(null);
 
   useEffect(() => {
     async function fetchCharacter() {
@@ -78,36 +89,137 @@ export default function Dashboard() {
     fetchCharacter();
   }, []);
 
-  const rollDice = (attr: keyof Attributes) => {
-    if (!character) return;
-    const count = character.attributes[attr];
-
-    const results = Array.from({ length: count }, () => Math.floor(Math.random() * 6) + 1);
-
-    // Reset all dice except current attribute
-    const newDiceState: Record<string, number[]> = {
-      STR: [],
-      AGL: [],
-      WIT: [],
-      EMP: [],
-      [attr]: results,
-    };
-
-    setDiceResults(newDiceState);
-    setPushActive(attr);
+  const clearRoll = (attr: keyof Attributes) => {
+    setRollStates(prev => ({
+      ...prev,
+      [attr]: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    }));
+    setShowPoolSelector(null);
   };
 
-  const pushDice = async (attr: keyof Attributes) => {
+  const handleSkillClick = (skillName: string, skillAttr: keyof Attributes) => {
+    if (selectedSkill === skillName) {
+      // Unselect
+      setSelectedSkill(null);
+      setSelectedAttribute(null);
+    } else {
+      // Select this skill and its attribute, unselect others
+      setSelectedSkill(skillName);
+      setSelectedAttribute(skillAttr);
+      
+      // Auto-show pool selector for the attribute
+      const currentRoll = rollStates[skillAttr];
+      const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+      if (!hasRoll) {
+        setShowPoolSelector(skillAttr);
+      }
+    }
+  };
+
+  const handleAttributeClick = (attr: keyof Attributes) => {
+    const currentRoll = rollStates[attr];
+    const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+
+    if (hasRoll) {
+      clearRoll(attr);
+    } else {
+      // Toggle selection
+      if (selectedAttribute === attr) {
+        setSelectedAttribute(null);
+        setSelectedSkill(null);
+        setShowPoolSelector(null);
+      } else {
+        setSelectedAttribute(attr);
+        // Unselect skill if it doesn't match this attribute
+        const skill = allSkills.find(s => s.name === selectedSkill);
+        if (skill && skill.attribute !== attr) {
+          setSelectedSkill(null);
+        }
+        setShowPoolSelector(attr);
+      }
+    }
+  };
+
+  const rollDice = (attr: keyof Attributes, pool: DicePool) => {
     if (!character) return;
 
-    const oldDice = diceResults[attr];
-    const newDice = oldDice.map(d => (d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1));
+    const attrCount = character.attributes[attr];
+    const skillPoints = selectedSkill ? (character.skills[selectedSkill] ?? 0) : 0;
 
-    const totalSixes = newDice.filter(d => d === 6).length;
-    const totalOnes = newDice.filter(d => d === 1).length;
+    let attributeDice: number[] = [];
+    let skillDice: number[] = [];
 
-    const extraSpirit = totalSixes > 1 ? totalSixes - 1 : 0;
-    const attrDecrease = totalOnes;
+    if (pool === "attribute" || pool === "both") {
+      attributeDice = Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1);
+    }
+
+    if (pool === "skill" || pool === "both") {
+      skillDice = Array.from({ length: skillPoints }, () => Math.floor(Math.random() * 6) + 1);
+    }
+
+    setRollStates(prev => ({
+      ...prev,
+      [attr]: { attributeDice, skillDice, poolUsed: pool, hasBeenPushed: false },
+    }));
+    setShowPoolSelector(null);
+  };
+
+  const calculateSpiritGain = (attrSixes: number, skillSixes: number): number => {
+    // Spirit is only gained on pushed rolls
+    // First, reserve 1 six for success from skill pool if available, otherwise from attribute pool
+    // Then, count excess sixes ONLY from non-skill pools (attribute pool)
+    
+    const totalSixes = attrSixes + skillSixes;
+    if (totalSixes === 0) return 0;
+    
+    // Reserve 1 six for success (prefer from skill pool)
+    let remainingSkillSixes = skillSixes;
+    let remainingAttrSixes = attrSixes;
+    
+    if (remainingSkillSixes > 0) {
+      remainingSkillSixes -= 1; // Reserve success from skill pool
+    } else if (remainingAttrSixes > 0) {
+      remainingAttrSixes -= 1; // Reserve success from attribute pool
+    }
+    
+    // Only excess sixes from NON-SKILL pools (attribute) count toward Spirit
+    return remainingAttrSixes;
+  };
+
+  const pushDice = async (attr: keyof Attributes, pushPool: "attribute" | "skill" | "both") => {
+    if (!character) return;
+
+    const currentRoll = rollStates[attr];
+    if (currentRoll.hasBeenPushed) return;
+
+    // Re-roll based on what pool is being pushed
+    let newAttributeDice = currentRoll.attributeDice;
+    let newSkillDice = currentRoll.skillDice;
+
+    if (pushPool === "attribute" || pushPool === "both") {
+      newAttributeDice = currentRoll.attributeDice.map(d =>
+        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
+      );
+    }
+
+    if (pushPool === "skill" || pushPool === "both") {
+      newSkillDice = currentRoll.skillDice.map(d =>
+        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
+      );
+    }
+
+    // Calculate sixes in each pool
+    const attrSixes = newAttributeDice.filter(d => d === 6).length;
+    const skillSixes = newSkillDice.filter(d => d === 6).length;
+    
+    // Calculate spirit gain (only on pushed rolls)
+    const extraSpirit = calculateSpiritGain(attrSixes, skillSixes);
+
+    // Only attribute 1s cause attribute decrease (and only if attribute dice were pushed)
+    const attrOnes = (pushPool === "attribute" || pushPool === "both") 
+      ? newAttributeDice.filter(d => d === 1).length 
+      : 0;
+    const attrDecrease = attrOnes;
 
     const newSpirits = (character.spirits ?? 0) + extraSpirit;
     const newAttrValue = Math.max(0, (character.attributes[attr] ?? 0) - attrDecrease);
@@ -119,9 +231,15 @@ export default function Dashboard() {
     };
     setCharacter(updatedCharacter);
 
-    // Freeze dice
-    setDiceResults(prev => ({ ...prev, [attr]: newDice }));
-    setPushActive(null);
+    setRollStates(prev => ({
+      ...prev,
+      [attr]: {
+        attributeDice: newAttributeDice,
+        skillDice: newSkillDice,
+        poolUsed: currentRoll.poolUsed,
+        hasBeenPushed: true,
+      },
+    }));
 
     const supabase = createClient();
     await supabase
@@ -138,8 +256,15 @@ export default function Dashboard() {
     const maxAttrs = (character as any).max_attributes || character.attributes;
     const resetCharacter = { ...character, spirits: 0, attributes: maxAttrs };
     setCharacter(resetCharacter);
-    setDiceResults({ STR: [], AGL: [], WIT: [], EMP: [] });
-    setPushActive(null);
+    setRollStates({
+      STR: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+      AGL: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+      WIT: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+      EMP: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    });
+    setShowPoolSelector(null);
+    setSelectedSkill(null);
+    setSelectedAttribute(null);
 
     const supabase = createClient();
     await supabase
@@ -154,12 +279,14 @@ export default function Dashboard() {
     points: character?.skills[skill.name] ?? 0,
   }));
 
-  const renderDie = (num: number, bouncing: boolean) => {
+  const renderDie = (num: number, bouncing: boolean, isSkillDie: boolean) => {
     const icon = num === 6 ? "✅" : num === 1 ? "❌" : "⚪";
     const color = num === 6 ? "text-green-400" : num === 1 ? "text-red-500" : "text-gray-400";
+    const bgColor = isSkillDie ? "bg-blue-700" : "bg-gray-700";
+    
     return (
       <div
-        className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg ${bouncing ? "animate-bounce" : ""} bg-gray-700`}
+        className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg ${bouncing ? "animate-bounce" : ""} ${bgColor} border-2 ${isSkillDie ? "border-blue-400" : "border-gray-500"}`}
       >
         <span className={`text-xl font-bold ${color}`}>{icon}</span>
       </div>
@@ -174,7 +301,7 @@ export default function Dashboard() {
           <div className="flex gap-4 border-b border-amber-500">
             <button
               onClick={() => setActiveTab("character")}
-              className={`px-6 py-3 font-semibold rounded-t-lg ${
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
                 activeTab === "character"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -184,7 +311,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("combat")}
-              className={`px-6 py-3 font-semibold rounded-t-lg ${
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
                 activeTab === "combat"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -195,7 +322,7 @@ export default function Dashboard() {
           </div>
           <button
             onClick={restCharacter}
-            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg shadow-md font-semibold"
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg shadow-md font-semibold transition-all hover:scale-105"
           >
             Rest
           </button>
@@ -219,12 +346,20 @@ export default function Dashboard() {
                   <div className="grid grid-cols-4 gap-6 mt-6">
                     {attributesOrder.map(attr => {
                       const attrSkills = characterSkills.filter(skill => skill.attribute === attr);
-                      const isBouncing = pushActive === attr;
+                      const currentRoll = rollStates[attr];
+                      const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+                      const canPush = hasRoll && !currentRoll.hasBeenPushed;
+                      const isAttrSelected = selectedAttribute === attr;
+                      
                       return (
                         <div key={attr}>
                           <div
-                            className="bg-gray-700 rounded-lg p-4 flex flex-col items-center shadow-md hover:shadow-amber-500 transition cursor-pointer"
-                            onClick={() => rollDice(attr)}
+                            className={`bg-gray-700 rounded-lg p-4 flex flex-col items-center shadow-md transition-all cursor-pointer relative ${
+                              isAttrSelected 
+                                ? "ring-2 ring-amber-400 bg-gray-600" 
+                                : "hover:shadow-amber-500"
+                            }`}
+                            onClick={() => handleAttributeClick(attr)}
                           >
                             <span className="text-lg font-bold text-amber-200">{attr}</span>
                             <div className="w-full bg-gray-600 h-4 rounded-full mt-2">
@@ -236,28 +371,127 @@ export default function Dashboard() {
                               />
                             </div>
                             <span className="mt-1 text-amber-100 font-semibold">{character.attributes[attr]}</span>
+                            {hasRoll && (
+                              <div className="absolute top-2 right-2 text-xs text-amber-300 bg-gray-800 px-2 py-1 rounded">
+                                Click to clear
+                              </div>
+                            )}
                           </div>
 
-                          {pushActive === attr && (
-                            <button
-                              onClick={() => pushDice(attr)}
-                              className="mt-2 w-full bg-amber-500 text-gray-900 rounded-lg py-2 font-bold hover:scale-105 transition"
-                            >
-                              Push
-                            </button>
-                          )}
-
-                          {diceResults[attr].length > 0 && (
-                            <div className="flex gap-2 mt-4 flex-wrap justify-center">
-                              {diceResults[attr].map((die, i) => renderDie(die, isBouncing))}
+                          {/* Pool Selector */}
+                          {showPoolSelector === attr && !hasRoll && (
+                            <div className="mt-2 bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-500">
+                              <p className="text-sm text-amber-200 mb-2 font-semibold">Select Pool:</p>
+                              <div className="flex flex-col gap-2">
+                                <button
+                                  onClick={() => rollDice(attr, "attribute")}
+                                  className="bg-amber-500 text-gray-900 rounded py-2 font-bold hover:scale-105 transition-all"
+                                >
+                                  Attribute Only
+                                </button>
+                                {selectedSkill && (
+                                  <>
+                                    <button
+                                      onClick={() => rollDice(attr, "skill")}
+                                      className="bg-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                                    >
+                                      Skill Only ({selectedSkill})
+                                    </button>
+                                    <button
+                                      onClick={() => rollDice(attr, "both")}
+                                      className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                                    >
+                                      Both Pools
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
                           )}
 
+                          {/* Push Buttons */}
+                          {canPush && (
+                            <div className="mt-2 bg-gray-900 rounded-lg p-2 border border-amber-600/30">
+                              <p className="text-xs text-amber-300 mb-2 font-semibold text-center">Push:</p>
+                              <div className="flex flex-col gap-2">
+                                {currentRoll.attributeDice.length > 0 && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      pushDice(attr, "attribute");
+                                    }}
+                                    className="bg-amber-500 text-gray-900 rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                                  >
+                                    ⚡ Attribute
+                                  </button>
+                                )}
+                                {currentRoll.skillDice.length > 0 && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      pushDice(attr, "skill");
+                                    }}
+                                    className="bg-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                                  >
+                                    ⚡ Skill
+                                  </button>
+                                )}
+                                {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      pushDice(attr, "both");
+                                    }}
+                                    className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                                  >
+                                    ⚡ Both
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Dice Display */}
+                          {hasRoll && (
+                            <div className="mt-4 bg-gray-900 rounded-lg p-3 border border-amber-600/30">
+                              {currentRoll.attributeDice.length > 0 && (
+                                <div className="mb-3">
+                                  <p className="text-xs text-amber-300 mb-2 font-semibold">Attribute Dice:</p>
+                                  <div className="flex gap-2 flex-wrap justify-center">
+                                    {currentRoll.attributeDice.map((die, i) => (
+                                      <div key={`attr-${i}`}>
+                                        {renderDie(die, false, false)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {currentRoll.skillDice.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-blue-300 mb-2 font-semibold">Skill Dice:</p>
+                                  <div className="flex gap-2 flex-wrap justify-center">
+                                    {currentRoll.skillDice.map((die, i) => (
+                                      <div key={`skill-${i}`}>
+                                        {renderDie(die, false, true)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Skills */}
                           <div className="mt-4 grid grid-rows-4 gap-4">
                             {attrSkills.map(skill => (
                               <div
                                 key={skill.name}
-                                className="bg-gray-700 rounded-lg p-4 flex flex-col justify-between shadow-md hover:shadow-amber-400 transition-all hover:scale-105 h-40"
+                                onClick={() => handleSkillClick(skill.name, attr)}
+                                className={`bg-gray-700 rounded-lg p-4 flex flex-col justify-between shadow-md transition-all hover:scale-105 h-40 cursor-pointer ${
+                                  selectedSkill === skill.name
+                                    ? "ring-2 ring-blue-400 bg-gray-600"
+                                    : "hover:shadow-amber-400"
+                                }`}
                               >
                                 <div>
                                   <span className="font-bold text-amber-200">{skill.name}</span>

@@ -2,14 +2,22 @@
 
 import { useState } from "react";
 import { CharacterType, InventoryItem } from "../app/protected/page";
+import { createClient } from "@/lib/supabase/client";
+
+type WagonData = {
+  wagon1: InventoryItem[];
+  wagon2: InventoryItem[];
+};
 
 type InventoryProps = {
   character: CharacterType | null;
   updateCharacter: (updates: Partial<CharacterType>) => void;
   saveCharacter: (updates: Partial<CharacterType>) => void;
+  wagonData: WagonData;
+  setWagonData: (data: WagonData) => void;
 };
 
-export default function Inventory({ character, updateCharacter, saveCharacter }: InventoryProps) {
+export default function Inventory({ character, updateCharacter, saveCharacter, wagonData, setWagonData }: InventoryProps) {
   const [showAddItem, setShowAddItem] = useState(false);
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [formData, setFormData] = useState({
@@ -137,6 +145,41 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
     saveCharacter(updates);
   };
 
+  const handleTransferToWagon = async (wagon: "wagon1" | "wagon2", item: InventoryItem) => {
+    const maxWagonWeight = 200;
+    const currentWagonWeight = wagonData[wagon].reduce((sum, i) => sum + i.weight, 0);
+
+    if (currentWagonWeight + item.weight > maxWagonWeight) {
+      setError(`Cannot transfer: Would exceed wagon capacity (${(currentWagonWeight + item.weight).toFixed(1)}/${maxWagonWeight})`);
+      setTimeout(() => setError(""), 3000);
+      return;
+    }
+
+    const updatedInventory = inventory.filter(i => i.id !== item.id);
+    const updatedWagonData = {
+      ...wagonData,
+      [wagon]: [...wagonData[wagon], item],
+    };
+
+    // Save to Supabase
+    const supabase = createClient();
+    const { error: wagonError } = await supabase
+      .from("wagons")
+      .upsert({ id: 1, wagon1: updatedWagonData.wagon1, wagon2: updatedWagonData.wagon2 });
+
+    if (wagonError) {
+      console.error("Error saving wagons:", wagonError);
+      setError("Failed to transfer item");
+      setTimeout(() => setError(""), 3000);
+      return;
+    }
+
+    setWagonData(updatedWagonData);
+    const updates = { inventory: updatedInventory };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
   const weightPercentage = (currentWeight / maxWeight) * 100;
   const isOverweight = currentWeight > maxWeight;
 
@@ -255,10 +298,16 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
         </div>
       )}
 
+      {error && !showAddItem && (
+        <div className="bg-red-900/50 border border-red-500 rounded-lg p-3 max-w-md mx-auto">
+          <p className="text-red-200 text-sm text-center">{error}</p>
+        </div>
+      )}
+
       {/* Inventory List */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="space-y-2 max-w-4xl mx-auto w-full">
         {inventory.length === 0 && !showAddItem && (
-          <div className="col-span-full text-center py-12">
+          <div className="text-center py-12">
             <p className="text-amber-300/60 text-lg">Your inventory is empty</p>
             <p className="text-amber-300/40 text-sm mt-2">Add items to get started</p>
           </div>
@@ -267,36 +316,46 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
         {inventory.map((item) => (
           <div
             key={item.id}
-            className="bg-gray-700 rounded-xl p-5 shadow-lg border border-amber-600/30 hover:border-amber-500/60 transition-all hover:shadow-amber-500/20"
+            className="bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-600/30 hover:border-amber-500/60 transition-all flex items-center justify-between"
           >
-            <div className="flex justify-between items-start mb-3">
-              <h4 className="text-lg font-bold text-amber-300">{item.name}</h4>
-              {item.gearBonus && (
-                <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
-                  +{item.gearBonus}
-                </span>
-              )}
-            </div>
-
-            <div className="mb-4">
-              <div className="flex items-center gap-2 text-amber-200">
-                <span className="text-2xl">⚖️</span>
-                <span className="font-semibold">{item.weight} weight</span>
+            <div className="flex-1">
+              <div className="flex items-center gap-3">
+                <h4 className="font-bold text-amber-300">{item.name}</h4>
+                {item.gearBonus && (
+                  <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
+                    +{item.gearBonus}
+                  </span>
+                )}
+                <span className="text-amber-200 text-sm">⚖️ {item.weight}</span>
               </div>
             </div>
 
             <div className="flex gap-2">
               <button
+                onClick={() => handleTransferToWagon("wagon1", item)}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
+                title="Transfer to Wagon 1"
+              >
+                W1 →
+              </button>
+              <button
+                onClick={() => handleTransferToWagon("wagon2", item)}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
+                title="Transfer to Wagon 2"
+              >
+                W2 →
+              </button>
+              <button
                 onClick={() => handleEditItem(item.id)}
-                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-bold transition-all hover:scale-105"
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-bold transition-all"
               >
                 Edit
               </button>
               <button
                 onClick={() => handleDeleteItem(item.id)}
-                className="flex-1 bg-red-600 hover:bg-red-700 text-white rounded-lg py-2 text-sm font-bold transition-all hover:scale-105"
+                className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-bold transition-all"
               >
-                Delete
+                Del
               </button>
             </div>
           </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CharacterType } from "../app/protected/page";
+import { CharacterType, InventoryItem } from "../app/protected/page";
 
 type Attributes = {
   STR: number;
@@ -17,13 +17,15 @@ type Skill = {
   attribute: keyof Attributes;
 };
 
-type DicePool = "attribute" | "skill" | "both";
+type DicePool = "attribute" | "skill" | "gear" | "attribute+skill" | "attribute+gear" | "skill+gear" | "all";
 
 type RollState = {
   attributeDice: number[];
   skillDice: number[];
+  gearDice: number[];
   poolUsed: DicePool;
   hasBeenPushed: boolean;
+  gearItemId?: string;
 };
 
 const allSkills: Skill[] = [
@@ -53,19 +55,20 @@ type CharacterProps = {
 
 export default function Character({ character, updateCharacter, saveCharacter }: CharacterProps) {
   const [rollStates, setRollStates] = useState<Record<string, RollState>>({
-    STR: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    AGL: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    WIT: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    EMP: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    STR: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    AGL: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    WIT: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    EMP: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
   });
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [selectedAttribute, setSelectedAttribute] = useState<keyof Attributes | null>(null);
+  const [selectedGear, setSelectedGear] = useState<InventoryItem | null>(null);
   const [showPoolSelector, setShowPoolSelector] = useState<keyof Attributes | null>(null);
 
   const clearRoll = (attr: keyof Attributes) => {
     setRollStates(prev => ({
       ...prev,
-      [attr]: { attributeDice: [], skillDice: [], poolUsed: "attribute", hasBeenPushed: false },
+      [attr]: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
     }));
     setShowPoolSelector(null);
   };
@@ -79,7 +82,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
       setSelectedAttribute(skillAttr);
       
       const currentRoll = rollStates[skillAttr];
-      const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+      const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
       if (!hasRoll) {
         setShowPoolSelector(skillAttr);
       }
@@ -88,7 +91,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
 
   const handleAttributeClick = (attr: keyof Attributes) => {
     const currentRoll = rollStates[attr];
-    const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+    const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
 
     if (hasRoll) {
       clearRoll(attr);
@@ -108,47 +111,67 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     }
   };
 
+  const handleGearClick = (item: InventoryItem) => {
+    if (selectedGear?.id === item.id) {
+      setSelectedGear(null);
+    } else {
+      setSelectedGear(item);
+    }
+  };
+
   const rollDice = (attr: keyof Attributes, pool: DicePool) => {
     if (!character) return;
 
     const attrCount = character.attributes[attr];
     const skillPoints = selectedSkill ? (character.skills[selectedSkill] ?? 0) : 0;
+    const gearBonus = selectedGear?.gearBonus ?? 0;
 
     let attributeDice: number[] = [];
     let skillDice: number[] = [];
+    let gearDice: number[] = [];
 
-    if (pool === "attribute" || pool === "both") {
+    if (pool === "attribute" || pool === "attribute+skill" || pool === "attribute+gear" || pool === "all") {
       attributeDice = Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1);
     }
 
-    if (pool === "skill" || pool === "both") {
+    if (pool === "skill" || pool === "attribute+skill" || pool === "skill+gear" || pool === "all") {
       skillDice = Array.from({ length: skillPoints }, () => Math.floor(Math.random() * 6) + 1);
+    }
+
+    if (pool === "gear" || pool === "attribute+gear" || pool === "skill+gear" || pool === "all") {
+      gearDice = Array.from({ length: gearBonus }, () => Math.floor(Math.random() * 6) + 1);
     }
 
     setRollStates(prev => ({
       ...prev,
-      [attr]: { attributeDice, skillDice, poolUsed: pool, hasBeenPushed: false },
+      [attr]: { 
+        attributeDice, 
+        skillDice, 
+        gearDice, 
+        poolUsed: pool, 
+        hasBeenPushed: false,
+        gearItemId: selectedGear?.id 
+      },
     }));
     setShowPoolSelector(null);
   };
 
-  const calculateSpiritGain = (attrSixes: number, skillSixes: number): number => {
-    const totalSixes = attrSixes + skillSixes;
+  const calculateSpiritGain = (attrSixes: number, skillSixes: number, gearSixes: number): number => {
+    const totalSixes = attrSixes + skillSixes + gearSixes;
     if (totalSixes === 0) return 0;
     
-    let remainingSkillSixes = skillSixes;
-    let remainingAttrSixes = attrSixes;
+    let remainingSixes = totalSixes;
     
-    if (remainingSkillSixes > 0) {
-      remainingSkillSixes -= 1;
-    } else if (remainingAttrSixes > 0) {
-      remainingAttrSixes -= 1;
-    }
+    // First six doesn't count
+    remainingSixes -= 1;
     
-    return remainingAttrSixes;
+    // Only attribute and gear sixes can contribute to spirit gain
+    const contributingSixes = attrSixes + gearSixes;
+    
+    return Math.min(remainingSixes, contributingSixes - (totalSixes > attrSixes + gearSixes ? 1 : 0));
   };
 
-  const pushDice = async (attr: keyof Attributes, pushPool: "attribute" | "skill" | "both") => {
+  const pushDice = async (attr: keyof Attributes, pushPools: string[]) => {
     if (!character) return;
 
     const currentRoll = rollStates[attr];
@@ -156,35 +179,72 @@ export default function Character({ character, updateCharacter, saveCharacter }:
 
     let newAttributeDice = currentRoll.attributeDice;
     let newSkillDice = currentRoll.skillDice;
+    let newGearDice = currentRoll.gearDice;
 
-    if (pushPool === "attribute" || pushPool === "both") {
+    const pushAttribute = pushPools.includes("attribute");
+    const pushSkill = pushPools.includes("skill");
+    const pushGear = pushPools.includes("gear");
+
+    if (pushAttribute) {
       newAttributeDice = currentRoll.attributeDice.map(d =>
         d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
       );
     }
 
-    if (pushPool === "skill" || pushPool === "both") {
+    if (pushSkill) {
       newSkillDice = currentRoll.skillDice.map(d =>
+        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
+      );
+    }
+
+    if (pushGear) {
+      newGearDice = currentRoll.gearDice.map(d =>
         d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
       );
     }
 
     const attrSixes = newAttributeDice.filter(d => d === 6).length;
     const skillSixes = newSkillDice.filter(d => d === 6).length;
+    const gearSixes = newGearDice.filter(d => d === 6).length;
     
-    const extraSpirit = calculateSpiritGain(attrSixes, skillSixes);
+    const extraSpirit = calculateSpiritGain(attrSixes, skillSixes, gearSixes);
 
-    const attrOnes = (pushPool === "attribute" || pushPool === "both") 
-      ? newAttributeDice.filter(d => d === 1).length 
-      : 0;
+    const attrOnes = pushAttribute ? newAttributeDice.filter(d => d === 1).length : 0;
+    const gearOnes = pushGear ? newGearDice.filter(d => d === 1).length : 0;
+    
     const attrDecrease = attrOnes;
 
     const newSpirits = (character.spirits ?? 0) + extraSpirit;
     const newAttrValue = Math.max(0, (character.attributes[attr] ?? 0) - attrDecrease);
 
+    // Handle gear damage
+    let updatedInventory = character.inventory || [];
+    if (gearOnes > 0 && currentRoll.gearItemId) {
+      updatedInventory = updatedInventory.map(item => {
+        if (item.id === currentRoll.gearItemId && item.gearBonus) {
+          const newGearBonus = Math.max(0, item.gearBonus - gearOnes);
+          return { ...item, gearBonus: newGearBonus > 0 ? newGearBonus : undefined };
+        }
+        return item;
+      }).filter(item => {
+        // Remove gear with 0 bonus (destroyed)
+        if (item.id === currentRoll.gearItemId && item.gearBonus === undefined) {
+          return false;
+        }
+        return true;
+      });
+
+      // Clear selected gear if it was destroyed
+      const gearStillExists = updatedInventory.find(item => item.id === currentRoll.gearItemId);
+      if (!gearStillExists) {
+        setSelectedGear(null);
+      }
+    }
+
     const updates = {
       spirits: newSpirits,
       attributes: { ...character.attributes, [attr]: newAttrValue },
+      inventory: updatedInventory,
     };
 
     updateCharacter(updates);
@@ -195,8 +255,10 @@ export default function Character({ character, updateCharacter, saveCharacter }:
       [attr]: {
         attributeDice: newAttributeDice,
         skillDice: newSkillDice,
+        gearDice: newGearDice,
         poolUsed: currentRoll.poolUsed,
         hasBeenPushed: true,
+        gearItemId: currentRoll.gearItemId,
       },
     }));
   };
@@ -207,14 +269,15 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     points: character?.skills[skill.name] ?? 0,
   }));
 
-  const renderDie = (num: number, bouncing: boolean, isSkillDie: boolean) => {
+  const renderDie = (num: number, bouncing: boolean, dieType: "attribute" | "skill" | "gear") => {
     const icon = num === 6 ? "✅" : num === 1 ? "❌" : "⚪";
     const color = num === 6 ? "text-green-400" : num === 1 ? "text-red-500" : "text-gray-400";
-    const bgColor = isSkillDie ? "bg-blue-700" : "bg-gray-700";
+    const bgColor = dieType === "skill" ? "bg-blue-700" : dieType === "gear" ? "bg-purple-700" : "bg-gray-700";
+    const borderColor = dieType === "skill" ? "border-blue-400" : dieType === "gear" ? "border-purple-400" : "border-gray-500";
     
     return (
       <div
-        className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg ${bouncing ? "animate-bounce" : ""} ${bgColor} border-2 ${isSkillDie ? "border-blue-400" : "border-gray-500"}`}
+        className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg ${bouncing ? "animate-bounce" : ""} ${bgColor} border-2 ${borderColor}`}
       >
         <span className={`text-xl font-bold ${color}`}>{icon}</span>
       </div>
@@ -224,6 +287,8 @@ export default function Character({ character, updateCharacter, saveCharacter }:
   if (!character) {
     return <p className="text-amber-300 text-center">No character found for your account.</p>;
   }
+
+  const gearWithBonus = (character.inventory || []).filter(item => item.gearBonus && item.gearBonus > 0);
 
   return (
     <div className="flex flex-col gap-8">
@@ -236,11 +301,33 @@ export default function Character({ character, updateCharacter, saveCharacter }:
         </p>
       </div>
 
+      {/* Gear Selection */}
+      {gearWithBonus.length > 0 && (
+        <div className="bg-gray-900 rounded-lg p-4 border border-purple-500/40">
+          <h3 className="text-lg font-bold text-purple-300 mb-3">Select Gear</h3>
+          <div className="flex flex-wrap gap-2">
+            {gearWithBonus.map(item => (
+              <button
+                key={item.id}
+                onClick={() => handleGearClick(item)}
+                className={`px-4 py-2 rounded-lg font-semibold transition-all ${
+                  selectedGear?.id === item.id
+                    ? "bg-purple-600 text-white ring-2 ring-purple-400"
+                    : "bg-gray-700 text-purple-200 hover:bg-gray-600"
+                }`}
+              >
+                {item.name} (+{item.gearBonus})
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-4 gap-6 mt-6">
         {attributesOrder.map(attr => {
           const attrSkills = characterSkills.filter(skill => skill.attribute === attr);
           const currentRoll = rollStates[attr];
-          const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0;
+          const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
           const canPush = hasRoll && !currentRoll.hasBeenPushed;
           const isAttrSelected = selectedAttribute === attr;
           
@@ -282,18 +369,50 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       Attribute Only
                     </button>
                     {selectedSkill && (
+                      <button
+                        onClick={() => rollDice(attr, "skill")}
+                        className="bg-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Skill Only
+                      </button>
+                    )}
+                    {selectedGear && (
+                      <button
+                        onClick={() => rollDice(attr, "gear")}
+                        className="bg-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Gear Only
+                      </button>
+                    )}
+                    {selectedSkill && (
+                      <button
+                        onClick={() => rollDice(attr, "attribute+skill")}
+                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Attr + Skill
+                      </button>
+                    )}
+                    {selectedGear && (
+                      <button
+                        onClick={() => rollDice(attr, "attribute+gear")}
+                        className="bg-gradient-to-r from-amber-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Attr + Gear
+                      </button>
+                    )}
+                    {selectedSkill && selectedGear && (
                       <>
                         <button
-                          onClick={() => rollDice(attr, "skill")}
-                          className="bg-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                          onClick={() => rollDice(attr, "skill+gear")}
+                          className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
                         >
-                          Skill Only ({selectedSkill})
+                          Skill + Gear
                         </button>
                         <button
-                          onClick={() => rollDice(attr, "both")}
-                          className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                          onClick={() => rollDice(attr, "all")}
+                          className="bg-gradient-to-r from-amber-500 via-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
                         >
-                          Both Pools
+                          All Pools
                         </button>
                       </>
                     )}
@@ -309,7 +428,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, "attribute");
+                          pushDice(attr, ["attribute"]);
                         }}
                         className="bg-amber-500 text-gray-900 rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
@@ -320,22 +439,66 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, "skill");
+                          pushDice(attr, ["skill"]);
                         }}
                         className="bg-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
                         ⚡ Skill
                       </button>
                     )}
+                    {currentRoll.gearDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["gear"]);
+                        }}
+                        className="bg-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Gear
+                      </button>
+                    )}
                     {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, "both");
+                          pushDice(attr, ["attribute", "skill"]);
+                        }}
+                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Attr + Skill
+                      </button>
+                    )}
+                    {currentRoll.attributeDice.length > 0 && currentRoll.gearDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["attribute", "gear"]);
+                        }}
+                        className="bg-gradient-to-r from-amber-500 to-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Attr + Gear
+                      </button>
+                    )}
+                    {currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["skill", "gear"]);
+                        }}
+                        className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Skill + Gear
+                      </button>
+                    )}
+                    {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["attribute", "skill", "gear"]);
                         }}
                         className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
-                        ⚡ Both
+                        ⚡ All Pools
                       </button>
                     )}
                   </div>
@@ -350,19 +513,31 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       <div className="flex gap-2 flex-wrap justify-center">
                         {currentRoll.attributeDice.map((die, i) => (
                           <div key={`attr-${i}`}>
-                            {renderDie(die, false, false)}
+                            {renderDie(die, false, "attribute")}
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
                   {currentRoll.skillDice.length > 0 && (
-                    <div>
+                    <div className="mb-3">
                       <p className="text-xs text-blue-300 mb-2 font-semibold">Skill Dice:</p>
                       <div className="flex gap-2 flex-wrap justify-center">
                         {currentRoll.skillDice.map((die, i) => (
                           <div key={`skill-${i}`}>
-                            {renderDie(die, false, true)}
+                            {renderDie(die, false, "skill")}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {currentRoll.gearDice.length > 0 && (
+                    <div>
+                      <p className="text-xs text-purple-300 mb-2 font-semibold">Gear Dice:</p>
+                      <div className="flex gap-2 flex-wrap justify-center">
+                        {currentRoll.gearDice.map((die, i) => (
+                          <div key={`gear-${i}`}>
+                            {renderDie(die, false, "gear")}
                           </div>
                         ))}
                       </div>

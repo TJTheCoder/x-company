@@ -49,8 +49,8 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
       return;
     }
 
-    if (formData.gearBonus.trim() && (isNaN(gearBonus!) || gearBonus === 0)) {
-      setError("Gear bonus must be a non-zero integer");
+    if (formData.gearBonus.trim() && (isNaN(gearBonus!) || gearBonus! <= 0)) {
+      setError("Gear bonus must be a positive integer");
       return;
     }
 
@@ -103,8 +103,8 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
       return;
     }
 
-    if (formData.gearBonus.trim() && (isNaN(gearBonus!) || gearBonus === 0)) {
-      setError("Gear bonus must be a non-zero integer");
+    if (formData.gearBonus.trim() && (isNaN(gearBonus!) || gearBonus! <= 0)) {
+      setError("Gear bonus must be a positive integer");
       return;
     }
 
@@ -234,7 +234,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
                 className="w-full bg-gray-800 border border-amber-600/40 rounded-lg px-4 py-2 text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="1"
               />
-              <p className="text-amber-300/60 text-xs mt-1">Must be a non-zero integer</p>
+              <p className="text-amber-300/60 text-xs mt-1">Must be a positive integer</p>
             </div>
 
             <div className="flex gap-3 mt-2">
@@ -272,12 +272,8 @@ export default function Inventory({ character, updateCharacter, saveCharacter }:
             <div className="flex justify-between items-start mb-3">
               <h4 className="text-lg font-bold text-amber-300">{item.name}</h4>
               {item.gearBonus && (
-                <span className={`px-2 py-1 rounded-full text-xs font-bold ${
-                  item.gearBonus > 0 
-                    ? "bg-green-500/20 text-green-300 border border-green-500/40" 
-                    : "bg-red-500/20 text-red-300 border border-red-500/40"
-                }`}>
-                  {item.gearBonus > 0 ? "+" : ""}{item.gearBonus}
+                <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
+                  +{item.gearBonus}
                 </span>
               )}
             </div>

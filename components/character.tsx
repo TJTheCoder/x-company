@@ -53,62 +53,97 @@ type CharacterProps = {
   saveCharacter: (updates: Partial<CharacterType>) => void;
 };
 
+const emptyRoll = (): RollState => ({
+  attributeDice: [],
+  skillDice: [],
+  gearDice: [],
+  poolUsed: "attribute",
+  hasBeenPushed: false,
+});
+
 export default function Character({ character, updateCharacter, saveCharacter }: CharacterProps) {
   const [rollStates, setRollStates] = useState<Record<string, RollState>>({
-    STR: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    AGL: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    WIT: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    EMP: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
+    STR: emptyRoll(),
+    AGL: emptyRoll(),
+    WIT: emptyRoll(),
+    EMP: emptyRoll(),
   });
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [selectedAttribute, setSelectedAttribute] = useState<keyof Attributes | null>(null);
   const [selectedGear, setSelectedGear] = useState<InventoryItem | null>(null);
   const [showPoolSelector, setShowPoolSelector] = useState<keyof Attributes | null>(null);
 
-  const clearRoll = (attr: keyof Attributes) => {
-    setRollStates(prev => ({
-      ...prev,
-      [attr]: { attributeDice: [], skillDice: [], gearDice: [], poolUsed: "attribute", hasBeenPushed: false },
-    }));
+  // Returns true if the given attribute's roll slot has any dice in it.
+  const hasRollFor = (attr: keyof Attributes) => {
+    const r = rollStates[attr];
+    return r.attributeDice.length > 0 || r.skillDice.length > 0 || r.gearDice.length > 0;
+  };
+
+  // Full reset: clears a roll slot AND drops all UI selections.
+  const clearEverything = (attr: keyof Attributes) => {
+    setRollStates(prev => ({ ...prev, [attr]: emptyRoll() }));
+    setSelectedSkill(null);
+    setSelectedAttribute(null);
+    setSelectedGear(null);
+    setShowPoolSelector(null);
+  };
+
+  // Silently clear the roll on a DIFFERENT attribute without touching selections
+  // (selections will be overwritten by the caller immediately after).
+  const clearPreviousRoll = (incomingAttr: keyof Attributes) => {
+    if (!selectedAttribute || selectedAttribute === incomingAttr) return;
+    if (hasRollFor(selectedAttribute)) {
+      setRollStates(prev => ({ ...prev, [selectedAttribute]: emptyRoll() }));
+    }
     setShowPoolSelector(null);
   };
 
   const handleSkillClick = (skillName: string, skillAttr: keyof Attributes) => {
+    // Clicking the already-selected skill deselects it.
     if (selectedSkill === skillName) {
       setSelectedSkill(null);
       setSelectedAttribute(null);
-    } else {
-      setSelectedSkill(skillName);
-      setSelectedAttribute(skillAttr);
-      
-      const currentRoll = rollStates[skillAttr];
-      const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
-      if (!hasRoll) {
-        setShowPoolSelector(skillAttr);
-      }
+      setShowPoolSelector(null);
+      return;
+    }
+
+    // If this skill belongs to a DIFFERENT attribute than what's currently active,
+    // clear that previous attribute's roll first.
+    clearPreviousRoll(skillAttr);
+
+    setSelectedSkill(skillName);
+    setSelectedAttribute(skillAttr);
+
+    if (!hasRollFor(skillAttr)) {
+      setShowPoolSelector(skillAttr);
     }
   };
 
   const handleAttributeClick = (attr: keyof Attributes) => {
-    const currentRoll = rollStates[attr];
-    const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
-
-    if (hasRoll) {
-      clearRoll(attr);
-    } else {
-      if (selectedAttribute === attr) {
-        setSelectedAttribute(null);
-        setSelectedSkill(null);
-        setShowPoolSelector(null);
-      } else {
-        setSelectedAttribute(attr);
-        const skill = allSkills.find(s => s.name === selectedSkill);
-        if (skill && skill.attribute !== attr) {
-          setSelectedSkill(null);
-        }
-        setShowPoolSelector(attr);
-      }
+    // If this attribute already has a roll, clicking it clears everything.
+    if (hasRollFor(attr)) {
+      clearEverything(attr);
+      return;
     }
+
+    // Toggling the same attribute off.
+    if (selectedAttribute === attr) {
+      setSelectedAttribute(null);
+      setSelectedSkill(null);
+      setShowPoolSelector(null);
+      return;
+    }
+
+    // Switching to a new attribute — clear the old roll if one exists.
+    clearPreviousRoll(attr);
+
+    setSelectedAttribute(attr);
+    // If the currently selected skill doesn't belong to this attribute, drop it.
+    const skill = allSkills.find(s => s.name === selectedSkill);
+    if (skill && skill.attribute !== attr) {
+      setSelectedSkill(null);
+    }
+    setShowPoolSelector(attr);
   };
 
   const handleGearClick = (item: InventoryItem) => {
@@ -121,13 +156,11 @@ export default function Character({ character, updateCharacter, saveCharacter }:
 
   const incrementAttribute = (attr: keyof Attributes) => {
     if (!character) return;
-    
     const currentValue = character.attributes[attr];
     const maxValue = character.max_attributes[attr];
-    
     if (currentValue < maxValue) {
       const updates = {
-        attributes: { ...character.attributes, [attr]: currentValue + 1 }
+        attributes: { ...character.attributes, [attr]: currentValue + 1 },
       };
       updateCharacter(updates);
       saveCharacter(updates);
@@ -136,12 +169,10 @@ export default function Character({ character, updateCharacter, saveCharacter }:
 
   const decrementAttribute = (attr: keyof Attributes) => {
     if (!character) return;
-    
     const currentValue = character.attributes[attr];
-    
     if (currentValue > 0) {
       const updates = {
-        attributes: { ...character.attributes, [attr]: currentValue - 1 }
+        attributes: { ...character.attributes, [attr]: currentValue - 1 },
       };
       updateCharacter(updates);
       saveCharacter(updates);
@@ -162,24 +193,22 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     if (pool === "attribute" || pool === "attribute+skill" || pool === "attribute+gear" || pool === "all") {
       attributeDice = Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1);
     }
-
     if (pool === "skill" || pool === "attribute+skill" || pool === "skill+gear" || pool === "all") {
       skillDice = Array.from({ length: skillPoints }, () => Math.floor(Math.random() * 6) + 1);
     }
-
     if (pool === "gear" || pool === "attribute+gear" || pool === "skill+gear" || pool === "all") {
       gearDice = Array.from({ length: gearBonus }, () => Math.floor(Math.random() * 6) + 1);
     }
 
     setRollStates(prev => ({
       ...prev,
-      [attr]: { 
-        attributeDice, 
-        skillDice, 
-        gearDice, 
-        poolUsed: pool, 
+      [attr]: {
+        attributeDice,
+        skillDice,
+        gearDice,
+        poolUsed: pool,
         hasBeenPushed: false,
-        gearItemId: selectedGear?.id 
+        gearItemId: selectedGear?.id,
       },
     }));
     setShowPoolSelector(null);
@@ -188,16 +217,16 @@ export default function Character({ character, updateCharacter, saveCharacter }:
   const calculateSpiritGain = (attrSixes: number, skillSixes: number, gearSixes: number): number => {
     const totalSixes = attrSixes + skillSixes + gearSixes;
     if (totalSixes === 0) return 0;
-    
+
     let remainingSixes = totalSixes;
-    
+
     // First six doesn't count
     remainingSixes -= 1;
-    
+
     // Only attribute and gear sixes can contribute to spirit gain
     const contributingSixes = attrSixes + gearSixes;
-    
-    return Math.min(remainingSixes, contributingSixes - (totalSixes > attrSixes + gearSixes ? 1 : 0));
+
+    return Math.min(remainingSixes, contributingSixes);
   };
 
   const pushDice = async (attr: keyof Attributes, pushPools: string[]) => {
@@ -206,47 +235,36 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     const currentRoll = rollStates[attr];
     if (currentRoll.hasBeenPushed) return;
 
-    let newAttributeDice = currentRoll.attributeDice;
-    let newSkillDice = currentRoll.skillDice;
-    let newGearDice = currentRoll.gearDice;
+    // --- Reroll phase: only the selected pools get rerolled (1s and 6s kept) ---
+    const newAttributeDice = pushPools.includes("attribute")
+      ? currentRoll.attributeDice.map(d => (d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1))
+      : currentRoll.attributeDice;
 
-    const pushAttribute = pushPools.includes("attribute");
-    const pushSkill = pushPools.includes("skill");
-    const pushGear = pushPools.includes("gear");
+    const newSkillDice = pushPools.includes("skill")
+      ? currentRoll.skillDice.map(d => (d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1))
+      : currentRoll.skillDice;
 
-    if (pushAttribute) {
-      newAttributeDice = currentRoll.attributeDice.map(d =>
-        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
-      );
-    }
+    const newGearDice = pushPools.includes("gear")
+      ? currentRoll.gearDice.map(d => (d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1))
+      : currentRoll.gearDice;
 
-    if (pushSkill) {
-      newSkillDice = currentRoll.skillDice.map(d =>
-        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
-      );
-    }
-
-    if (pushGear) {
-      newGearDice = currentRoll.gearDice.map(d =>
-        d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1
-      );
-    }
-
+    // --- Consequence phase: ALL pools count, regardless of what was pushed ---
     const attrSixes = newAttributeDice.filter(d => d === 6).length;
     const skillSixes = newSkillDice.filter(d => d === 6).length;
     const gearSixes = newGearDice.filter(d => d === 6).length;
-    
+
     const extraSpirit = calculateSpiritGain(attrSixes, skillSixes, gearSixes);
 
-    const attrOnes = pushAttribute ? newAttributeDice.filter(d => d === 1).length : 0;
-    const gearOnes = pushGear ? newGearDice.filter(d => d === 1).length : 0;
-    
+    // All attribute ones deal attribute damage; all gear ones deal gear damage.
+    const attrOnes = newAttributeDice.filter(d => d === 1).length;
+    const gearOnes = newGearDice.filter(d => d === 1).length;
+
     const attrDecrease = attrOnes;
 
     const newSpirits = (character.spirits ?? 0) + extraSpirit;
     const newAttrValue = Math.max(0, (character.attributes[attr] ?? 0) - attrDecrease);
 
-    // Handle gear damage
+    // Handle gear damage from ALL gear ones
     let updatedInventory = character.inventory || [];
     if (gearOnes > 0 && currentRoll.gearItemId) {
       updatedInventory = updatedInventory.map(item => {
@@ -256,14 +274,12 @@ export default function Character({ character, updateCharacter, saveCharacter }:
         }
         return item;
       }).filter(item => {
-        // Remove gear with 0 bonus (destroyed)
         if (item.id === currentRoll.gearItemId && item.gearBonus === undefined) {
           return false;
         }
         return true;
       });
 
-      // Clear selected gear if it was destroyed
       const gearStillExists = updatedInventory.find(item => item.id === currentRoll.gearItemId);
       if (!gearStillExists) {
         setSelectedGear(null);
@@ -279,6 +295,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     updateCharacter(updates);
     saveCharacter(updates);
 
+    // Mark the entire roll as pushed — no further pushes allowed.
     setRollStates(prev => ({
       ...prev,
       [attr]: {
@@ -303,7 +320,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     const color = num === 6 ? "text-green-400" : num === 1 ? "text-red-500" : "text-gray-400";
     const bgColor = dieType === "skill" ? "bg-blue-700" : dieType === "gear" ? "bg-purple-700" : "bg-gray-700";
     const borderColor = dieType === "skill" ? "border-blue-400" : dieType === "gear" ? "border-purple-400" : "border-gray-500";
-    
+
     return (
       <div
         className={`w-12 h-12 rounded-full flex items-center justify-center shadow-lg ${bouncing ? "animate-bounce" : ""} ${bgColor} border-2 ${borderColor}`}
@@ -356,16 +373,16 @@ export default function Character({ character, updateCharacter, saveCharacter }:
         {attributesOrder.map(attr => {
           const attrSkills = characterSkills.filter(skill => skill.attribute === attr);
           const currentRoll = rollStates[attr];
-          const hasRoll = currentRoll.attributeDice.length > 0 || currentRoll.skillDice.length > 0 || currentRoll.gearDice.length > 0;
+          const hasRoll = hasRollFor(attr);
           const canPush = hasRoll && !currentRoll.hasBeenPushed;
           const isAttrSelected = selectedAttribute === attr;
-          
+
           return (
             <div key={attr}>
               <div
                 className={`bg-gray-700 rounded-lg p-4 flex flex-col items-center shadow-md transition-all cursor-pointer relative ${
-                  isAttrSelected 
-                    ? "ring-2 ring-amber-400 bg-gray-600" 
+                  isAttrSelected
+                    ? "ring-2 ring-amber-400 bg-gray-600"
                     : "hover:shadow-amber-500"
                 }`}
                 onClick={() => handleAttributeClick(attr)}
@@ -403,38 +420,28 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                 )}
               </div>
 
+              {/* Pool selector — reversed: All → 2-combos → singles */}
               {showPoolSelector === attr && !hasRoll && (
                 <div className="mt-2 bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-500">
                   <p className="text-sm text-amber-200 mb-2 font-semibold">Select Pool:</p>
                   <div className="flex flex-col gap-2">
-                    <button
-                      onClick={() => rollDice(attr, "attribute")}
-                      className="bg-amber-500 text-gray-900 rounded py-2 font-bold hover:scale-105 transition-all"
-                    >
-                      Attribute Only
-                    </button>
-                    {selectedSkill && (
+                    {/* All (only when both skill and gear are selected) */}
+                    {selectedSkill && selectedGear && (
                       <button
-                        onClick={() => rollDice(attr, "skill")}
-                        className="bg-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                        onClick={() => rollDice(attr, "all")}
+                        className="bg-gradient-to-r from-amber-500 via-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
                       >
-                        Skill Only
+                        All Pools
                       </button>
                     )}
-                    {selectedGear && (
+
+                    {/* 2-pool combos */}
+                    {selectedSkill && selectedGear && (
                       <button
-                        onClick={() => rollDice(attr, "gear")}
-                        className="bg-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                        onClick={() => rollDice(attr, "skill+gear")}
+                        className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
                       >
-                        Gear Only
-                      </button>
-                    )}
-                    {selectedSkill && (
-                      <button
-                        onClick={() => rollDice(attr, "attribute+skill")}
-                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
-                      >
-                        Attr + Skill
+                        Skill + Gear
                       </button>
                     )}
                     {selectedGear && (
@@ -445,72 +452,70 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                         Attr + Gear
                       </button>
                     )}
-                    {selectedSkill && selectedGear && (
-                      <>
-                        <button
-                          onClick={() => rollDice(attr, "skill+gear")}
-                          className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
-                        >
-                          Skill + Gear
-                        </button>
-                        <button
-                          onClick={() => rollDice(attr, "all")}
-                          className="bg-gradient-to-r from-amber-500 via-blue-500 to-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
-                        >
-                          All Pools
-                        </button>
-                      </>
+                    {selectedSkill && (
+                      <button
+                        onClick={() => rollDice(attr, "attribute+skill")}
+                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Attr + Skill
+                      </button>
                     )}
+
+                    {/* Singles */}
+                    {selectedGear && (
+                      <button
+                        onClick={() => rollDice(attr, "gear")}
+                        className="bg-purple-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Gear Only
+                      </button>
+                    )}
+                    {selectedSkill && (
+                      <button
+                        onClick={() => rollDice(attr, "skill")}
+                        className="bg-blue-500 text-white rounded py-2 font-bold hover:scale-105 transition-all"
+                      >
+                        Skill Only
+                      </button>
+                    )}
+                    <button
+                      onClick={() => rollDice(attr, "attribute")}
+                      className="bg-amber-500 text-gray-900 rounded py-2 font-bold hover:scale-105 transition-all"
+                    >
+                      Attribute Only
+                    </button>
                   </div>
                 </div>
               )}
 
+              {/* Push options — reversed: All → 2-combos → singles */}
               {canPush && (
                 <div className="mt-2 bg-gray-900 rounded-lg p-2 border border-amber-600/30">
                   <p className="text-xs text-amber-300 mb-2 font-semibold text-center">Push:</p>
                   <div className="flex flex-col gap-2">
-                    {currentRoll.attributeDice.length > 0 && (
+                    {/* All */}
+                    {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, ["attribute"]);
+                          pushDice(attr, ["attribute", "skill", "gear"]);
                         }}
-                        className="bg-amber-500 text-gray-900 rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                        className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
-                        ⚡ Attribute
+                        ⚡ All Pools
                       </button>
                     )}
-                    {currentRoll.skillDice.length > 0 && (
+
+                    {/* 2-pool combos */}
+                    {currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, ["skill"]);
+                          pushDice(attr, ["skill", "gear"]);
                         }}
-                        className="bg-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                        className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
-                        ⚡ Skill
-                      </button>
-                    )}
-                    {currentRoll.gearDice.length > 0 && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          pushDice(attr, ["gear"]);
-                        }}
-                        className="bg-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
-                      >
-                        ⚡ Gear
-                      </button>
-                    )}
-                    {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          pushDice(attr, ["attribute", "skill"]);
-                        }}
-                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
-                      >
-                        ⚡ Attr + Skill
+                        ⚡ Skill + Gear
                       </button>
                     )}
                     {currentRoll.attributeDice.length > 0 && currentRoll.gearDice.length > 0 && (
@@ -524,32 +529,57 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                         ⚡ Attr + Gear
                       </button>
                     )}
-                    {currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
+                    {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, ["skill", "gear"]);
+                          pushDice(attr, ["attribute", "skill"]);
                         }}
-                        className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                        className="bg-gradient-to-r from-amber-500 to-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
-                        ⚡ Skill + Gear
+                        ⚡ Attr + Skill
                       </button>
                     )}
-                    {currentRoll.attributeDice.length > 0 && currentRoll.skillDice.length > 0 && currentRoll.gearDice.length > 0 && (
+
+                    {/* Singles */}
+                    {currentRoll.gearDice.length > 0 && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          pushDice(attr, ["attribute", "skill", "gear"]);
+                          pushDice(attr, ["gear"]);
                         }}
-                        className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                        className="bg-purple-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
                       >
-                        ⚡ All Pools
+                        ⚡ Gear
+                      </button>
+                    )}
+                    {currentRoll.skillDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["skill"]);
+                        }}
+                        className="bg-blue-500 text-white rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Skill
+                      </button>
+                    )}
+                    {currentRoll.attributeDice.length > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pushDice(attr, ["attribute"]);
+                        }}
+                        className="bg-amber-500 text-gray-900 rounded py-1.5 text-sm font-bold hover:scale-105 transition-all"
+                      >
+                        ⚡ Attribute
                       </button>
                     )}
                   </div>
                 </div>
               )}
 
+              {/* Dice display */}
               {hasRoll && (
                 <div className="mt-4 bg-gray-900 rounded-lg p-3 border border-amber-600/30">
                   {currentRoll.attributeDice.length > 0 && (
@@ -591,6 +621,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                 </div>
               )}
 
+              {/* Skill cards */}
               <div className="mt-4 grid grid-rows-4 gap-4">
                 {attrSkills.map(skill => (
                   <div

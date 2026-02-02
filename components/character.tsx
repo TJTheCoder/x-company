@@ -119,6 +119,35 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     }
   };
 
+  const incrementAttribute = (attr: keyof Attributes) => {
+    if (!character) return;
+    
+    const currentValue = character.attributes[attr];
+    const maxValue = character.max_attributes[attr];
+    
+    if (currentValue < maxValue) {
+      const updates = {
+        attributes: { ...character.attributes, [attr]: currentValue + 1 }
+      };
+      updateCharacter(updates);
+      saveCharacter(updates);
+    }
+  };
+
+  const decrementAttribute = (attr: keyof Attributes) => {
+    if (!character) return;
+    
+    const currentValue = character.attributes[attr];
+    
+    if (currentValue > 0) {
+      const updates = {
+        attributes: { ...character.attributes, [attr]: currentValue - 1 }
+      };
+      updateCharacter(updates);
+      saveCharacter(updates);
+    }
+  };
+
   const rollDice = (attr: keyof Attributes, pool: DicePool) => {
     if (!character) return;
 
@@ -351,6 +380,22 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                   />
                 </div>
                 <span className="mt-1 text-amber-100 font-semibold">{character.attributes[attr]}</span>
+                <div className="flex gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => decrementAttribute(attr)}
+                    disabled={character.attributes[attr] <= 0}
+                    className="bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold w-8 h-8 rounded-full transition-all"
+                  >
+                    -
+                  </button>
+                  <button
+                    onClick={() => incrementAttribute(attr)}
+                    disabled={character.attributes[attr] >= character.max_attributes[attr]}
+                    className="bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold w-8 h-8 rounded-full transition-all"
+                  >
+                    +
+                  </button>
+                </div>
                 {hasRoll && (
                   <div className="absolute top-2 right-2 text-xs text-amber-300 bg-gray-800 px-2 py-1 rounded">
                     Click to clear

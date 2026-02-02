@@ -39,7 +39,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="w-full flex items-center justify-center text-sm text-amber-200 gap-6 py-12 mt-20 border-t border-amber-600/20 backdrop-blur-sm">
-        <p>Powered by mystical forces</p>
+        <p>Hehe, don't look behind you...</p>
       </footer>
     </main>
   );

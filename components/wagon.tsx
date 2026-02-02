@@ -204,6 +204,31 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     }
   };
 
+  const handleSwapToOtherWagon = async (sourceWagon: "wagon1" | "wagon2", item: InventoryItem) => {
+    const targetWagon = sourceWagon === "wagon1" ? "wagon2" : "wagon1";
+    const targetWeight = getCurrentWeight(targetWagon);
+
+    if (targetWeight + item.weight > maxWagonWeight) {
+      setError(`Cannot swap: Would exceed ${targetWagon === "wagon1" ? "Wagon 1" : "Wagon 2"} capacity (${(targetWeight + item.weight).toFixed(1)}/${maxWagonWeight})`);
+      setTimeout(() => setError(""), 3000);
+      return;
+    }
+
+    const updatedWagonData = {
+      ...wagonData,
+      [sourceWagon]: wagonData[sourceWagon].filter(i => i.id !== item.id),
+      [targetWagon]: [...wagonData[targetWagon], item],
+    };
+
+    const saved = await saveWagons(updatedWagonData);
+    if (saved) {
+      setWagonData(updatedWagonData);
+    } else {
+      setError("Failed to swap. Please try again.");
+      setTimeout(() => setError(""), 3000);
+    }
+  };
+
   if (!character) {
     return <p className="text-amber-300 text-center">No character found for your account.</p>;
   }
@@ -350,6 +375,13 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
                   title="Transfer to inventory"
                 >
                   ← Inv
+                </button>
+                <button
+                  onClick={() => handleSwapToOtherWagon(wagon, item)}
+                  className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-sm font-bold transition-all"
+                  title={`Swap to Wagon ${wagon === "wagon1" ? "2" : "1"}`}
+                >
+                  ↔ W{wagon === "wagon1" ? "2" : "1"}
                 </button>
                 <button
                   onClick={() => handleEditItem(wagon, item.id)}

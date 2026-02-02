@@ -15,7 +15,7 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
 
       {/* Optional footer */}
       <footer className="w-full py-6 border-t border-amber-600/20 text-center text-amber-300">
-        Powered by mystical forces
+        Hehe, don't look behind you...
       </footer>
     </div>
   );

@@ -6,6 +6,7 @@ import Character from "../../components/character";
 import Inventory from "../../components/inventory";
 import Wagon from "../../components/wagon";
 import Combat from "../../components/combat";
+import Poll from "../../components/poll";
 
 type Attributes = {
   STR: number;
@@ -40,10 +41,17 @@ type WagonData = {
   wagon2: InventoryItem[];
 };
 
+export type NotificationData = {
+  id: string;
+  message: string;
+  created_at: string;
+  recipient_email?: string;
+};
+
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "wagon" | "combat">("character");
+  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "wagon" | "combat" | "poll">("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [allCharacters, setAllCharacters] = useState<CharacterType[]>([]);
@@ -51,6 +59,7 @@ export default function Dashboard() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [wagonData, setWagonData] = useState<WagonData>({ wagon1: [], wagon2: [] });
   const [uploadingIcon, setUploadingIcon] = useState(false);
+  const [notification, setNotification] = useState<NotificationData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -87,6 +96,53 @@ export default function Dashboard() {
     }
     initializeCharacter();
   }, []);
+
+  // Listen for notifications
+  useEffect(() => {
+    if (!userEmail) return;
+
+    const supabase = createClient();
+
+    // Check for existing notifications on mount
+    const checkNotifications = async () => {
+      const { data, error } = await supabase
+        .from("notifications")
+        .select("*")
+        .or(`recipient_email.eq.${userEmail},recipient_email.is.null`)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (!error && data && data.length > 0) {
+        setNotification(data[0]);
+      }
+    };
+
+    checkNotifications();
+
+    // Subscribe to new notifications
+    const channel = supabase
+      .channel("notifications")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "notifications",
+        },
+        (payload) => {
+          const newNotification = payload.new as NotificationData;
+          // Show notification if it's for this user or for all users
+          if (!newNotification.recipient_email || newNotification.recipient_email === userEmail) {
+            setNotification(newNotification);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userEmail]);
 
   const fetchWagons = async () => {
     const supabase = createClient();
@@ -238,6 +294,18 @@ export default function Dashboard() {
     setCharacter(null);
   };
 
+  const dismissNotification = async () => {
+    if (!notification) return;
+    
+    const supabase = createClient();
+    await supabase
+      .from("notifications")
+      .delete()
+      .eq("id", notification.id);
+    
+    setNotification(null);
+  };
+
   if (showCharacterSelect) {
     return (
       <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
@@ -292,6 +360,22 @@ export default function Dashboard() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
       <div className="max-w-7xl mx-auto flex flex-col gap-4 relative">
+        {/* Notification Popup */}
+        {notification && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-gray-800 p-8 rounded-3xl shadow-2xl border border-amber-600/40 max-w-md w-full mx-4 relative">
+              <button
+                onClick={dismissNotification}
+                className="absolute top-4 right-4 w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center text-amber-200 transition-all"
+              >
+                ✕
+              </button>
+              <h3 className="text-2xl font-bold text-amber-400 mb-4">Notification</h3>
+              <p className="text-amber-100 text-lg">{notification.message}</p>
+            </div>
+          </div>
+        )}
+
         {/* Character Icon - Top Right */}
         {character && (
           <>
@@ -305,7 +389,7 @@ export default function Dashboard() {
             <button
               onClick={handleIconClick}
               disabled={uploadingIcon}
-              className="fixed top-4 right-4 w-20 h-20 rounded-full bg-gradient-to-br from-amber-500 to-amber-700 shadow-lg border-3 border-amber-400 hover:border-amber-300 transition-all hover:scale-105 flex items-center justify-center overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed"
+              className="fixed top-4 right-4 w-20 h-20 rounded-full bg-gradient-to-br from-amber-500 to-amber-700 shadow-lg border-3 border-amber-400 hover:border-amber-300 transition-all hover:scale-105 flex items-center justify-center overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed z-40"
               title="Click to change character icon"
             >
               {character.icon_url ? (
@@ -373,6 +457,16 @@ export default function Dashboard() {
             >
               Combat
             </button>
+            <button
+              onClick={() => setActiveTab("poll")}
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+                activeTab === "poll"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Poll
+            </button>
           </div>
           <div className="flex gap-3">
             {isAdmin && character && (
@@ -421,6 +515,12 @@ export default function Dashboard() {
             />
           )}
           {activeTab === "combat" && <Combat />}
+          {activeTab === "poll" && (
+            <Poll
+              character={character}
+              allCharacters={allCharacters}
+            />
+          )}
         </div>
       </div>
     </main>

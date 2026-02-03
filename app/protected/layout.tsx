@@ -4,8 +4,8 @@ import { AuthGuard } from "@/components/auth-guard";
 export default function ProtectedLayout({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-gray-900 text-amber-50 font-serif flex flex-col">
-      <header className="w-full p-6 border-b border-amber-600/20 flex justify-between items-center">
-        <h1 className="text-3xl font-bold text-amber-400">X Company</h1>
+      <header className="w-full p-3 border-b border-amber-600/20 flex justify-between items-center">
+        <h1 className="text-2xl font-bold text-amber-400">X Company</h1>
       </header>
 
       <div className="flex-1">

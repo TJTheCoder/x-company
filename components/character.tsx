@@ -332,7 +332,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     <>
       <div className="flex flex-col gap-4 pb-4">
         <div className="text-center">
-          <h2 className="text-4xl font-extrabold text-amber-400 drop-shadow-lg">
+          <h2 className="text-3xl font-extrabold text-amber-400 drop-shadow-lg">
             {character.name}
           </h2>
           <p className="text-amber-200 mt-1">

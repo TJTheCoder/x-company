@@ -221,7 +221,7 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
-      <div className="max-w-7xl mx-auto flex flex-col gap-6">
+      <div className="max-w-7xl mx-auto flex flex-col gap-4">
         {/* Tabs */}
         <div className="flex justify-between items-center mb-6">
           <div className="flex gap-4 border-b border-amber-500">

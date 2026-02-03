@@ -113,7 +113,7 @@ export default function Poll({ character, allCharacters }: PollProps) {
         await supabase
           .from("notifications")
           .insert({
-            message: question,
+            message: "(Poll) " + question,
             recipient_email: char.email,
           });
       }

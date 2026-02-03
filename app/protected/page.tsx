@@ -449,7 +449,7 @@ export default function Dashboard() {
             >
               Wagon
             </button>
-            <button
+{/*             <button
               onClick={() => setActiveTab("combat")}
               className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
                 activeTab === "combat"
@@ -458,7 +458,7 @@ export default function Dashboard() {
               }`}
             >
               Combat
-            </button>
+            </button> */}
             <button
               onClick={() => setActiveTab("poll")}
               className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${

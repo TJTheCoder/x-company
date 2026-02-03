@@ -1,9 +1,10 @@
 import { AuthButton } from "@/components/auth-button";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { EnvVarWarning } from "@/components/env-var-warning";
-import { Hero } from "@/components/hero";
+import { HeroWrapper } from "@/components/hero-wrapper";
 import { hasEnvVars } from "@/lib/utils";
 import { Suspense } from "react";
+import { Hero } from "@/components/hero";
 
 export default function Home() {
   return (
@@ -32,9 +33,15 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* Hero Section */}
+      {/* Hero Section
+          HeroWrapper is a server component that checks the session and passes
+          isLoggedIn to Hero.  It lives inside Suspense so the cookies() call
+          doesn't block the page — the fallback renders the logged-out Hero
+          instantly and swaps in the correct state once the check resolves. */}
       <div className="flex-1 flex flex-col items-center justify-center z-10 w-full px-6 mt-16">
-        <Hero />
+        <Suspense fallback={<Hero isLoggedIn={false} />}>
+          <HeroWrapper />
+        </Suspense>
       </div>
 
       {/* Footer */}

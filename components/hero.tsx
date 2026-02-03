@@ -1,6 +1,6 @@
 import { FloatingParticles } from "./floating-particles";
 
-export function Hero() {
+export function Hero({ isLoggedIn }: { isLoggedIn: boolean }) {
   return (
     <div className="relative flex flex-col items-center gap-12 text-center max-w-4xl mx-auto">
 
@@ -24,18 +24,29 @@ export function Hero() {
 
       {/* Action Buttons */}
       <div className="flex gap-6 mt-8 animate-fade-in delay-400">
-        <a
-          href="/auth/login"
-          className="px-12 py-3 bg-gradient-to-r from-amber-500 to-yellow-400 text-gray-900 font-semibold rounded-3xl shadow-2xl hover:scale-105 transform transition-all duration-300 hover:shadow-3xl"
-        >
-          Enter the Archives
-        </a>
-        <a
-          href="/auth/sign-up"
-          className="px-12 py-3 border-2 border-amber-400 text-amber-200 font-semibold rounded-3xl hover:bg-amber-600/20 transform transition-all duration-300 hover:scale-105"
-        >
-          Begin Your Chronicle
-        </a>
+        {isLoggedIn ? (
+          <a
+            href="/protected"
+            className="px-12 py-3 bg-gradient-to-r from-amber-500 to-yellow-400 text-gray-900 font-semibold rounded-3xl shadow-2xl hover:scale-105 transform transition-all duration-300 hover:shadow-3xl"
+          >
+            Continue Your Legend
+          </a>
+        ) : (
+          <>
+            <a
+              href="/auth/login"
+              className="px-12 py-3 bg-gradient-to-r from-amber-500 to-yellow-400 text-gray-900 font-semibold rounded-3xl shadow-2xl hover:scale-105 transform transition-all duration-300 hover:shadow-3xl"
+            >
+              Continue Your Legend
+            </a>
+            <a
+              href="/auth/sign-up"
+              className="px-12 py-3 border-2 border-amber-400 text-amber-200 font-semibold rounded-3xl hover:bg-amber-600/20 transform transition-all duration-300 hover:scale-105"
+            >
+              Begin Your Chronicle
+            </a>
+          </>
+        )}
       </div>
 
       {/* Stars + magical particles */}

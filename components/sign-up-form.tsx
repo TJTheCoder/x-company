@@ -2,16 +2,6 @@
 
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -57,64 +47,115 @@ export function SignUpForm({
   };
 
   return (
-    <div className={cn("flex flex-col gap-6", className)} {...props}>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-2xl">Sign up</CardTitle>
-          <CardDescription>Create a new account</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSignUp}>
-            <div className="flex flex-col gap-6">
-              <div className="grid gap-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="kaelini@example.com"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center">
-                  <Label htmlFor="password">Password</Label>
-                </div>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center">
-                  <Label htmlFor="repeat-password">Repeat Password</Label>
-                </div>
-                <Input
-                  id="repeat-password"
-                  type="password"
-                  required
-                  value={repeatPassword}
-                  onChange={(e) => setRepeatPassword(e.target.value)}
-                />
-              </div>
-              {error && <p className="text-sm text-red-500">{error}</p>}
-              <Button type="submit" className="w-full" disabled={isLoading}>
-                {isLoading ? "Creating an account..." : "Sign up"}
-              </Button>
+    <div className={cn("flex flex-col items-center gap-6", className)} {...props}>
+      {/* Emblem */}
+      <div className="relative w-24 h-24 rounded-full bg-gradient-to-br from-amber-700 to-yellow-400 shadow-xl flex items-center justify-center ring-4 ring-amber-500/30">
+        <span className="text-4xl font-black text-gray-900 drop-shadow-lg">🜚</span>
+        <div className="absolute inset-0 rounded-full bg-gradient-to-r from-yellow-400/20 via-amber-300/10 to-yellow-400/20 blur-2xl animate-pulse"></div>
+      </div>
+
+      {/* Card */}
+      <div className="w-full bg-gray-800/90 backdrop-blur-sm border border-amber-600/30 rounded-2xl shadow-2xl overflow-hidden">
+        {/* Top glow strip */}
+        <div className="h-1 bg-gradient-to-r from-transparent via-amber-500 to-transparent" />
+
+        <div className="p-8">
+          {/* Header */}
+          <div className="text-center mb-8">
+            <h2 className="text-3xl font-extrabold text-amber-400 drop-shadow-lg tracking-wide">
+              Forge Your Chronicle
+            </h2>
+            <p className="text-amber-300/70 mt-2 text-sm">
+              Inscribe your name among the legends
+            </p>
+          </div>
+
+          {/* Rune divider */}
+          <div className="flex items-center justify-center gap-3 mb-8">
+            <div className="h-px flex-1 bg-gradient-to-r from-transparent to-amber-600/40" />
+            <span className="text-amber-600/60 text-xs tracking-widest">✦</span>
+            <div className="h-px flex-1 bg-gradient-to-l from-transparent to-amber-600/40" />
+          </div>
+
+          {/* Form */}
+          <form onSubmit={handleSignUp} className="flex flex-col gap-5">
+            <div className="flex flex-col gap-2">
+              <label htmlFor="email" className="text-amber-300 text-sm font-semibold tracking-wide uppercase">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                placeholder="kaelini@example.com"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-gray-900/80 border border-amber-700/40 rounded-lg px-4 py-3 text-amber-100 placeholder-amber-800/60 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all"
+              />
             </div>
-            <div className="mt-4 text-center text-sm">
-              Already have an account?{" "}
-              <Link href="/auth/login" className="underline underline-offset-4">
-                Login
-              </Link>
+
+            <div className="flex flex-col gap-2">
+              <label htmlFor="password" className="text-amber-300 text-sm font-semibold tracking-wide uppercase">
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-gray-900/80 border border-amber-700/40 rounded-lg px-4 py-3 text-amber-100 placeholder-amber-800/60 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all"
+              />
             </div>
+
+            <div className="flex flex-col gap-2">
+              <label htmlFor="repeat-password" className="text-amber-300 text-sm font-semibold tracking-wide uppercase">
+                Confirm Password
+              </label>
+              <input
+                id="repeat-password"
+                type="password"
+                required
+                value={repeatPassword}
+                onChange={(e) => setRepeatPassword(e.target.value)}
+                className="w-full bg-gray-900/80 border border-amber-700/40 rounded-lg px-4 py-3 text-amber-100 placeholder-amber-800/60 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all"
+              />
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full mt-2 py-3 rounded-lg bg-gradient-to-r from-amber-500 via-amber-400 to-yellow-400 text-gray-900 font-bold text-base tracking-wide shadow-lg hover:shadow-amber-500/30 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+            >
+              {isLoading ? "Forging Chronicle..." : "Begin Your Chronicle"}
+            </button>
           </form>
-        </CardContent>
-      </Card>
+
+          {/* Rune divider */}
+          <div className="flex items-center justify-center gap-3 mt-7">
+            <div className="h-px flex-1 bg-gradient-to-r from-transparent to-amber-600/40" />
+            <span className="text-amber-600/60 text-xs tracking-widest">✦</span>
+            <div className="h-px flex-1 bg-gradient-to-l from-transparent to-amber-600/40" />
+          </div>
+
+          {/* Login link */}
+          <p className="text-center text-amber-400/60 text-sm mt-5">
+            Already a legend?{" "}
+            <Link
+              href="/auth/login"
+              className="text-amber-400 hover:text-amber-300 underline underline-offset-4 transition-colors font-semibold"
+            >
+              Return, Traveller
+            </Link>
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

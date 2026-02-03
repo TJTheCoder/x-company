@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Character from "../../components/character";
 import Inventory from "../../components/inventory";
@@ -25,6 +25,7 @@ export type CharacterType = {
   skills: Record<string, number>;
   spirits: number;
   inventory?: InventoryItem[];
+  icon_url?: string;
 };
 
 export type InventoryItem = {
@@ -49,6 +50,8 @@ export default function Dashboard() {
   const [showCharacterSelect, setShowCharacterSelect] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [wagonData, setWagonData] = useState<WagonData>({ wagon1: [], wagon2: [] });
+  const [uploadingIcon, setUploadingIcon] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     async function initializeCharacter() {
@@ -150,6 +153,73 @@ export default function Dashboard() {
       .eq("id", character.id);
   };
 
+  const handleIconClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleIconUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!character || !event.target.files || event.target.files.length === 0) {
+      return;
+    }
+
+    const file = event.target.files[0];
+    
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file');
+      return;
+    }
+
+    // Validate file size (max 2MB)
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Image size must be less than 2MB');
+      return;
+    }
+
+    setUploadingIcon(true);
+
+    try {
+      const supabase = createClient();
+      
+      // Create a unique file name
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${character.id}-${Date.now()}.${fileExt}`;
+      const filePath = `character-icons/${fileName}`;
+
+      // Upload to Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from('character-assets')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: true
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('character-assets')
+        .getPublicUrl(filePath);
+
+      // Update character with new icon URL
+      const updates = { icon_url: publicUrl };
+      updateCharacter(updates);
+      await saveCharacter(updates);
+
+    } catch (error) {
+      console.error('Error uploading icon:', error);
+      alert('Failed to upload icon. Please try again.');
+    } finally {
+      setUploadingIcon(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   const restCharacter = async () => {
     if (!character) return;
     const maxAttrs = character.max_attributes || character.attributes;
@@ -221,7 +291,45 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
-      <div className="max-w-7xl mx-auto flex flex-col gap-4">
+      <div className="max-w-7xl mx-auto flex flex-col gap-4 relative">
+        {/* Character Icon - Top Right */}
+        {character && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleIconUpload}
+              className="hidden"
+            />
+            <button
+              onClick={handleIconClick}
+              disabled={uploadingIcon}
+              className="fixed top-4 right-4 w-20 h-20 rounded-full bg-gradient-to-br from-amber-500 to-amber-700 shadow-lg border-3 border-amber-400 hover:border-amber-300 transition-all hover:scale-105 flex items-center justify-center overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Click to change character icon"
+            >
+              {character.icon_url ? (
+                <img 
+                  src={character.icon_url} 
+                  alt="Character icon" 
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span className="text-4xl">👤</span>
+              )}
+              {uploadingIcon ? (
+                <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                  <div className="w-8 h-8 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              ) : (
+                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <span className="text-2xl">📷</span>
+                </div>
+              )}
+            </button>
+          </>
+        )}
+
         {/* Tabs */}
         <div className="flex justify-between items-center mb-6">
           <div className="flex gap-4 border-b border-amber-500">

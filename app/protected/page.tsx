@@ -76,19 +76,21 @@ export default function Dashboard() {
       // Fetch wagon data
       await fetchWagons();
 
-      if (adminUser) {
-        // Fetch all characters for admin
-        const { data: chars, error } = await supabase
-          .from("characters")
-          .select("*")
-          .order("name");
+      // Fetch all characters for everyone (needed for Poll tab)
+      const { data: chars, error } = await supabase
+        .from("characters")
+        .select("*")
+        .order("name");
 
-        if (error) {
-          console.error(error);
-        } else {
-          setAllCharacters(chars || []);
-          setShowCharacterSelect(true);
-        }
+      if (error) {
+        console.error(error);
+      } else {
+        setAllCharacters(chars || []);
+      }
+
+      if (adminUser) {
+        // Show character select for admin
+        setShowCharacterSelect(true);
       } else {
         // Fetch user's character
         await fetchCharacter(email);
@@ -370,7 +372,7 @@ export default function Dashboard() {
               >
                 ✕
               </button>
-              <h3 className="text-2xl font-bold text-amber-400 mb-4">Notification</h3>
+              <h3 className="text-2xl font-bold text-amber-400 mb-4">Pigeon Message!</h3>
               <p className="text-amber-100 text-lg">{notification.message}</p>
             </div>
           </div>

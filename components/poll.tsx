@@ -104,18 +104,6 @@ export default function Poll({ character, allCharacters }: PollProps) {
     if (!pollData || !question.trim()) return;
 
     const votes = pollData.votes || {};
-    const totalVotes = Object.values(votes).filter(v => v !== null).length;
-    const ayeVotes = Object.values(votes).filter(v => v === "aye").length;
-    const nayVotes = Object.values(votes).filter(v => v === "nay").length;
-
-    // Check if majority is reached
-    const totalCharacters = allCharacters.length;
-    const majorityThreshold = Math.ceil(totalCharacters / 2);
-    
-    if (ayeVotes >= majorityThreshold || nayVotes >= majorityThreshold) {
-      alert("Majority has already been reached. No ping needed.");
-      return;
-    }
 
     // Send notifications to users who haven't voted
     const supabase = createClient();
@@ -125,7 +113,7 @@ export default function Poll({ character, allCharacters }: PollProps) {
         await supabase
           .from("notifications")
           .insert({
-            message: "(Poll) " + question,
+            message: question,
             recipient_email: char.email,
           });
       }
@@ -201,7 +189,7 @@ export default function Poll({ character, allCharacters }: PollProps) {
           />
           <button
             onClick={handlePing}
-            disabled={!question.trim()}
+            disabled={!question.trim() || majorityStatus !== null}
             className="px-6 py-3 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-amber-200 rounded-lg shadow-md font-semibold transition-all hover:scale-105"
           >
             Ping
@@ -315,7 +303,7 @@ export default function Poll({ character, allCharacters }: PollProps) {
       {majorityStatus && (
         <div className="mt-6 p-4 bg-amber-900/30 rounded-lg border border-amber-500">
           <p className="text-center text-amber-100 font-bold text-lg">
-            Majority Reached: {majorityStatus === "aye" ? "AYE" : "NAY"}
+            🎉 Majority Reached: {majorityStatus === "aye" ? "AYE" : "NAY"} 🎉
           </p>
         </div>
       )}

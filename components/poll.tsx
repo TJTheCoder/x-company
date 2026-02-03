@@ -303,7 +303,7 @@ export default function Poll({ character, allCharacters }: PollProps) {
       {majorityStatus && (
         <div className="mt-6 p-4 bg-amber-900/30 rounded-lg border border-amber-500">
           <p className="text-center text-amber-100 font-bold text-lg">
-            🎉 Majority Reached: {majorityStatus === "aye" ? "AYE" : "NAY"} 🎉
+            Majority Reached: {majorityStatus === "aye" ? "AYE" : "NAY"}
           </p>
         </div>
       )}

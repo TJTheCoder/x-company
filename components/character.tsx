@@ -356,11 +356,10 @@ export default function Character({ character, updateCharacter, saveCharacter }:
           <h2 className="text-3xl font-extrabold text-amber-400 drop-shadow-lg">
             {character.name}
           </h2>
-          <p className="text-amber-200 mt-1">
-            Age: {character.age} | Gender: {character.gender}
-          </p>
-          <div className="flex items-center justify-center gap-2 mt-2">
-            <span className="text-amber-200">Spirits: {character.spirits}</span>
+          <div className="flex items-center justify-center gap-2 mt-1">
+            <p className="text-amber-200">
+              Age: {character.age} | Gender: {character.gender} | Spirits: {character.spirits}
+            </p>
             <button
               onClick={decrementSpirit}
               disabled={(character.spirits ?? 0) <= 0}
@@ -441,11 +440,6 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       +
                     </button>
                   </div>
-                  {hasRoll && (
-                    <div className="absolute top-1 right-1 text-xs text-amber-300 bg-gray-800 px-1.5 py-0.5 rounded">
-                      Clear
-                    </div>
-                  )}
                 </div>
 
                 {/* Skill cards - compact version */}
@@ -479,11 +473,21 @@ export default function Character({ character, updateCharacter, saveCharacter }:
               <div className="flex items-start gap-6">
                 {/* Left: Roll Options */}
                 <div className="flex-shrink-0">
-                  <h3 className="text-amber-300 font-bold mb-2 text-sm">
-                    Rolling: {selectedAttribute}
-                    {selectedSkill && ` + ${selectedSkill}`}
-                    {selectedGear && ` + ${selectedGear.name}`}
-                  </h3>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-amber-300 font-bold text-sm">
+                      Rolling: {selectedAttribute}
+                      {selectedSkill && ` + ${selectedSkill}`}
+                      {selectedGear && ` + ${selectedGear.name}`}
+                    </h3>
+                    {hasRoll && !currentRoll?.hasBeenPushed && (
+                      <button
+                        onClick={() => clearEverything(selectedAttribute)}
+                        className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg text-sm font-semibold transition-all"
+                      >
+                        Clear Roll
+                      </button>
+                    )}
+                  </div>
                   
                   {!hasRoll && (
                     <div className="flex flex-wrap gap-2 max-w-md">
@@ -615,6 +619,16 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                         </button>
                       )}
                     </div>
+                  )}
+
+                  {/* Clear button after push */}
+                  {hasRoll && currentRoll?.hasBeenPushed && (
+                    <button
+                      onClick={() => clearEverything(selectedAttribute)}
+                      className="mt-3 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg text-sm font-semibold transition-all"
+                    >
+                      Clear Roll
+                    </button>
                   )}
                 </div>
 

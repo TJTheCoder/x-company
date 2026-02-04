@@ -169,6 +169,27 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     }
   };
 
+  const incrementSpirit = () => {
+    if (!character) return;
+    const updates = {
+      spirits: (character.spirits ?? 0) + 1,
+    };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
+  const decrementSpirit = () => {
+    if (!character) return;
+    const currentValue = character.spirits ?? 0;
+    if (currentValue > 0) {
+      const updates = {
+        spirits: currentValue - 1,
+      };
+      updateCharacter(updates);
+      saveCharacter(updates);
+    }
+  };
+
   const rollDice = (attr: keyof Attributes, pool: DicePool) => {
     if (!character) return;
 
@@ -336,8 +357,24 @@ export default function Character({ character, updateCharacter, saveCharacter }:
             {character.name}
           </h2>
           <p className="text-amber-200 mt-1">
-            Age: {character.age} | Gender: {character.gender} | Spirits: {character.spirits}
+            Age: {character.age} | Gender: {character.gender}
           </p>
+          <div className="flex items-center justify-center gap-2 mt-2">
+            <span className="text-amber-200">Spirits: {character.spirits}</span>
+            <button
+              onClick={decrementSpirit}
+              disabled={(character.spirits ?? 0) <= 0}
+              className="bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold w-6 h-6 rounded-full transition-all text-sm"
+            >
+              -
+            </button>
+            <button
+              onClick={incrementSpirit}
+              className="bg-green-600 hover:bg-green-500 text-white font-bold w-6 h-6 rounded-full transition-all text-sm"
+            >
+              +
+            </button>
+          </div>
         </div>
 
         {/* Gear Selection */}

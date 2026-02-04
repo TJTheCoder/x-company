@@ -24,6 +24,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     name: "",
     weight: "",
     gearBonus: "",
+    quantity: "",
   });
   const [error, setError] = useState("");
 
@@ -32,11 +33,17 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
   }
 
   const inventory = character.inventory || [];
-  const currentWeight = inventory.reduce((sum, item) => sum + item.weight, 0);
+  
+  // Calculate total weight considering quantity
+  const currentWeight = inventory.reduce((sum, item) => {
+    const quantity = item.quantity || 1;
+    return sum + (item.weight * quantity);
+  }, 0);
+  
   const maxWeight = character.max_attributes.STR * 2;
 
   const resetForm = () => {
-    setFormData({ name: "", weight: "", gearBonus: "" });
+    setFormData({ name: "", weight: "", gearBonus: "", quantity: "" });
     setError("");
     setShowAddItem(false);
     setEditingItem(null);
@@ -46,6 +53,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     const name = formData.name.trim();
     const weight = parseFloat(formData.weight);
     const gearBonus = formData.gearBonus.trim() ? parseInt(formData.gearBonus) : undefined;
+    const quantity = formData.quantity.trim() ? parseInt(formData.quantity) : 1;
 
     if (!name) {
       setError("Item name is required");
@@ -62,8 +70,14 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
       return;
     }
 
-    if (currentWeight + weight > maxWeight) {
-      setError(`Cannot add item: Would exceed weight capacity (${currentWeight + weight}/${maxWeight})`);
+    if (formData.quantity.trim() && (isNaN(quantity) || quantity <= 0)) {
+      setError("Quantity must be a positive integer");
+      return;
+    }
+
+    const totalWeight = weight * quantity;
+    if (currentWeight + totalWeight > maxWeight) {
+      setError(`Cannot add item: Would exceed weight capacity (${(currentWeight + totalWeight).toFixed(1)}/${maxWeight})`);
       return;
     }
 
@@ -72,6 +86,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
       name,
       weight,
       gearBonus,
+      quantity: quantity > 1 ? quantity : undefined, // Only store if > 1
     };
 
     const updatedInventory = [...inventory, newItem];
@@ -88,6 +103,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
         name: item.name,
         weight: item.weight.toString(),
         gearBonus: item.gearBonus?.toString() || "",
+        quantity: item.quantity?.toString() || "1",
       });
       setEditingItem(itemId);
       setShowAddItem(true);
@@ -100,6 +116,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     const name = formData.name.trim();
     const weight = parseFloat(formData.weight);
     const gearBonus = formData.gearBonus.trim() ? parseInt(formData.gearBonus) : undefined;
+    const quantity = formData.quantity.trim() ? parseInt(formData.quantity) : 1;
 
     if (!name) {
       setError("Item name is required");
@@ -116,19 +133,26 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
       return;
     }
 
-    const oldItem = inventory.find(i => i.id === editingItem);
-    const otherItemsWeight = inventory.reduce((sum, item) => 
-      item.id === editingItem ? sum : sum + item.weight, 0
-    );
+    if (formData.quantity.trim() && (isNaN(quantity) || quantity <= 0)) {
+      setError("Quantity must be a positive integer");
+      return;
+    }
 
-    if (otherItemsWeight + weight > maxWeight) {
-      setError(`Cannot update item: Would exceed weight capacity (${otherItemsWeight + weight}/${maxWeight})`);
+    const otherItemsWeight = inventory.reduce((sum, item) => {
+      if (item.id === editingItem) return sum;
+      const itemQuantity = item.quantity || 1;
+      return sum + (item.weight * itemQuantity);
+    }, 0);
+
+    const totalWeight = weight * quantity;
+    if (otherItemsWeight + totalWeight > maxWeight) {
+      setError(`Cannot update item: Would exceed weight capacity (${(otherItemsWeight + totalWeight).toFixed(1)}/${maxWeight})`);
       return;
     }
 
     const updatedInventory = inventory.map(item =>
       item.id === editingItem
-        ? { ...item, name, weight, gearBonus }
+        ? { ...item, name, weight, gearBonus, quantity: quantity > 1 ? quantity : undefined }
         : item
     );
 
@@ -147,10 +171,16 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
 
   const handleTransferToWagon = async (wagon: "wagon1" | "wagon2", item: InventoryItem) => {
     const maxWagonWeight = 200;
-    const currentWagonWeight = wagonData[wagon].reduce((sum, i) => sum + i.weight, 0);
+    const currentWagonWeight = wagonData[wagon].reduce((sum, i) => {
+      const wagonQuantity = i.quantity || 1;
+      return sum + (i.weight * wagonQuantity);
+    }, 0);
 
-    if (currentWagonWeight + item.weight > maxWagonWeight) {
-      setError(`Cannot transfer: Would exceed wagon capacity (${(currentWagonWeight + item.weight).toFixed(1)}/${maxWagonWeight})`);
+    const itemQuantity = item.quantity || 1;
+    const itemTotalWeight = item.weight * itemQuantity;
+
+    if (currentWagonWeight + itemTotalWeight > maxWagonWeight) {
+      setError(`Cannot transfer: Would exceed wagon capacity (${(currentWagonWeight + itemTotalWeight).toFixed(1)}/${maxWagonWeight})`);
       setTimeout(() => setError(""), 3000);
       return;
     }
@@ -254,7 +284,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
 
             <div>
               <label className="block text-amber-200 text-sm font-semibold mb-2">
-                Weight *
+                Weight (per item) *
               </label>
               <input
                 type="number"
@@ -277,7 +307,19 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
                 className="w-full bg-gray-800 border border-amber-600/40 rounded-lg px-4 py-2 text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="1"
               />
-              <p className="text-amber-300/60 text-xs mt-1">Must be a positive integer</p>
+            </div>
+
+            <div>
+              <label className="block text-amber-200 text-sm font-semibold mb-2">
+                Quantity (optional)
+              </label>
+              <input
+                type="number"
+                value={formData.quantity}
+                onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
+                className="w-full bg-gray-800 border border-amber-600/40 rounded-lg px-4 py-2 text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                placeholder="1"
+              />
             </div>
 
             <div className="flex gap-3 mt-2">
@@ -313,53 +355,63 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
           </div>
         )}
 
-        {inventory.map((item) => (
-          <div
-            key={item.id}
-            className="bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-600/30 hover:border-amber-500/60 transition-all flex items-center justify-between"
-          >
-            <div className="flex-1">
-              <div className="flex items-center gap-3">
-                <h4 className="font-bold text-amber-300">{item.name}</h4>
-                {item.gearBonus && (
-                  <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
-                    +{item.gearBonus}
-                  </span>
-                )}
-                <span className="text-amber-200 text-sm">⚖️ {item.weight}</span>
+        {inventory.map((item) => {
+          const quantity = item.quantity || 1;
+          const totalWeight = item.weight * quantity;
+          
+          return (
+            <div
+              key={item.id}
+              className="bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-600/30 hover:border-amber-500/60 transition-all flex items-center justify-between"
+            >
+              <div className="flex-1">
+                <div className="flex items-center gap-3">
+                  <h4 className="font-bold text-amber-300">{item.name}</h4>
+                  {quantity > 1 && (
+                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                      ×{quantity}
+                    </span>
+                  )}
+                  {item.gearBonus && (
+                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
+                      +{item.gearBonus}
+                    </span>
+                  )}
+                  <span className="text-amber-200 text-sm">⚖️ {totalWeight.toFixed(1)}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleTransferToWagon("wagon1", item)}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
+                  title="Transfer to Wagon 1"
+                >
+                  W1 →
+                </button>
+                <button
+                  onClick={() => handleTransferToWagon("wagon2", item)}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
+                  title="Transfer to Wagon 2"
+                >
+                  W2 →
+                </button>
+                <button
+                  onClick={() => handleEditItem(item.id)}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-bold transition-all"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDeleteItem(item.id)}
+                  className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-bold transition-all"
+                >
+                  Del
+                </button>
               </div>
             </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => handleTransferToWagon("wagon1", item)}
-                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
-                title="Transfer to Wagon 1"
-              >
-                W1 →
-              </button>
-              <button
-                onClick={() => handleTransferToWagon("wagon2", item)}
-                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"
-                title="Transfer to Wagon 2"
-              >
-                W2 →
-              </button>
-              <button
-                onClick={() => handleEditItem(item.id)}
-                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-bold transition-all"
-              >
-                Edit
-              </button>
-              <button
-                onClick={() => handleDeleteItem(item.id)}
-                className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-bold transition-all"
-              >
-                Del
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

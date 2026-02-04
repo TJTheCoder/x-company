@@ -34,6 +34,7 @@ export type InventoryItem = {
   name: string;
   weight: number;
   gearBonus?: number;
+  quantity?: number;
 };
 
 type WagonData = {

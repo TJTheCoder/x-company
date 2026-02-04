@@ -162,6 +162,49 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     resetForm();
   };
 
+  const handleDecrementQuantity = (itemId: string) => {
+    const item = inventory.find(i => i.id === itemId);
+    if (!item) return;
+
+    const currentQuantity = item.quantity || 1;
+    if (currentQuantity <= 1) {
+      // If quantity is 1, delete the item
+      handleDeleteItem(itemId);
+      return;
+    }
+
+    const updatedInventory = inventory.map(i =>
+      i.id === itemId
+        ? { ...i, quantity: currentQuantity - 1 > 1 ? currentQuantity - 1 : undefined }
+        : i
+    );
+
+    const updates = { inventory: updatedInventory };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
+  const handleDecrementGearBonus = (itemId: string) => {
+    const item = inventory.find(i => i.id === itemId);
+    if (!item || !item.gearBonus) return;
+
+    if (item.gearBonus <= 1) {
+      // If gear bonus is 1, delete the item
+      handleDeleteItem(itemId);
+      return;
+    }
+
+    const updatedInventory = inventory.map(i =>
+      i.id === itemId
+        ? { ...i, gearBonus: item.gearBonus! - 1 }
+        : i
+    );
+
+    const updates = { inventory: updatedInventory };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
   const handleDeleteItem = (itemId: string) => {
     const updatedInventory = inventory.filter(item => item.id !== itemId);
     const updates = { inventory: updatedInventory };
@@ -368,14 +411,22 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
                 <div className="flex items-center gap-3">
                   <h4 className="font-bold text-amber-300">{item.name}</h4>
                   {quantity > 1 && (
-                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                    <button
+                      onClick={() => handleDecrementQuantity(item.id)}
+                      className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 hover:bg-blue-500/30 transition-all cursor-pointer"
+                      title="Click to decrease quantity"
+                    >
                       ×{quantity}
-                    </span>
+                    </button>
                   )}
                   {item.gearBonus && (
-                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
+                    <button
+                      onClick={() => handleDecrementGearBonus(item.id)}
+                      className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40 hover:bg-green-500/30 transition-all cursor-pointer"
+                      title="Click to decrease gear bonus"
+                    >
                       +{item.gearBonus}
-                    </span>
+                    </button>
                   )}
                   <span className="text-amber-200 text-sm">⚖️ {totalWeight.toFixed(1)}</span>
                 </div>

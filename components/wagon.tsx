@@ -198,6 +198,57 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     }
   };
 
+  const handleDecrementQuantity = async (wagon: "wagon1" | "wagon2", itemId: string) => {
+    const item = wagonData[wagon].find(i => i.id === itemId);
+    if (!item) return;
+
+    const currentQuantity = item.quantity || 1;
+    if (currentQuantity <= 1) {
+      // If quantity is 1, delete the item
+      await handleDeleteItem(wagon, itemId);
+      return;
+    }
+
+    const updatedWagonData = {
+      ...wagonData,
+      [wagon]: wagonData[wagon].map(i =>
+        i.id === itemId
+          ? { ...i, quantity: currentQuantity - 1 > 1 ? currentQuantity - 1 : undefined }
+          : i
+      ),
+    };
+
+    const saved = await saveWagons(updatedWagonData);
+    if (saved) {
+      setWagonData(updatedWagonData);
+    }
+  };
+
+  const handleDecrementGearBonus = async (wagon: "wagon1" | "wagon2", itemId: string) => {
+    const item = wagonData[wagon].find(i => i.id === itemId);
+    if (!item || !item.gearBonus) return;
+
+    if (item.gearBonus <= 1) {
+      // If gear bonus is 1, delete the item
+      await handleDeleteItem(wagon, itemId);
+      return;
+    }
+
+    const updatedWagonData = {
+      ...wagonData,
+      [wagon]: wagonData[wagon].map(i =>
+        i.id === itemId
+          ? { ...i, gearBonus: item.gearBonus! - 1 }
+          : i
+      ),
+    };
+
+    const saved = await saveWagons(updatedWagonData);
+    if (saved) {
+      setWagonData(updatedWagonData);
+    }
+  };
+
   const handleTransferToInventory = async (wagon: "wagon1" | "wagon2", item: InventoryItem) => {
     if (!character) return;
 
@@ -409,14 +460,22 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
                   <div className="flex items-center gap-3">
                     <h4 className="font-bold text-amber-300">{item.name}</h4>
                     {quantity > 1 && (
-                      <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                      <button
+                        onClick={() => handleDecrementQuantity(wagon, item.id)}
+                        className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 hover:bg-blue-500/30 transition-all cursor-pointer"
+                        title="Click to decrease quantity"
+                      >
                         ×{quantity}
-                      </span>
+                      </button>
                     )}
                     {item.gearBonus && (
-                      <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40">
+                      <button
+                        onClick={() => handleDecrementGearBonus(wagon, item.id)}
+                        className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/40 hover:bg-green-500/30 transition-all cursor-pointer"
+                        title="Click to decrease gear bonus"
+                      >
                         +{item.gearBonus}
-                      </span>
+                      </button>
                     )}
                     <span className="text-amber-200 text-sm">⚖️ {totalWeight.toFixed(1)}</span>
                   </div>

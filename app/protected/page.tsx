@@ -7,6 +7,7 @@ import Inventory from "../../components/inventory";
 import Wagon from "../../components/wagon";
 import Combat from "../../components/combat";
 import Poll from "../../components/poll";
+import Kogra from "../../components/kogra";
 
 type Attributes = {
   STR: number;
@@ -52,7 +53,7 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "wagon" | "combat" | "poll">("character");
+  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "wagon" | "combat" | "poll" | "kogra">("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [allCharacters, setAllCharacters] = useState<CharacterType[]>([]);
@@ -470,6 +471,16 @@ export default function Dashboard() {
             >
               Poll
             </button>
+            <button
+              onClick={() => setActiveTab("kogra")}
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+                activeTab === "kogra"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Kogra
+            </button>
           </div>
           <div className="flex gap-3">
             {isAdmin && character && (
@@ -522,6 +533,12 @@ export default function Dashboard() {
             <Poll
               character={character}
               allCharacters={allCharacters}
+            />
+          )}
+          {activeTab === "kogra" && (
+            <Kogra
+              character={character}
+              userEmail={userEmail}
             />
           )}
         </div>

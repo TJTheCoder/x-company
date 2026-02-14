@@ -42,6 +42,19 @@ type KograGame = {
     declared_suit?: Suit | null;
     declared_meta?: DeclaredMeta;
     declared_by_player_id?: string;
+    challenger_player_id?: string;
+    challenged_player_id?: string;
+    winner_player_id?: string;
+    loser_player_id?: string;
+    bluff_was_true?: boolean;
+    last_call_result?: {
+      winner_player_id: string;
+      loser_player_id: string;
+      bluff_was_true: boolean;
+      loser_hand_size_before?: number;
+    };
+    revealed_transit_cards?: KograCard[];
+    revealed_claim_cards?: KograCard[];
   } | null;
 };
 
@@ -51,6 +64,7 @@ type KograPlayer = {
   user_email: string;
   display_name: string;
   is_dm: boolean;
+  dm_slot_name?: string;
   is_active: boolean;
   eliminated: boolean;
   starting_hand_size: number;
@@ -233,6 +247,27 @@ const compareDecl = (a: Decl, b: Decl): number => {
   return 0;
 };
 
+const hasAnyStraight = (inputRanks: number[]): boolean => {
+  const ranks = Array.from(new Set(inputRanks));
+  if (ranks.length < 5) return false;
+  for (let h = 5; h <= 14; h += 1) {
+    if (h === 5) {
+      if (ranks.includes(14) && ranks.includes(2) && ranks.includes(3) && ranks.includes(4) && ranks.includes(5)) {
+        return true;
+      }
+    } else if (
+      ranks.includes(h) &&
+      ranks.includes(h - 1) &&
+      ranks.includes(h - 2) &&
+      ranks.includes(h - 3) &&
+      ranks.includes(h - 4)
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const maxDeclForType = (type: DeclarationType): Decl => {
   if (type === "royal_flush") return { type, rank: 14, suit: "S", meta: {} };
   if (type === "two_pair") return { type, rank: 14, suit: null, meta: { low_rank: 13 } };
@@ -290,6 +325,8 @@ export default function Kogra({ character, userEmail }: KograProps) {
   const [players, setPlayers] = useState<KograPlayer[]>([]);
   const [myPrivateByPlayerId, setMyPrivateByPlayerId] = useState<Record<string, KograPrivateState>>({});
   const [slotMode, setSlotMode] = useState<"player" | "dm">("player");
+  const [dmSlotInput, setDmSlotInput] = useState("");
+  const [selectedDmSlot, setSelectedDmSlot] = useState("");
 
   const [declaredType, setDeclaredType] = useState<DeclarationType>("high_card");
   const [declaredRank, setDeclaredRank] = useState<number>(14);
@@ -392,15 +429,42 @@ export default function Kogra({ character, userEmail }: KograProps) {
 
   const activePlayers = useMemo(() => players.filter((p) => p.is_active && !p.eliminated), [players]);
 
+  const myDmSlots = useMemo(
+    () =>
+      players
+        .filter((p) => p.user_email === userEmail && p.is_dm && p.is_active && !p.eliminated)
+        .map((p) => p.dm_slot_name || p.display_name)
+        .filter((v, i, arr) => v && arr.indexOf(v) === i),
+    [players, userEmail]
+  );
+
+  useEffect(() => {
+    if (slotMode !== "dm") return;
+    if (selectedDmSlot && myDmSlots.includes(selectedDmSlot)) return;
+    setSelectedDmSlot(myDmSlots[0] || "");
+  }, [slotMode, selectedDmSlot, myDmSlots]);
+
   const myPlayer = useMemo(() => {
     if (!userEmail) return null;
-    const wantDm = slotMode === "dm";
-    return players.find((p) => p.user_email === userEmail && p.is_dm === wantDm && p.is_active) || null;
-  }, [players, slotMode, userEmail]);
+    if (slotMode === "player") {
+      return players.find((p) => p.user_email === userEmail && !p.is_dm && p.is_active && !p.eliminated) || null;
+    }
+    const slot = selectedDmSlot || dmSlotInput.trim();
+    return (
+      players.find(
+        (p) =>
+          p.user_email === userEmail &&
+          p.is_dm &&
+          p.is_active &&
+          !p.eliminated &&
+          (p.dm_slot_name || p.display_name) === slot
+      ) || null
+    );
+  }, [players, slotMode, userEmail, selectedDmSlot, dmSlotInput]);
 
-  const hasAnyActiveSlot = useMemo(() => {
+  const hasActivePlayerSlot = useMemo(() => {
     if (!userEmail) return false;
-    return players.some((p) => p.user_email === userEmail && p.is_active && !p.eliminated);
+    return players.some((p) => p.user_email === userEmail && !p.is_dm && p.is_active && !p.eliminated);
   }, [players, userEmail]);
 
   const myPrivate = useMemo(() => {
@@ -436,8 +500,18 @@ export default function Kogra({ character, userEmail }: KograProps) {
   );
 
   const isMyTurn = !!(game && myPlayer && game.current_turn_player_id === myPlayer.id);
-  const canCallBluff = isMyTurn && !!game?.state?.declared_by_player_id;
-  const shouldImprove = isMyTurn && !!game?.state?.declared_by_player_id;
+  const isRoundOver = game?.status === "round_over";
+  const canCallBluff = isMyTurn && game?.status === "in_round" && !!game?.state?.declared_by_player_id;
+  const shouldImprove = isMyTurn && game?.status === "in_round" && !!game?.state?.declared_by_player_id;
+  const canContinueAfterChallenge =
+    !!(
+      game &&
+      myPlayer &&
+      isRoundOver &&
+      (game.state?.challenger_player_id
+        ? game.state.challenger_player_id === myPlayer.id
+        : game.current_turn_player_id === myPlayer.id)
+    );
 
   const previousDecl: Decl | null = useMemo(() => {
     if (!shouldImprove || !game?.state?.declared_type) return null;
@@ -448,6 +522,7 @@ export default function Kogra({ character, userEmail }: KograProps) {
       meta: game.state.declared_meta || {},
     };
   }, [shouldImprove, game?.state]);
+  const canEscalate = shouldImprove && previousDecl?.type !== "royal_flush";
 
   const currentDecl = useMemo<Decl>(
     () => ({
@@ -544,13 +619,20 @@ export default function Kogra({ character, userEmail }: KograProps) {
 
   const flushRankOptionsAt = (idx: number): Array<number | null> => {
     const used = new Set<number>([declaredRank]);
+    const selectedBefore: number[] = [declaredRank];
     for (let i = 0; i < idx; i += 1) {
       const v = flushKickers[i];
-      if (v !== null) used.add(v);
+      if (v !== null) {
+        used.add(v);
+        selectedBefore.push(v);
+      }
     }
     const base = idx === 0 ? declaredRank : flushKickers[idx - 1] ?? declaredRank;
     const cap = base - 1;
-    const opts = RANK_OPTIONS.filter((r) => r <= cap && !used.has(r)).sort((a, b) => b - a);
+    const opts = RANK_OPTIONS
+      .filter((r) => r <= cap && !used.has(r))
+      .filter((r) => !hasAnyStraight([...selectedBefore, r]))
+      .sort((a, b) => b - a);
     return [null, ...opts];
   };
 
@@ -598,7 +680,11 @@ export default function Kogra({ character, userEmail }: KograProps) {
       await fn();
       await loadSnapshot();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unexpected error");
+      const maybeMessage =
+        typeof e === "object" && e !== null && "message" in e
+          ? String((e as { message?: unknown }).message || "")
+          : "";
+      setError(e instanceof Error ? e.message : maybeMessage || "Unexpected error");
     } finally {
       setBusy(false);
     }
@@ -607,15 +693,25 @@ export default function Kogra({ character, userEmail }: KograProps) {
   const join = async () => {
     if (!userEmail || !game) return;
     const asDm = slotMode === "dm";
-    const display = asDm ? "DM" : character?.name || userEmail.split("@")[0] || "Player";
+    const dmName = dmSlotInput.trim();
+    if (asDm && !dmName) {
+      setError("Enter a DM character name.");
+      return;
+    }
+    const display = asDm ? dmName : character?.name || userEmail.split("@")[0] || "Player";
 
     await runAction(async () => {
       const { error: rpcError } = await supabase.rpc("kogra_join_game", {
         p_game_id: game.id,
         p_display_name: display,
         p_as_dm: asDm,
+        p_dm_slot_name: asDm ? dmName : null,
       });
       if (rpcError) throw rpcError;
+      if (asDm) {
+        setSelectedDmSlot(dmName);
+        setDmSlotInput("");
+      }
     });
   };
 
@@ -625,6 +721,7 @@ export default function Kogra({ character, userEmail }: KograProps) {
       const { error: rpcError } = await supabase.rpc("kogra_forfeit", {
         p_game_id: game.id,
         p_as_dm: slotMode === "dm",
+        p_dm_slot_name: slotMode === "dm" ? selectedDmSlot : null,
       });
       if (rpcError) throw rpcError;
     });
@@ -690,6 +787,18 @@ export default function Kogra({ character, userEmail }: KograProps) {
     });
   };
 
+  const continueAfterChallenge = async () => {
+    if (!game) return;
+    await runAction(async () => {
+      const { error: rpcError } = await supabase.rpc("kogra_continue_after_challenge", {
+        p_game_id: game.id,
+      });
+      if (rpcError) throw rpcError;
+      setSelectedPassKeys([]);
+      setShowImproveCards(false);
+    });
+  };
+
   const togglePassCard = (card: KograCard) => {
     const key = cardKey(card);
     setSelectedPassKeys((prev) => {
@@ -711,6 +820,16 @@ export default function Kogra({ character, userEmail }: KograProps) {
     if (!id) return null;
     return players.find((p) => p.id === id)?.display_name || null;
   }, [game?.state?.declared_by_player_id, players]);
+
+  const roundOverSummary = useMemo(() => {
+    if (!game?.state?.last_call_result) return null;
+    const winnerName = players.find((p) => p.id === game.state?.last_call_result?.winner_player_id)?.display_name || "Unknown";
+    const loserName = players.find((p) => p.id === game.state?.last_call_result?.loser_player_id)?.display_name || "Unknown";
+    const wasBluff = game.state.last_call_result.bluff_was_true;
+    return `${winnerName} > ${loserName} (${wasBluff ? "Deceit" : "Truth"})`;
+  }, [game?.state, players]);
+
+  const revealedTransitCards = game?.state?.revealed_transit_cards || [];
 
   if (!userEmail) {
     return <p className="text-amber-200">Log in to play Kogra.</p>;
@@ -755,6 +874,20 @@ export default function Kogra({ character, userEmail }: KograProps) {
             <p className="text-xs uppercase tracking-wide text-amber-200/80">Declared</p>
             <p className="text-sm font-semibold text-amber-100">{declaredSummary}</p>
             {declaredByName && <p className="text-xs text-amber-200/80 mt-1">by {declaredByName}</p>}
+            {roundOverSummary && <p className="text-xs text-emerald-200 mt-2">{roundOverSummary}</p>}
+            {revealedTransitCards.length > 0 && (
+              <div className="mt-2 flex flex-wrap justify-center gap-1">
+                {revealedTransitCards.map((card) => (
+                  <span
+                    key={`reveal-${cardKey(card)}`}
+                    className="px-1.5 py-0.5 rounded bg-black/40 border border-amber-200/25 text-[10px] text-amber-100"
+                  >
+                    {rankLabel(card.rank)}
+                    {suitSymbol(card.suit)}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {currentPlayer && <SeatChip player={currentPlayer} label="Current" pos={{ x: 50, y: 85 }} isMe={currentPlayer.id === myPlayer?.id} />}
@@ -795,11 +928,41 @@ export default function Kogra({ character, userEmail }: KograProps) {
             )}
           </div>
 
+          {slotMode === "dm" && (
+            <div className="space-y-2">
+              {myDmSlots.length > 0 && (
+                <select
+                  value={selectedDmSlot}
+                  onChange={(e) => setSelectedDmSlot(e.target.value)}
+                  className="w-full rounded-md bg-gray-800 border border-gray-600 text-amber-100 px-2 py-2 text-sm"
+                >
+                  {myDmSlots.map((slot) => (
+                    <option key={slot} value={slot}>
+                      Play as: {slot}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <input
+                value={dmSlotInput}
+                onChange={(e) => setDmSlotInput(e.target.value)}
+                placeholder="New DM character name"
+                className="w-full rounded-md bg-gray-800 border border-gray-600 text-amber-100 px-2 py-2 text-sm"
+              />
+            </div>
+          )}
+
           <div className="flex gap-2">
-            {!hasAnyActiveSlot && (
+            {(slotMode === "player" ? !hasActivePlayerSlot : true) && (
               <button
                 onClick={join}
-                disabled={busy || loading || !game || (slotMode === "dm" && !isAdmin)}
+                disabled={
+                  busy ||
+                  loading ||
+                  !game ||
+                  game.status !== "waiting" ||
+                  (slotMode === "dm" && (!isAdmin || !dmSlotInput.trim()))
+                }
                 className="px-3 py-2 bg-green-700 hover:bg-green-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
               >
                 Join
@@ -807,7 +970,7 @@ export default function Kogra({ character, userEmail }: KograProps) {
             )}
             <button
               onClick={startGame}
-              disabled={busy || loading || !game || activePlayers.length < 2 || game?.status === "in_round"}
+              disabled={busy || loading || !game || activePlayers.length < 2 || game?.status === "in_round" || game?.status === "round_over"}
               className="px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:bg-gray-600 text-gray-900 rounded-lg text-sm font-semibold"
             >
               Start
@@ -817,26 +980,40 @@ export default function Kogra({ character, userEmail }: KograProps) {
 
         <div className="rounded-2xl border border-amber-500/30 bg-gray-900/80 p-4 space-y-3">
           <h4 className="text-lg font-bold text-amber-300">Turn</h4>
-          {!isMyTurn && <p className="text-sm text-amber-200">Waiting for your turn.</p>}
+          {!isMyTurn && !canContinueAfterChallenge && <p className="text-sm text-amber-200">Waiting for your turn.</p>}
 
           {isMyTurn && shouldImprove && !showImproveCards && (
             <div className="flex gap-2">
-              <button
-                onClick={() => setShowImproveCards(true)}
-                disabled={busy}
-                className="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
-              >
-                Improve
-              </button>
+              {canEscalate && (
+                <button
+                  onClick={() => setShowImproveCards(true)}
+                  disabled={busy}
+                  className="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
+                >
+                  Escalate
+                </button>
+              )}
               {canCallBluff && (
                 <button
                   onClick={callBluff}
                   disabled={busy}
                   className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
                 >
-                  Call Bluff
+                  Challenge
                 </button>
               )}
+            </div>
+          )}
+
+          {canContinueAfterChallenge && (
+            <div className="flex gap-2">
+              <button
+                onClick={continueAfterChallenge}
+                disabled={busy}
+                className="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
+              >
+                Continue
+              </button>
             </div>
           )}
 
@@ -945,17 +1122,8 @@ export default function Kogra({ character, userEmail }: KograProps) {
                   disabled={busy || passCards.length !== 5 || (shouldImprove && !isHigherThanPrevious)}
                   className="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
                 >
-                  {shouldImprove ? "Improve + Pass" : "Declare + Pass"}
+                  Declare
                 </button>
-                {canCallBluff && (
-                  <button
-                    onClick={callBluff}
-                    disabled={busy}
-                    className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:bg-gray-600 text-white rounded-lg text-sm font-semibold"
-                  >
-                    Call Bluff
-                  </button>
-                )}
               </div>
             </>
           )}
@@ -987,7 +1155,7 @@ export default function Kogra({ character, userEmail }: KograProps) {
 
             <div>
               <p className="text-xs font-semibold text-amber-300 mb-2">Transit</p>
-              {!canSeeTransitCards && <p className="text-sm text-amber-200">Hidden until you choose Improve.</p>}
+              {!canSeeTransitCards && <p className="text-sm text-amber-200">Hidden</p>}
               {canSeeTransitCards && (
                 <div className="flex flex-wrap gap-2">
                   {myPrivate.transit_cards.length === 0 && <p className="text-sm text-amber-200">None</p>}
@@ -1027,7 +1195,6 @@ function SeatChip({
         {label && <p className="text-[10px] uppercase tracking-wide text-amber-200/70">{label}</p>}
         <p className="text-sm font-semibold text-amber-100 leading-tight">
           {player.display_name}
-          {player.is_dm ? "*" : ""}
           {isMe ? " · You" : ""}
         </p>
         <p className="text-[11px] text-amber-200/80">Hand {player.starting_hand_size}</p>

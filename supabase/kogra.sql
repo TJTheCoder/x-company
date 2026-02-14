@@ -43,6 +43,7 @@ create table if not exists public.kogra_players (
   user_email text not null,
   display_name text not null,
   is_dm boolean not null default false,
+  dm_slot_name text not null default '',
   is_active boolean not null default true,
   eliminated boolean not null default false,
   starting_hand_size int not null default 2 check (starting_hand_size between 2 and 5),
@@ -52,8 +53,18 @@ create table if not exists public.kogra_players (
   left_at timestamptz null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (game_id, user_email, is_dm)
+  unique (game_id, user_email, is_dm, dm_slot_name)
 );
+
+alter table public.kogra_players add column if not exists dm_slot_name text not null default '';
+update public.kogra_players
+set dm_slot_name = case when is_dm then coalesce(nullif(display_name, ''), 'DM') else '' end
+where dm_slot_name = '';
+alter table public.kogra_players drop constraint if exists kogra_players_game_id_user_email_is_dm_key;
+alter table public.kogra_players drop constraint if exists kogra_players_game_id_user_email_is_dm_dm_slot_name_key;
+alter table public.kogra_players
+add constraint kogra_players_game_id_user_email_is_dm_dm_slot_name_key
+unique (game_id, user_email, is_dm, dm_slot_name);
 
 create index if not exists kogra_players_game_idx on public.kogra_players(game_id);
 create index if not exists kogra_players_active_idx on public.kogra_players(game_id, is_active, eliminated);
@@ -405,6 +416,8 @@ begin
 end;
 $$;
 
+drop function if exists public.kogra_cards_match_declaration(jsonb, text, integer, text);
+
 create or replace function public.kogra_cards_match_declaration(
   p_cards jsonb,
   p_declared_type text,
@@ -754,7 +767,8 @@ $$;
 create or replace function public.kogra_join_game(
   p_game_id uuid,
   p_display_name text default null,
-  p_as_dm boolean default false
+  p_as_dm boolean default false,
+  p_dm_slot_name text default null
 )
 returns uuid
 language plpgsql
@@ -765,6 +779,7 @@ declare
   v_email text := public.kogra_current_user_email();
   v_player_id uuid;
   v_name text;
+  v_slot text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -774,17 +789,23 @@ begin
     raise exception 'Only the DM account can join as DM';
   end if;
 
+  v_slot := case
+    when p_as_dm then coalesce(nullif(btrim(p_dm_slot_name), ''), 'DM')
+    else ''
+  end;
+
   v_name := case
-    when p_as_dm then 'DM'
+    when p_as_dm then v_slot
     when p_display_name is not null and btrim(p_display_name) <> '' then p_display_name
     else split_part(v_email, '@', 1)
   end;
 
-  insert into public.kogra_players (game_id, user_email, display_name, is_dm, is_active, eliminated, left_at)
-  values (p_game_id, v_email, v_name, p_as_dm, true, false, null)
-  on conflict (game_id, user_email, is_dm)
+  insert into public.kogra_players (game_id, user_email, display_name, is_dm, dm_slot_name, is_active, eliminated, left_at)
+  values (p_game_id, v_email, v_name, p_as_dm, v_slot, true, false, null)
+  on conflict (game_id, user_email, is_dm, dm_slot_name)
   do update set
     display_name = excluded.display_name,
+    dm_slot_name = excluded.dm_slot_name,
     is_active = true,
     eliminated = false,
     left_at = null
@@ -803,7 +824,8 @@ $$;
 
 create or replace function public.kogra_forfeit(
   p_game_id uuid,
-  p_as_dm boolean default false
+  p_as_dm boolean default false,
+  p_dm_slot_name text default null
 )
 returns void
 language plpgsql
@@ -816,6 +838,7 @@ declare
   v_next uuid;
   active_count int;
   current_turn uuid;
+  v_slot text := case when p_as_dm then coalesce(nullif(btrim(p_dm_slot_name), ''), 'DM') else '' end;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -826,6 +849,7 @@ begin
   where game_id = p_game_id
     and user_email = v_email
     and is_dm = p_as_dm
+    and dm_slot_name = v_slot
     and is_active = true
   limit 1;
 
@@ -950,6 +974,7 @@ create or replace function public.kogra_declare_and_pass(
   p_declared_type text,
   p_declared_rank int,
   p_declared_suit text,
+  p_declared_meta jsonb,
   p_pass_cards jsonb
 )
 returns void
@@ -983,8 +1008,30 @@ begin
     raise exception 'Invalid declaration type';
   end if;
 
-  if p_declared_rank < 2 or p_declared_rank > 14 then
+  if p_declared_type <> 'royal_flush' and (p_declared_rank < 2 or p_declared_rank > 14) then
     raise exception 'Declared rank must be between 2 and 14';
+  end if;
+
+  if p_declared_type = 'royal_flush' then
+    p_declared_rank := 14;
+  end if;
+
+  if p_declared_type = 'two_pair' then
+    if coalesce((p_declared_meta->>'low_rank')::int, 0) < 2 then
+      raise exception 'Two pair must include a valid lower pair';
+    end if;
+    if coalesce((p_declared_meta->>'low_rank')::int, 0) >= p_declared_rank then
+      raise exception 'Two pair lower rank must be lower than higher rank';
+    end if;
+  end if;
+
+  if p_declared_type = 'full_house' then
+    if coalesce((p_declared_meta->>'pair_rank')::int, 0) < 2 then
+      raise exception 'Full house must include a valid pair rank';
+    end if;
+    if coalesce((p_declared_meta->>'pair_rank')::int, 0) = p_declared_rank then
+      raise exception 'Full house three-of-a-kind and pair rank must differ';
+    end if;
   end if;
 
   select * into g
@@ -1057,9 +1104,11 @@ begin
       p_declared_type,
       p_declared_rank,
       p_declared_suit,
+      coalesce(p_declared_meta, '{}'::jsonb),
       g.state->>'declared_type',
       coalesce((g.state->>'declared_rank')::int, 2),
-      g.state->>'declared_suit'
+      g.state->>'declared_suit',
+      coalesce(g.state->'declared_meta', '{}'::jsonb)
     ) then
       raise exception 'Declaration must strictly improve on previous declaration';
     end if;
@@ -1080,10 +1129,10 @@ begin
   where game_id = p_game_id and player_id = next_player;
 
   insert into public.kogra_secret_claims (
-    game_id, round_no, turn_no, actor_player_id, cards, declared_type, declared_rank, declared_suit
+    game_id, round_no, turn_no, actor_player_id, cards, declared_type, declared_rank, declared_suit, declared_meta
   )
   values (
-    p_game_id, g.round_no, g.turn_no + 1, actor.id, combined, p_declared_type, p_declared_rank, p_declared_suit
+    p_game_id, g.round_no, g.turn_no + 1, actor.id, combined, p_declared_type, p_declared_rank, p_declared_suit, coalesce(p_declared_meta, '{}'::jsonb)
   )
   returning id into claim_id;
 
@@ -1095,6 +1144,7 @@ begin
         'declared_type', p_declared_type,
         'declared_rank', p_declared_rank,
         'declared_suit', p_declared_suit,
+        'declared_meta', coalesce(p_declared_meta, '{}'::jsonb),
         'declared_by_player_id', actor.id,
         'last_claim_id', claim_id
       )
@@ -1111,7 +1161,8 @@ begin
     jsonb_build_object(
       'declared_type', p_declared_type,
       'declared_rank', p_declared_rank,
-      'declared_suit', p_declared_suit
+      'declared_suit', p_declared_suit,
+      'declared_meta', coalesce(p_declared_meta, '{}'::jsonb)
     )
   );
 end;
@@ -1136,7 +1187,7 @@ declare
   winner uuid;
   loser uuid;
   loser_size int;
-  remaining_count int;
+  revealed_transit jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -1188,11 +1239,18 @@ begin
     raise exception 'Claim record missing';
   end if;
 
+  select coalesce(ps.transit_cards, '[]'::jsonb) into revealed_transit
+  from public.kogra_private_state ps
+  where ps.game_id = p_game_id
+    and ps.player_id = caller.id
+  limit 1;
+
   claim_true := public.kogra_cards_match_declaration(
     claim.cards,
     claim.declared_type,
     claim.declared_rank,
-    claim.declared_suit
+    claim.declared_suit,
+    coalesce(claim.declared_meta, '{}'::jsonb)
   );
 
   if claim_true then
@@ -1241,6 +1299,87 @@ begin
     )
   );
 
+  update public.kogra_games
+  set status = 'round_over',
+      current_turn_player_id = caller.id,
+      previous_player_id = prev_player,
+      state = jsonb_build_object(
+        'winner_player_id', winner,
+        'loser_player_id', loser,
+        'bluff_was_true', (not claim_true),
+        'challenger_player_id', caller.id,
+        'challenged_player_id', prev_player,
+        'last_call_result', jsonb_build_object(
+          'winner_player_id', winner,
+          'loser_player_id', loser,
+          'bluff_was_true', (not claim_true),
+          'loser_hand_size_before', loser_size
+        ),
+        'revealed_transit_cards', coalesce(revealed_transit, '[]'::jsonb),
+        'revealed_claim_cards', coalesce(claim.cards, '[]'::jsonb)
+      )
+  where id = p_game_id;
+
+  return jsonb_build_object(
+    'winner_player_id', winner,
+    'loser_player_id', loser,
+    'bluff_was_true', (not claim_true)
+  );
+end;
+$$;
+
+create or replace function public.kogra_continue_after_challenge(
+  p_game_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := public.kogra_current_user_email();
+  g public.kogra_games%rowtype;
+  winner uuid;
+  loser uuid;
+  bluff_true boolean;
+  remaining_count int;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into g
+  from public.kogra_games
+  where id = p_game_id
+  limit 1;
+
+  if g.id is null then
+    raise exception 'Game not found';
+  end if;
+
+  if g.status <> 'round_over' then
+    raise exception 'No challenge to continue';
+  end if;
+
+  if coalesce(g.state->>'challenger_player_id', '') = '' then
+    raise exception 'No challenger recorded';
+  end if;
+
+  if not exists (
+    select 1
+    from public.kogra_players p
+    where p.id = (g.state->>'challenger_player_id')::uuid
+      and p.user_email = v_email
+      and p.is_active = true
+      and p.eliminated = false
+  ) then
+    raise exception 'Only the challenger can continue';
+  end if;
+
+  winner := (g.state->'last_call_result'->>'winner_player_id')::uuid;
+  loser := (g.state->'last_call_result'->>'loser_player_id')::uuid;
+  bluff_true := coalesce((g.state->'last_call_result'->>'bluff_was_true')::boolean, false);
+
   select count(*) into remaining_count
   from public.kogra_players
   where game_id = p_game_id
@@ -1252,10 +1391,11 @@ begin
     set status = 'finished',
         previous_player_id = null,
         current_turn_player_id = null,
+        starter_player_id = null,
         state = jsonb_build_object(
           'winner_player_id', winner,
           'loser_player_id', loser,
-          'bluff_was_true', (not claim_true)
+          'bluff_was_true', bluff_true
         )
     where id = p_game_id;
 
@@ -1271,7 +1411,7 @@ begin
       jsonb_build_object(
         'winner_player_id', winner,
         'loser_player_id', loser,
-        'bluff_was_true', (not claim_true)
+        'bluff_was_true', bluff_true
       )
     )
     where id = p_game_id;
@@ -1284,26 +1424,20 @@ begin
     jsonb_build_object(
       'winner_player_id', winner,
       'loser_player_id', loser,
-      'bluff_was_true', (not claim_true),
-      'loser_hand_size_before', loser_size
+      'bluff_was_true', bluff_true
     )
   from public.kogra_games g2
   where g2.id = p_game_id;
-
-  return jsonb_build_object(
-    'winner_player_id', winner,
-    'loser_player_id', loser,
-    'bluff_was_true', (not claim_true)
-  );
 end;
 $$;
 
-grant execute on function public.kogra_join_game(uuid, text, boolean) to authenticated;
-grant execute on function public.kogra_forfeit(uuid, boolean) to authenticated;
+grant execute on function public.kogra_join_game(uuid, text, boolean, text) to authenticated;
+grant execute on function public.kogra_forfeit(uuid, boolean, text) to authenticated;
 grant execute on function public.kogra_restart_game(uuid) to authenticated;
 grant execute on function public.kogra_start_game(uuid) to authenticated;
-grant execute on function public.kogra_declare_and_pass(uuid, text, int, text, jsonb) to authenticated;
+grant execute on function public.kogra_declare_and_pass(uuid, text, int, text, jsonb, jsonb) to authenticated;
 grant execute on function public.kogra_call_bluff(uuid) to authenticated;
+grant execute on function public.kogra_continue_after_challenge(uuid) to authenticated;
 
 do $$
 begin

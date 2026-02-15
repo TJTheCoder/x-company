@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Character from "../../components/character";
 import Inventory from "../../components/inventory";
+import Arts from "../../components/arts";
 import Wagon from "../../components/wagon";
 import Combat from "../../components/combat";
 import Poll from "../../components/poll";
@@ -27,7 +28,24 @@ export type CharacterType = {
   skills: Record<string, number>;
   spirits: number;
   inventory?: InventoryItem[];
+  known_art_ids?: string[];
+  equipped_art_ids?: string[];
+  // Legacy fields kept for compatibility with older rows.
+  arts?: Art[];
+  equipped_arts?: Art[];
   icon_url?: string;
+};
+
+export type ArtKind = "true" | "demon" | "monster" | "angel" | "mortal" | "nature";
+
+export type Art = {
+  id: string;
+  name: string;
+  kind: ArtKind;
+  speed: "Slow" | "Fast";
+  range: "Distant" | "Near" | "Touch" | "Self";
+  cost: string;
+  description?: string;
 };
 
 export type InventoryItem = {
@@ -53,7 +71,7 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "wagon" | "combat" | "poll" | "kogra">("character");
+  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "arts" | "wagon" | "combat" | "poll" | "kogra">("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [allCharacters, setAllCharacters] = useState<CharacterType[]>([]);
@@ -442,6 +460,16 @@ export default function Dashboard() {
               Inventory
             </button>
             <button
+              onClick={() => setActiveTab("arts")}
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+                activeTab === "arts"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Arts
+            </button>
+            <button
               onClick={() => setActiveTab("wagon")}
               className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
                 activeTab === "wagon"
@@ -526,6 +554,13 @@ export default function Dashboard() {
               wagonData={wagonData}
               setWagonData={setWagonData}
               refreshWagons={fetchWagons}
+            />
+          )}
+          {activeTab === "arts" && (
+            <Arts
+              character={character}
+              updateCharacter={updateCharacter}
+              saveCharacter={saveCharacter}
             />
           )}
           {activeTab === "combat" && <Combat />}

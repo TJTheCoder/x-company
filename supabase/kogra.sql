@@ -1301,7 +1301,7 @@ begin
 
   update public.kogra_games
   set status = 'round_over',
-      current_turn_player_id = caller.id,
+      current_turn_player_id = prev_player,
       previous_player_id = prev_player,
       state = jsonb_build_object(
         'winner_player_id', winner,
@@ -1343,6 +1343,8 @@ declare
   loser uuid;
   bluff_true boolean;
   remaining_count int;
+  starter uuid;
+  loser_seat int;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -1361,19 +1363,19 @@ begin
     raise exception 'No challenge to continue';
   end if;
 
-  if coalesce(g.state->>'challenger_player_id', '') = '' then
-    raise exception 'No challenger recorded';
+  if coalesce(g.state->>'challenged_player_id', '') = '' then
+    raise exception 'No challenged player recorded';
   end if;
 
   if not exists (
     select 1
     from public.kogra_players p
-    where p.id = (g.state->>'challenger_player_id')::uuid
+    where p.id = (g.state->>'challenged_player_id')::uuid
       and p.user_email = v_email
       and p.is_active = true
       and p.eliminated = false
   ) then
-    raise exception 'Only the challenger can continue';
+    raise exception 'Only the challenged player can continue';
   end if;
 
   winner := (g.state->'last_call_result'->>'winner_player_id')::uuid;
@@ -1404,7 +1406,42 @@ begin
         transit_cards = '[]'::jsonb
     where game_id = p_game_id;
   else
-    perform public.kogra_start_round_internal(p_game_id, winner, false);
+    if exists (
+      select 1
+      from public.kogra_players p
+      where p.id = loser
+        and p.game_id = p_game_id
+        and p.is_active = true
+        and p.eliminated = false
+    ) then
+      starter := loser;
+    else
+      select p.seat_index into loser_seat
+      from public.kogra_players p
+      where p.id = loser
+      limit 1;
+
+      select p.id into starter
+      from public.kogra_players p
+      where p.game_id = p_game_id
+        and p.is_active = true
+        and p.eliminated = false
+        and coalesce(p.seat_index, 99999) > coalesce(loser_seat, -1)
+      order by p.seat_index asc
+      limit 1;
+
+      if starter is null then
+        select p.id into starter
+        from public.kogra_players p
+        where p.game_id = p_game_id
+          and p.is_active = true
+          and p.eliminated = false
+        order by p.seat_index asc
+        limit 1;
+      end if;
+    end if;
+
+    perform public.kogra_start_round_internal(p_game_id, starter, false);
     update public.kogra_games
     set state = state || jsonb_build_object(
       'last_call_result',

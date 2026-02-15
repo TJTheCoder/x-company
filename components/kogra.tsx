@@ -508,8 +508,8 @@ export default function Kogra({ character, userEmail }: KograProps) {
       game &&
       myPlayer &&
       isRoundOver &&
-      (game.state?.challenger_player_id
-        ? game.state.challenger_player_id === myPlayer.id
+      (game.state?.challenged_player_id
+        ? game.state.challenged_player_id === myPlayer.id
         : game.current_turn_player_id === myPlayer.id)
     );
 

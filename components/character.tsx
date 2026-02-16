@@ -565,9 +565,6 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                       disabled={hasRoll}
                       className="w-24 px-2 py-1 rounded bg-gray-700 border border-gray-600 text-amber-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60"
                     />
-                    <span className="ml-2 text-xs text-gray-300">
-                      Effective skill dice: {modifiedSkillDiceCount}
-                    </span>
                     <label className="text-xs text-amber-300 font-semibold ml-4 mr-2">Required 6s:</label>
                     <input
                       type="number"

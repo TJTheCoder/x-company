@@ -15,6 +15,6 @@
     "speed": "Fast",
     "range": "Near",
     "cost": "X",
-    "description": "You damage the target's equipment or held GEAR by X."
+    "description": "You damage the target's equipment or held GEAR by X on a hit."
   }
 ]

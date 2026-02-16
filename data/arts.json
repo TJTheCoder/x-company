@@ -1,0 +1,20 @@
+[
+  {
+    "id": "art-true-sense",
+    "name": "True Sense",
+    "kind": "true",
+    "speed": "Slow",
+    "range": "Distant",
+    "cost": "1",
+    "description": "You can see a target through darkness, smoke, disguises, or the like. You must otherwise have unobstructed line of sight."
+  },
+  {
+    "id": "art-sunder",
+    "name": "Sunder",
+    "kind": "true",
+    "speed": "Fast",
+    "range": "Near",
+    "cost": "X",
+    "description": "You damage the target's equipment or held GEAR by X."
+  }
+]

@@ -26,6 +26,7 @@ type RollState = {
   gearDice: number[];
   poolUsed: DicePool;
   hasBeenPushed: boolean;
+  requiredSuccesses: number;
   gearItemId?: string;
 };
 
@@ -61,6 +62,7 @@ const emptyRoll = (): RollState => ({
   gearDice: [],
   poolUsed: "attribute",
   hasBeenPushed: false,
+  requiredSuccesses: 1,
 });
 
 export default function Character({ character, updateCharacter, saveCharacter }: CharacterProps) {
@@ -89,11 +91,55 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     setSelectedGear(null);
   };
 
+  const calculateSpiritGain = (
+    attrSixes: number,
+    skillSixes: number,
+    gearSixes: number,
+    negativeSkillSixes: number,
+    requiredSuccesses: number,
+  ): number => {
+    const totalSixes = Math.max(0, attrSixes + skillSixes + gearSixes - negativeSkillSixes);
+    const remainingSixes = Math.max(0, totalSixes - requiredSuccesses);
+    const contributingSixes = attrSixes + gearSixes;
+    return Math.min(remainingSixes, contributingSixes);
+  };
+
+  const applySpiritOnClear = (attr: keyof Attributes) => {
+    if (!character) return;
+    const roll = rollStates[attr];
+    const hasAnyDice = roll.attributeDice.length > 0 || roll.skillDice.length > 0 || roll.gearDice.length > 0;
+    if (!hasAnyDice) return;
+
+    const attrSixes = roll.attributeDice.filter(d => d === 6).length;
+    const skillSixes = roll.skillDice.filter(d => d === 6).length;
+    const gearSixes = roll.gearDice.filter(d => d === 6).length;
+    const negativeSkillSixes = roll.skillIsNegative ? skillSixes : 0;
+    const extraSpirit = calculateSpiritGain(
+      attrSixes,
+      skillSixes,
+      gearSixes,
+      negativeSkillSixes,
+      Math.max(0, roll.requiredSuccesses),
+    );
+
+    const updates = {
+      spirits: (character.spirits ?? 0) + extraSpirit,
+    };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
+  const clearRollAndResolveSpirit = (attr: keyof Attributes) => {
+    applySpiritOnClear(attr);
+    clearEverything(attr);
+  };
+
   // Silently clear the roll on a DIFFERENT attribute without touching selections
   // (selections will be overwritten by the caller immediately after).
   const clearPreviousRoll = (incomingAttr: keyof Attributes) => {
     if (!selectedAttribute || selectedAttribute === incomingAttr) return;
     if (hasRollFor(selectedAttribute)) {
+      applySpiritOnClear(selectedAttribute);
       setRollStates(prev => ({ ...prev, [selectedAttribute]: emptyRoll() }));
     }
   };
@@ -117,7 +163,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
   const handleAttributeClick = (attr: keyof Attributes) => {
     // If this attribute already has a roll, clicking it clears everything.
     if (hasRollFor(attr)) {
-      clearEverything(attr);
+      clearRollAndResolveSpirit(attr);
       return;
     }
 
@@ -227,21 +273,10 @@ export default function Character({ character, updateCharacter, saveCharacter }:
         gearDice,
         poolUsed: pool,
         hasBeenPushed: false,
+        requiredSuccesses: prev[attr]?.requiredSuccesses ?? 1,
         gearItemId: selectedGear?.id,
       },
     }));
-  };
-
-  const calculateSpiritGain = (attrSixes: number, skillSixes: number, gearSixes: number, negativeSkillSixes: number): number => {
-    const totalSixes = Math.max(0, attrSixes + skillSixes + gearSixes - negativeSkillSixes);
-    if (totalSixes <= 1) return 0;
-
-    const remainingSixes = totalSixes - 1;
-
-    // Only attribute and gear sixes can contribute to spirit gain
-    const contributingSixes = attrSixes + gearSixes;
-
-    return Math.min(remainingSixes, contributingSixes);
   };
 
   const pushDice = async (attr: keyof Attributes, pushPools: string[]) => {
@@ -269,15 +304,12 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     const gearSixes = newGearDice.filter(d => d === 6).length;
     const negativeSkillSixes = currentRoll.skillIsNegative ? skillSixes : 0;
 
-    const extraSpirit = calculateSpiritGain(attrSixes, skillSixes, gearSixes, negativeSkillSixes);
-
     // All attribute ones deal attribute damage; all gear ones deal gear damage.
     const attrOnes = newAttributeDice.filter(d => d === 1).length;
     const gearOnes = newGearDice.filter(d => d === 1).length;
 
     const attrDecrease = attrOnes;
 
-    const newSpirits = (character.spirits ?? 0) + extraSpirit;
     const newAttrValue = Math.max(0, (character.attributes[attr] ?? 0) - attrDecrease);
 
     // Handle gear damage from ALL gear ones
@@ -303,7 +335,6 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     }
 
     const updates = {
-      spirits: newSpirits,
       attributes: { ...character.attributes, [attr]: newAttrValue },
       inventory: updatedInventory,
     };
@@ -321,7 +352,20 @@ export default function Character({ character, updateCharacter, saveCharacter }:
         gearDice: newGearDice,
         poolUsed: currentRoll.poolUsed,
         hasBeenPushed: true,
+        requiredSuccesses: currentRoll.requiredSuccesses,
         gearItemId: currentRoll.gearItemId,
+      },
+    }));
+  };
+
+  const handleRequiredSuccessesChange = (attr: keyof Attributes, value: string) => {
+    const parsed = parseInt(value, 10);
+    const normalized = Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
+    setRollStates(prev => ({
+      ...prev,
+      [attr]: {
+        ...prev[attr],
+        requiredSuccesses: normalized,
       },
     }));
   };
@@ -505,7 +549,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                     </h3>
                     {hasRoll && !currentRoll?.hasBeenPushed && (
                       <button
-                        onClick={() => clearEverything(selectedAttribute)}
+                        onClick={() => clearRollAndResolveSpirit(selectedAttribute)}
                         className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg text-sm font-semibold transition-all"
                       >
                         Clear Roll
@@ -524,6 +568,14 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                     <span className="ml-2 text-xs text-gray-300">
                       Effective skill dice: {modifiedSkillDiceCount}
                     </span>
+                    <label className="text-xs text-amber-300 font-semibold ml-4 mr-2">Required 6s:</label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={rollStates[selectedAttribute].requiredSuccesses}
+                      onChange={(e) => handleRequiredSuccessesChange(selectedAttribute, e.target.value)}
+                      className="w-20 px-2 py-1 rounded bg-gray-700 border border-gray-600 text-amber-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
                   </div>
                   
                   {!hasRoll && (
@@ -661,7 +713,7 @@ export default function Character({ character, updateCharacter, saveCharacter }:
                   {/* Clear button after push */}
                   {hasRoll && currentRoll?.hasBeenPushed && (
                     <button
-                      onClick={() => clearEverything(selectedAttribute)}
+                      onClick={() => clearRollAndResolveSpirit(selectedAttribute)}
                       className="mt-3 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-amber-200 rounded-lg text-sm font-semibold transition-all"
                     >
                       Clear Roll

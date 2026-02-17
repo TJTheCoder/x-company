@@ -1,8 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { CharacterType, InventoryItem } from "../app/protected/page";
+import {
+  buildItemFromForm,
+  getImplementedItemAutofill,
+  isImplementedItem,
+  normalizeInventoryItems,
+} from "@/lib/item-catalog";
 
 type WagonData = {
   wagon1: InventoryItem[];
@@ -19,6 +25,7 @@ type WagonProps = {
 };
 
 export default function Wagon({ character, updateCharacter, saveCharacter, wagonData, setWagonData, refreshWagons }: WagonProps) {
+  void refreshWagons;
   const [showAddItem, setShowAddItem] = useState<"wagon1" | "wagon2" | null>(null);
   const [editingItem, setEditingItem] = useState<{ wagon: "wagon1" | "wagon2"; itemId: string } | null>(null);
   const [formData, setFormData] = useState({
@@ -49,6 +56,20 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     setError("");
     setShowAddItem(null);
     setEditingItem(null);
+  };
+
+  const handleNameInputChange = (rawName: string) => {
+    const canonical = getImplementedItemAutofill(rawName);
+    setFormData((prev) => ({
+      ...prev,
+      name: canonical ? canonical.name : rawName,
+      weight: canonical ? canonical.weight.toString() : prev.weight,
+      gearBonus: canonical
+        ? canonical.gearBonus !== undefined
+          ? canonical.gearBonus.toString()
+          : ""
+        : prev.gearBonus,
+    }));
   };
 
   const getCurrentWeight = (wagon: "wagon1" | "wagon2") => {
@@ -93,16 +114,18 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     }
 
     const newItem: InventoryItem = {
-      id: Date.now().toString() + Math.random(),
-      name,
-      weight,
-      gearBonus,
-      quantity: quantity > 1 ? quantity : undefined, // Only store if > 1
+      ...buildItemFromForm({
+        id: Date.now().toString() + Math.random(),
+        name,
+        weight,
+        gearBonus,
+        quantity: quantity > 1 ? quantity : undefined,
+      }),
     };
 
     const updatedWagonData = {
       ...wagonData,
-      [wagon]: [...wagonData[wagon], newItem],
+      [wagon]: normalizeInventoryItems([...wagonData[wagon], newItem]),
     };
 
     const saved = await saveWagons(updatedWagonData);
@@ -170,11 +193,17 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
 
     const updatedWagonData = {
       ...wagonData,
-      [editingItem.wagon]: wagonData[editingItem.wagon].map(item =>
+      [editingItem.wagon]: normalizeInventoryItems(wagonData[editingItem.wagon].map(item =>
         item.id === editingItem.itemId
-          ? { ...item, name, weight, gearBonus, quantity: quantity > 1 ? quantity : undefined }
+          ? buildItemFromForm({
+              id: item.id,
+              name,
+              weight,
+              gearBonus,
+              quantity: quantity > 1 ? quantity : undefined,
+            })
           : item
-      ),
+      )),
     };
 
     const saved = await saveWagons(updatedWagonData);
@@ -274,11 +303,12 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     };
 
     const updatedCharacterInventory = [...characterInventory, item];
+    const normalizedCharacterInventory = normalizeInventoryItems(updatedCharacterInventory);
 
     const saved = await saveWagons(updatedWagonData);
     if (saved) {
       setWagonData(updatedWagonData);
-      const updates = { inventory: updatedCharacterInventory };
+      const updates = { inventory: normalizedCharacterInventory };
       updateCharacter(updates);
       saveCharacter(updates);
     }
@@ -376,7 +406,7 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
                 <input
                   type="text"
                   value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  onChange={(e) => handleNameInputChange(e.target.value)}
                   className="w-full bg-gray-800 border border-amber-600/40 rounded-lg px-3 py-2 text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
                   placeholder="Item name"
                 />
@@ -458,7 +488,9 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
               >
                 <div className="flex-1">
                   <div className="flex items-center gap-3">
-                    <h4 className="font-bold text-amber-300">{item.name}</h4>
+                    <h4 className="font-bold text-amber-300">
+                      {item.name}{isImplementedItem(item) ? " ★" : ""}
+                    </h4>
                     {quantity > 1 && (
                       <button
                         onClick={() => handleDecrementQuantity(wagon, item.id)}

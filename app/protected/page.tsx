@@ -2,9 +2,11 @@
 
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { normalizeInventoryItems } from "@/lib/item-catalog";
 import Character from "../../components/character";
 import Inventory from "../../components/inventory";
 import Arts from "../../components/arts";
+import Talents from "../../components/talents";
 import Wagon from "../../components/wagon";
 import Combat from "../../components/combat";
 import Poll from "../../components/poll";
@@ -28,12 +30,27 @@ export type CharacterType = {
   skills: Record<string, number>;
   spirits: number;
   inventory?: InventoryItem[];
+  equipment_slots?: EquipmentSlots;
   known_art_ids?: string[];
   equipped_art_ids?: string[];
+  talent_levels?: Record<string, number>;
+  talents?: TalentProgress[];
   // Legacy fields kept for compatibility with older rows.
   arts?: Art[];
   equipped_arts?: Art[];
   icon_url?: string;
+};
+
+export type EquipmentSlots = {
+  armor: string | null;
+  helmet: string | null;
+  left: string | null;
+  right: string | null;
+};
+
+export type TalentProgress = {
+  id: string;
+  level: 1 | 2 | 3;
 };
 
 export type ArtKind = "true" | "demon" | "monster" | "angel" | "mortal" | "nature";
@@ -54,6 +71,12 @@ export type InventoryItem = {
   weight: number;
   gearBonus?: number;
   quantity?: number;
+  item_key?: string;
+  item_type?: string;
+  wield?: "1H" | "2H";
+  damage?: number;
+  range_band?: string;
+  properties?: string[];
 };
 
 type WagonData = {
@@ -71,7 +94,7 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "arts" | "wagon" | "combat" | "poll" | "kogra">("character");
+  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "arts" | "talents" | "wagon" | "combat" | "poll" | "kogra">("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [allCharacters, setAllCharacters] = useState<CharacterType[]>([]);
@@ -105,7 +128,26 @@ export default function Dashboard() {
       if (error) {
         console.error(error);
       } else {
-        setAllCharacters(chars || []);
+        const normalizedChars = (chars || []).map((char) => ({
+          ...char,
+          inventory: normalizeInventoryItems(char.inventory || []),
+        }));
+
+        if (adminUser) {
+          await Promise.all(
+            normalizedChars.map(async (char, idx) => {
+              const rawInv = (chars || [])[idx]?.inventory || [];
+              if (JSON.stringify(rawInv) !== JSON.stringify(char.inventory || [])) {
+                await supabase
+                  .from("characters")
+                  .update({ inventory: char.inventory || [] })
+                  .eq("id", char.id);
+              }
+            })
+          );
+        }
+
+        setAllCharacters(normalizedChars);
       }
 
       if (adminUser) {
@@ -177,9 +219,23 @@ export default function Dashboard() {
       console.error("Error fetching wagons:", error);
       setWagonData({ wagon1: [], wagon2: [] });
     } else {
+      const rawW1 = data.wagon1 || [];
+      const rawW2 = data.wagon2 || [];
+      const normW1 = normalizeInventoryItems(rawW1);
+      const normW2 = normalizeInventoryItems(rawW2);
+      const changed =
+        JSON.stringify(rawW1) !== JSON.stringify(normW1) ||
+        JSON.stringify(rawW2) !== JSON.stringify(normW2);
+
+      if (changed) {
+        await supabase
+          .from("wagons")
+          .upsert({ id: 1, wagon1: normW1, wagon2: normW2 });
+      }
+
       setWagonData({
-        wagon1: data.wagon1 || [],
-        wagon2: data.wagon2 || [],
+        wagon1: normW1,
+        wagon2: normW2,
       });
     }
   };
@@ -199,6 +255,14 @@ export default function Dashboard() {
       if (!data.inventory) {
         data.inventory = [];
       }
+      const normalizedInventory = normalizeInventoryItems(data.inventory || []);
+      if (JSON.stringify(data.inventory || []) !== JSON.stringify(normalizedInventory)) {
+        await supabase
+          .from("characters")
+          .update({ inventory: normalizedInventory })
+          .eq("id", data.id);
+      }
+      data.inventory = normalizedInventory;
       setCharacter(data);
       setShowCharacterSelect(false);
     }
@@ -211,6 +275,7 @@ export default function Dashboard() {
       if (!selectedChar.inventory) {
         selectedChar.inventory = [];
       }
+      selectedChar.inventory = normalizeInventoryItems(selectedChar.inventory || []);
       setCharacter(selectedChar);
       setShowCharacterSelect(false);
     }
@@ -219,15 +284,26 @@ export default function Dashboard() {
   const updateCharacter = (updates: Partial<CharacterType>) => {
     if (!character) return;
     const updatedCharacter = { ...character, ...updates };
+    if (
+      updatedCharacter.attributes &&
+      Object.values(updatedCharacter.attributes).some((value) => value <= 0)
+    ) {
+      updatedCharacter.spirits = 0;
+    }
     setCharacter(updatedCharacter);
   };
 
   const saveCharacter = async (updates: Partial<CharacterType>) => {
     if (!character) return;
+    const updatesToSave: Partial<CharacterType> = { ...updates };
+    const nextAttributes = updatesToSave.attributes ?? character.attributes;
+    if (nextAttributes && Object.values(nextAttributes).some((value) => value <= 0)) {
+      updatesToSave.spirits = 0;
+    }
     const supabase = createClient();
     await supabase
       .from("characters")
-      .update(updates)
+      .update(updatesToSave)
       .eq("id", character.id);
   };
 
@@ -381,7 +457,7 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
-      <div className="max-w-7xl mx-auto flex flex-col gap-4 relative">
+      <div className="max-w-[95vw] mx-auto flex flex-col gap-4 relative">
         {/* Notification Popup */}
         {notification && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
@@ -468,6 +544,16 @@ export default function Dashboard() {
               }`}
             >
               Arts
+            </button>
+            <button
+              onClick={() => setActiveTab("talents")}
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+                activeTab === "talents"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Talents
             </button>
             <button
               onClick={() => setActiveTab("combat")}
@@ -561,6 +647,11 @@ export default function Dashboard() {
               character={character}
               updateCharacter={updateCharacter}
               saveCharacter={saveCharacter}
+            />
+          )}
+          {activeTab === "talents" && (
+            <Talents
+              character={character}
             />
           )}
           {activeTab === "combat" && (

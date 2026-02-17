@@ -1,0 +1,11 @@
+[
+  {
+    "id": "talent-fast-footwork",
+    "name": "Fast Footwork",
+    "effectsByLevel": {
+      "1": "You can Dodge once for free every round in combat. This does not count as an action.",
+      "2": "You can Dodge once for free every round in combat. This does not count as an action.",
+      "3": "You can Dodge once for free every round in combat. This does not count as an action."
+    }
+  }
+]

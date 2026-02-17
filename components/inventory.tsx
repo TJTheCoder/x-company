@@ -1,12 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import { CharacterType, InventoryItem } from "../app/protected/page";
+import { CharacterType, EquipmentSlots, InventoryItem } from "../app/protected/page";
 import { createClient } from "@/lib/supabase/client";
+import {
+  buildItemFromForm,
+  getImplementedItemAutofill,
+  isImplementedItem,
+  normalizeInventoryItems,
+} from "@/lib/item-catalog";
 
 type WagonData = {
   wagon1: InventoryItem[];
   wagon2: InventoryItem[];
+};
+
+type CharacterRecipient = {
+  id: string;
+  name: string;
+  email: string;
+  inventory?: InventoryItem[];
+  max_attributes?: {
+    STR?: number;
+  };
 };
 
 type InventoryProps = {
@@ -27,18 +43,125 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     quantity: "",
   });
   const [error, setError] = useState("");
+  const [showSendModal, setShowSendModal] = useState(false);
+  const [sendingItem, setSendingItem] = useState<InventoryItem | null>(null);
+  const [recipientOptions, setRecipientOptions] = useState<CharacterRecipient[]>([]);
+  const [loadingRecipients, setLoadingRecipients] = useState(false);
+  const [isSending, setIsSending] = useState(false);
 
   if (!character) {
     return <p className="text-amber-300 text-center">No character found for your account.</p>;
   }
 
   const inventory = character.inventory || [];
+  const defaultSlots: EquipmentSlots = {
+    armor: null,
+    helmet: null,
+    left: null,
+    right: null,
+  };
+  const equipmentSlots: EquipmentSlots = {
+    ...defaultSlots,
+    ...(character.equipment_slots || {}),
+  };
+
+  const sanitizeEquipmentSlots = (slots: EquipmentSlots, items: InventoryItem[]): EquipmentSlots => {
+    const ids = new Set(items.map((item) => item.id));
+    const next: EquipmentSlots = { ...slots };
+    if (next.armor && !ids.has(next.armor)) next.armor = null;
+    if (next.helmet && !ids.has(next.helmet)) next.helmet = null;
+    if (next.left && !ids.has(next.left)) next.left = null;
+    if (next.right && !ids.has(next.right)) next.right = null;
+    return next;
+  };
+
+  const getSlotItem = (slot: keyof EquipmentSlots): InventoryItem | null => {
+    const itemId = equipmentSlots[slot];
+    if (!itemId) return null;
+    return inventory.find((item) => item.id === itemId) || null;
+  };
+
+  const slotAcceptsItem = (slot: keyof EquipmentSlots, item: InventoryItem): boolean => {
+    if (slot === "armor") return item.item_type === "Armor";
+    if (slot === "helmet") return item.item_type === "Helmet";
+    if (slot === "left" || slot === "right") return item.wield === "1H" || item.wield === "2H";
+    return false;
+  };
+
+  const equipItemToSlot = (slot: keyof EquipmentSlots, itemId: string) => {
+    const item = inventory.find((invItem) => invItem.id === itemId);
+    if (!item) return;
+
+    if (!slotAcceptsItem(slot, item)) {
+      setError(`"${item.name}" cannot be equipped in ${slot}.`);
+      setTimeout(() => setError(""), 3000);
+      return;
+    }
+
+    const nextSlots: EquipmentSlots = { ...equipmentSlots };
+
+    if (slot === "armor") {
+      nextSlots.armor = item.id;
+    } else if (slot === "helmet") {
+      nextSlots.helmet = item.id;
+    } else if (slot === "left" || slot === "right") {
+      if (item.wield === "2H") {
+        nextSlots.left = item.id;
+        nextSlots.right = item.id;
+      } else {
+        if (nextSlots.left && nextSlots.right && nextSlots.left === nextSlots.right) {
+          // Replacing a 2H item with a 1H item in one hand.
+          nextSlots.left = null;
+          nextSlots.right = null;
+        }
+        nextSlots[slot] = item.id;
+        const otherSlot: "left" | "right" = slot === "left" ? "right" : "left";
+        if (nextSlots[otherSlot] === item.id) {
+          nextSlots[otherSlot] = null;
+        }
+      }
+    }
+
+    const updates = { equipment_slots: nextSlots };
+    updateCharacter(updates);
+    saveCharacter(updates);
+    setError("");
+  };
+
+  const clearSlot = (slot: keyof EquipmentSlots) => {
+    const nextSlots: EquipmentSlots = { ...equipmentSlots };
+    if (slot === "left" || slot === "right") {
+      const value = nextSlots[slot];
+      if (value && nextSlots.left === value && nextSlots.right === value) {
+        nextSlots.left = null;
+        nextSlots.right = null;
+      } else {
+        nextSlots[slot] = null;
+      }
+    } else {
+      nextSlots[slot] = null;
+    }
+    const updates = { equipment_slots: nextSlots };
+    updateCharacter(updates);
+    saveCharacter(updates);
+  };
+
+  const onSlotDrop = (slot: keyof EquipmentSlots, event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const itemId = event.dataTransfer.getData("application/x-inventory-item-id");
+    if (!itemId) return;
+    equipItemToSlot(slot, itemId);
+  };
+
+  const calculateInventoryWeight = (items: InventoryItem[]) => {
+    return items.reduce((sum, item) => {
+      const quantity = item.quantity || 1;
+      return sum + (item.weight * quantity);
+    }, 0);
+  };
   
   // Calculate total weight considering quantity
-  const currentWeight = inventory.reduce((sum, item) => {
-    const quantity = item.quantity || 1;
-    return sum + (item.weight * quantity);
-  }, 0);
+  const currentWeight = calculateInventoryWeight(inventory);
   
   const maxWeight = character.max_attributes.STR * 2;
 
@@ -47,6 +170,20 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     setError("");
     setShowAddItem(false);
     setEditingItem(null);
+  };
+
+  const handleNameInputChange = (rawName: string) => {
+    const canonical = getImplementedItemAutofill(rawName);
+    setFormData((prev) => ({
+      ...prev,
+      name: canonical ? canonical.name : rawName,
+      weight: canonical ? canonical.weight.toString() : prev.weight,
+      gearBonus: canonical
+        ? canonical.gearBonus !== undefined
+          ? canonical.gearBonus.toString()
+          : ""
+        : prev.gearBonus,
+    }));
   };
 
   const handleAddItem = () => {
@@ -82,15 +219,20 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     }
 
     const newItem: InventoryItem = {
-      id: Date.now().toString(),
-      name,
-      weight,
-      gearBonus,
-      quantity: quantity > 1 ? quantity : undefined, // Only store if > 1
+      ...buildItemFromForm({
+        id: Date.now().toString(),
+        name,
+        weight,
+        gearBonus,
+        quantity: quantity > 1 ? quantity : undefined,
+      }),
     };
 
-    const updatedInventory = [...inventory, newItem];
-    const updates = { inventory: updatedInventory };
+    const updatedInventory = normalizeInventoryItems([...inventory, newItem]);
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
     resetForm();
@@ -150,13 +292,22 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
       return;
     }
 
-    const updatedInventory = inventory.map(item =>
+    const updatedInventory = normalizeInventoryItems(inventory.map(item =>
       item.id === editingItem
-        ? { ...item, name, weight, gearBonus, quantity: quantity > 1 ? quantity : undefined }
+        ? buildItemFromForm({
+            id: item.id,
+            name,
+            weight,
+            gearBonus,
+            quantity: quantity > 1 ? quantity : undefined,
+          })
         : item
-    );
+    ));
 
-    const updates = { inventory: updatedInventory };
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
     resetForm();
@@ -179,7 +330,10 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
         : i
     );
 
-    const updates = { inventory: updatedInventory };
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
   };
@@ -200,14 +354,20 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
         : i
     );
 
-    const updates = { inventory: updatedInventory };
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
   };
 
   const handleDeleteItem = (itemId: string) => {
     const updatedInventory = inventory.filter(item => item.id !== itemId);
-    const updates = { inventory: updatedInventory };
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
   };
@@ -248,9 +408,105 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
     }
 
     setWagonData(updatedWagonData);
-    const updates = { inventory: updatedInventory };
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
     updateCharacter(updates);
     saveCharacter(updates);
+  };
+
+  const openSendModal = async (item: InventoryItem) => {
+    setShowSendModal(true);
+    setSendingItem(item);
+    setLoadingRecipients(true);
+    setError("");
+
+    try {
+      const supabase = createClient();
+      const { data, error: recipientsError } = await supabase
+        .from("characters")
+        .select("id, name, email, inventory, max_attributes")
+        .neq("id", character.id)
+        .order("name", { ascending: true });
+
+      if (recipientsError) {
+        throw recipientsError;
+      }
+      setRecipientOptions((data || []) as CharacterRecipient[]);
+    } catch (sendError) {
+      const message = sendError instanceof Error ? sendError.message : "Failed to load recipients";
+      setError(message);
+      setShowSendModal(false);
+      setSendingItem(null);
+    } finally {
+      setLoadingRecipients(false);
+    }
+  };
+
+  const closeSendModal = () => {
+    setShowSendModal(false);
+    setSendingItem(null);
+    setRecipientOptions([]);
+    setLoadingRecipients(false);
+    setIsSending(false);
+  };
+
+  const notifySendFailure = async (recipientName: string, itemName: string) => {
+    const supabase = createClient();
+    await supabase
+      .from("notifications")
+      .insert({
+        message: `Could not send ${itemName} to ${recipientName}: they cannot carry that weight.`,
+        recipient_email: character.email,
+      });
+  };
+
+  const sendItemToRecipient = async (recipient: CharacterRecipient) => {
+    if (!sendingItem || isSending) return;
+    setIsSending(true);
+    setError("");
+
+    try {
+      const recipientInventory = recipient.inventory || [];
+      const recipientCurrentWeight = calculateInventoryWeight(recipientInventory);
+      const recipientMaxWeight = ((recipient.max_attributes?.STR ?? 0) * 2);
+      const itemQuantity = sendingItem.quantity || 1;
+      const itemTotalWeight = sendingItem.weight * itemQuantity;
+
+      if (recipientCurrentWeight + itemTotalWeight > recipientMaxWeight) {
+        await notifySendFailure(recipient.name, sendingItem.name);
+        closeSendModal();
+        return;
+      }
+
+      const updatedRecipientInventory = normalizeInventoryItems([...recipientInventory, sendingItem]);
+      const updatedSenderInventory = normalizeInventoryItems(inventory.filter((item) => item.id !== sendingItem.id));
+
+      const supabase = createClient();
+      const { error: recipientUpdateError } = await supabase
+        .from("characters")
+        .update({ inventory: updatedRecipientInventory })
+        .eq("id", recipient.id);
+
+      if (recipientUpdateError) {
+        throw recipientUpdateError;
+      }
+
+      const updates = { inventory: updatedSenderInventory };
+      const senderUpdates = {
+        ...updates,
+        equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedSenderInventory),
+      };
+      updateCharacter(senderUpdates);
+      await saveCharacter(senderUpdates);
+      closeSendModal();
+    } catch (sendError) {
+      const message = sendError instanceof Error ? sendError.message : "Failed to send item";
+      setError(message);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const weightPercentage = (currentWeight / maxWeight) * 100;
@@ -286,6 +542,42 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
         </div>
       </div>
 
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {(["armor", "helmet", "left", "right"] as const).map((slot) => {
+          const equipped = getSlotItem(slot);
+          const label = slot === "left" ? "Left" : slot === "right" ? "Right" : slot === "armor" ? "Armor" : "Helmet";
+          return (
+            <div
+              key={slot}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => onSlotDrop(slot, event)}
+              className="rounded-xl border border-amber-600/40 bg-gray-900/40 p-3 min-h-[92px]"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs uppercase tracking-wide text-amber-300/80 font-semibold">{label}</span>
+                {equipped && (
+                  <button
+                    onClick={() => clearSlot(slot)}
+                    className="rounded bg-gray-700 px-2 py-0.5 text-xs font-semibold text-amber-100 hover:bg-gray-600"
+                    title={`Clear ${label}`}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {equipped ? (
+                <div className="text-sm font-bold text-amber-200 truncate">
+                  {equipped.name}
+                  {equipped.wield === "2H" && slot !== "armor" && slot !== "helmet" ? " (2H)" : ""}
+                </div>
+              ) : (
+                <div className="text-sm text-amber-200/50">Empty</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
       {/* Add Item Button */}
       {!showAddItem && (
         <div className="flex justify-center">
@@ -319,7 +611,7 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
               <input
                 type="text"
                 value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                onChange={(e) => handleNameInputChange(e.target.value)}
                 className="w-full bg-gray-800 border border-amber-600/40 rounded-lg px-4 py-2 text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="Shortsword"
               />
@@ -390,9 +682,9 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
       )}
 
       {/* Inventory List */}
-      <div className="space-y-2 max-w-4xl mx-auto w-full">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 w-full">
         {inventory.length === 0 && !showAddItem && (
-          <div className="text-center py-12">
+          <div className="text-center py-12 col-span-full">
             <p className="text-amber-300/60 text-lg">Your inventory is empty</p>
             <p className="text-amber-300/40 text-sm mt-2">Add items to get started</p>
           </div>
@@ -405,11 +697,18 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
           return (
             <div
               key={item.id}
+              draggable={true}
+              onDragStart={(event) => {
+                event.dataTransfer.setData("application/x-inventory-item-id", item.id);
+                event.dataTransfer.effectAllowed = "move";
+              }}
               className="bg-gray-700 rounded-lg p-3 shadow-lg border border-amber-600/30 hover:border-amber-500/60 transition-all flex items-center justify-between"
             >
               <div className="flex-1">
                 <div className="flex items-center gap-3">
-                  <h4 className="font-bold text-amber-300">{item.name}</h4>
+                  <h4 className="font-bold text-amber-300">
+                    {item.name}{isImplementedItem(item) ? " ★" : ""}
+                  </h4>
                   {quantity > 1 && (
                     <button
                       onClick={() => handleDecrementQuantity(item.id)}
@@ -454,6 +753,12 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
                   Edit
                 </button>
                 <button
+                  onClick={() => openSendModal(item)}
+                  className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-sm font-bold transition-all"
+                >
+                  Send
+                </button>
+                <button
                   onClick={() => handleDeleteItem(item.id)}
                   className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-bold transition-all"
                 >
@@ -464,6 +769,46 @@ export default function Inventory({ character, updateCharacter, saveCharacter, w
           );
         })}
       </div>
+
+      {showSendModal && sendingItem && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 rounded-2xl shadow-2xl border border-amber-600/40 max-w-lg w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-2xl font-bold text-amber-400">Send Item</h3>
+              <button
+                onClick={closeSendModal}
+                className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-amber-100"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-amber-100 mb-4">
+              Send <span className="font-bold text-amber-300">{sendingItem.name}</span> to:
+            </p>
+
+            <div className="max-h-72 overflow-y-auto space-y-2">
+              {loadingRecipients && (
+                <p className="text-amber-200/80 text-sm">Loading characters...</p>
+              )}
+              {!loadingRecipients && recipientOptions.length === 0 && (
+                <p className="text-amber-200/80 text-sm">No valid recipients found.</p>
+              )}
+              {!loadingRecipients &&
+                recipientOptions.map((recipient) => (
+                  <button
+                    key={recipient.id}
+                    onClick={() => sendItemToRecipient(recipient)}
+                    disabled={isSending}
+                    className="w-full text-left bg-gray-700 hover:bg-gray-600 rounded-lg p-3 border border-amber-600/30 hover:border-amber-500/60 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <p className="font-bold text-amber-300">{recipient.name}</p>
+                  </button>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

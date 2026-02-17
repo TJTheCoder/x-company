@@ -15,6 +15,21 @@ create table if not exists public.combat_state (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.monsters (
+  id uuid primary key,
+  name text not null,
+  physical int not null check (physical > 0),
+  mental int not null check (mental > 0),
+  special int not null check (special >= 0),
+  gear jsonb not null default '[]'::jsonb,
+  arts jsonb not null default '[]'::jsonb,
+  range_band text not null check (range_band in ('Engaged', 'Near', 'Close', 'Long')),
+  tags jsonb not null default '[]'::jsonb,
+  icon_url text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 alter table public.combat_state add column if not exists zone_lines jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists token_positions jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists engagements jsonb not null default '[]'::jsonb;
@@ -22,6 +37,18 @@ alter table public.combat_state add column if not exists combat_mode boolean not
 alter table public.combat_state add column if not exists initiative_monsters jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists initiative_entries jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists initiative_current_index int null;
+
+alter table public.monsters add column if not exists name text;
+alter table public.monsters add column if not exists physical int;
+alter table public.monsters add column if not exists mental int;
+alter table public.monsters add column if not exists special int;
+alter table public.monsters add column if not exists gear jsonb not null default '[]'::jsonb;
+alter table public.monsters add column if not exists arts jsonb not null default '[]'::jsonb;
+alter table public.monsters add column if not exists range_band text;
+alter table public.monsters add column if not exists tags jsonb not null default '[]'::jsonb;
+alter table public.monsters add column if not exists icon_url text;
+alter table public.monsters add column if not exists created_at timestamptz not null default now();
+alter table public.monsters add column if not exists updated_at timestamptz not null default now();
 
 create or replace function public.combat_set_updated_at()
 returns trigger
@@ -38,7 +65,13 @@ create trigger trg_combat_state_updated_at
 before update on public.combat_state
 for each row execute function public.combat_set_updated_at();
 
+drop trigger if exists trg_monsters_updated_at on public.monsters;
+create trigger trg_monsters_updated_at
+before update on public.monsters
+for each row execute function public.combat_set_updated_at();
+
 alter table public.combat_state enable row level security;
+alter table public.monsters enable row level security;
 
 drop policy if exists combat_state_select on public.combat_state;
 create policy combat_state_select on public.combat_state
@@ -54,6 +87,26 @@ create policy combat_state_update_dm on public.combat_state
 for update to authenticated
 using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com')
 with check (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
+
+drop policy if exists monsters_select on public.monsters;
+create policy monsters_select on public.monsters
+for select to authenticated using (true);
+
+drop policy if exists monsters_insert_dm on public.monsters;
+create policy monsters_insert_dm on public.monsters
+for insert to authenticated
+with check (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
+
+drop policy if exists monsters_update_dm on public.monsters;
+create policy monsters_update_dm on public.monsters
+for update to authenticated
+using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com')
+with check (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
+
+drop policy if exists monsters_delete_dm on public.monsters;
+create policy monsters_delete_dm on public.monsters
+for delete to authenticated
+using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
 
 insert into public.combat_state (
   id, map_url, zone_lines, token_positions, engagements, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, updated_by_email
@@ -222,6 +275,10 @@ declare
   v_current_email text;
   v_key text;
   v_available boolean;
+  v_after_fast boolean;
+  v_after_slow boolean;
+  v_next_idx int;
+  v_reset_entries jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -265,11 +322,43 @@ begin
 
   v_current := jsonb_set(v_current, array[v_key], 'false'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
+  v_after_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
+  v_after_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
-  update public.combat_state
-  set initiative_entries = v_entries,
-      updated_by_email = v_email
-  where id = 1;
+  if not v_after_fast and not v_after_slow then
+    v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+
+    if v_next_idx = 0 and v_count > 0 then
+      select coalesce(
+        jsonb_agg(
+          jsonb_set(
+            jsonb_set(e.entry, '{fast_available}', 'true'::jsonb, true),
+            '{slow_available}', 'true'::jsonb, true
+          ) order by e.ord
+        ),
+        '[]'::jsonb
+      )
+      into v_reset_entries
+      from jsonb_array_elements(v_entries) with ordinality as e(entry, ord);
+
+      update public.combat_state
+      set initiative_entries = v_reset_entries,
+          initiative_current_index = v_next_idx,
+          updated_by_email = v_email
+      where id = 1;
+    else
+      update public.combat_state
+      set initiative_entries = v_entries,
+          initiative_current_index = v_next_idx,
+          updated_by_email = v_email
+      where id = 1;
+    end if;
+  else
+    update public.combat_state
+    set initiative_entries = v_entries,
+        updated_by_email = v_email
+    where id = 1;
+  end if;
 end;
 $$;
 
@@ -291,6 +380,8 @@ declare
   v_fast boolean;
   v_slow boolean;
   v_key text;
+  v_next_idx int;
+  v_reset_entries jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -335,11 +426,43 @@ begin
 
   v_current := jsonb_set(v_current, array[v_key], 'false'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
+  v_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
+  v_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
-  update public.combat_state
-  set initiative_entries = v_entries,
-      updated_by_email = v_email
-  where id = 1;
+  if not v_fast and not v_slow then
+    v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+
+    if v_next_idx = 0 and v_count > 0 then
+      select coalesce(
+        jsonb_agg(
+          jsonb_set(
+            jsonb_set(e.entry, '{fast_available}', 'true'::jsonb, true),
+            '{slow_available}', 'true'::jsonb, true
+          ) order by e.ord
+        ),
+        '[]'::jsonb
+      )
+      into v_reset_entries
+      from jsonb_array_elements(v_entries) with ordinality as e(entry, ord);
+
+      update public.combat_state
+      set initiative_entries = v_reset_entries,
+          initiative_current_index = v_next_idx,
+          updated_by_email = v_email
+      where id = 1;
+    else
+      update public.combat_state
+      set initiative_entries = v_entries,
+          initiative_current_index = v_next_idx,
+          updated_by_email = v_email
+      where id = 1;
+    end if;
+  else
+    update public.combat_state
+    set initiative_entries = v_entries,
+        updated_by_email = v_email
+    where id = 1;
+  end if;
 
   return case when v_key = 'fast_available' then 'fast' else 'slow' end;
 end;
@@ -540,6 +663,17 @@ begin
     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'combat_state'
   ) then
     alter publication supabase_realtime add table public.combat_state;
+  end if;
+end
+$$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'monsters'
+  ) then
+    alter publication supabase_realtime add table public.monsters;
   end if;
 end
 $$;

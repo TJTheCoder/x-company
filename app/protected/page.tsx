@@ -11,6 +11,7 @@ import Wagon from "../../components/wagon";
 import Combat from "../../components/combat";
 import Poll from "../../components/poll";
 import Kogra from "../../components/kogra";
+import Monsters from "../../components/monsters";
 
 type Attributes = {
   STR: number;
@@ -94,7 +95,9 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"character" | "inventory" | "arts" | "talents" | "wagon" | "combat" | "poll" | "kogra">("character");
+  const [activeTab, setActiveTab] = useState<
+    "character" | "inventory" | "arts" | "talents" | "wagon" | "combat" | "monsters" | "poll" | "kogra"
+  >("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [simulatePlayerMode, setSimulatePlayerMode] = useState(false);
@@ -104,7 +107,6 @@ export default function Dashboard() {
   const [wagonData, setWagonData] = useState<WagonData>({ wagon1: [], wagon2: [] });
   const [uploadingIcon, setUploadingIcon] = useState(false);
   const [notification, setNotification] = useState<NotificationData | null>(null);
-  const [drawGearRequestNonce, setDrawGearRequestNonce] = useState(0);
   const [drawGearReturnToCombat, setDrawGearReturnToCombat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -421,7 +423,6 @@ export default function Dashboard() {
 
   const startDrawGearFromCombat = () => {
     setDrawGearReturnToCombat(true);
-    setDrawGearRequestNonce((prev) => prev + 1);
     setActiveTab("inventory");
   };
 
@@ -545,11 +546,11 @@ export default function Dashboard() {
         )}
 
         {/* Tabs */}
-        <div className="flex justify-between items-center mb-6">
-          <div className="flex gap-4 border-b border-amber-500">
+        <div className="mb-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap gap-2 border-b border-amber-500 pb-2">
             <button
               onClick={() => setActiveTab("character")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "character"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -559,7 +560,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("inventory")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "inventory"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -569,7 +570,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("arts")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "arts"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -579,7 +580,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("talents")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "talents"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -589,7 +590,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("combat")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "combat"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -597,9 +598,21 @@ export default function Dashboard() {
             >
               Combat
             </button>
+            {effectiveIsAdmin && (
+              <button
+                onClick={() => setActiveTab("monsters")}
+                className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
+                  activeTab === "monsters"
+                    ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                    : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+                }`}
+              >
+                Monsters
+              </button>
+            )}
             <button
               onClick={() => setActiveTab("wagon")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "wagon"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -609,7 +622,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("poll")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "poll"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -619,7 +632,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("kogra")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "kogra"
                   ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
                   : "bg-gray-800 text-amber-200 hover:bg-gray-700"
@@ -675,7 +688,6 @@ export default function Dashboard() {
               wagonData={wagonData}
               setWagonData={setWagonData}
               userEmail={effectiveUserEmail}
-              drawGearRequestNonce={drawGearRequestNonce}
               drawGearReturnToCombat={drawGearReturnToCombat}
               onDrawGearFinished={onDrawGearFinished}
             />
@@ -707,6 +719,11 @@ export default function Dashboard() {
               isDM={effectiveIsAdmin}
               userEmail={effectiveUserEmail}
               onRequestDrawGear={startDrawGearFromCombat}
+            />
+          )}
+          {activeTab === "monsters" && (
+            <Monsters
+              isDM={effectiveIsAdmin}
             />
           )}
           {activeTab === "poll" && (

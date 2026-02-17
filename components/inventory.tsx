@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { CharacterType, EquipmentSlots, InventoryItem } from "../app/protected/page";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -32,25 +32,9 @@ type InventoryProps = {
   wagonData: WagonData;
   setWagonData: (data: WagonData) => void;
   userEmail: string | null;
-  drawGearRequestNonce: number;
   drawGearReturnToCombat: boolean;
   onDrawGearFinished: () => void;
 };
-
-type CombatInitiativeEntryLite = {
-  user_email: string | null;
-  fast_available?: boolean;
-  slow_available?: boolean;
-};
-
-type CombatStateLite = {
-  combat_mode: boolean | null;
-  initiative_entries: CombatInitiativeEntryLite[] | null;
-  initiative_current_index: number | null;
-};
-
-const normalizeEmail = (value: string | null | undefined): string =>
-  (value || "").trim().toLowerCase();
 
 export default function Inventory({
   character,
@@ -59,7 +43,6 @@ export default function Inventory({
   wagonData,
   setWagonData,
   userEmail,
-  drawGearRequestNonce,
   drawGearReturnToCombat,
   onDrawGearFinished,
 }: InventoryProps) {
@@ -77,10 +60,7 @@ export default function Inventory({
   const [recipientOptions, setRecipientOptions] = useState<CharacterRecipient[]>([]);
   const [loadingRecipients, setLoadingRecipients] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [combatMode, setCombatMode] = useState(false);
-  const [canUseDrawGearNow, setCanUseDrawGearNow] = useState(false);
-  const [drawGearPending, setDrawGearPending] = useState(false);
-  const [returnAfterDrawGear, setReturnAfterDrawGear] = useState(false);
+  void userEmail;
   const inventory = character?.inventory || [];
   const defaultSlots: EquipmentSlots = {
     armor: null,
@@ -116,80 +96,33 @@ export default function Inventory({
     return false;
   };
 
-  const loadCombatState = useCallback(async () => {
+  const consumeEquipActionIfInCombat = async (): Promise<boolean> => {
     const supabase = createClient();
     const { data, error: loadError } = await supabase
       .from("combat_state")
-      .select("combat_mode, initiative_entries, initiative_current_index")
+      .select("combat_mode")
       .eq("id", 1)
-      .maybeSingle<CombatStateLite>();
+      .maybeSingle<{ combat_mode: boolean | null }>();
 
     if (loadError) {
-      setCombatMode(false);
-      setCanUseDrawGearNow(false);
-      return { mode: false, myTurn: false, fast: false, slow: false };
+      setError(loadError.message);
+      setTimeout(() => setError(""), 3000);
+      return false;
     }
 
-    const mode = Boolean(data?.combat_mode);
-    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
-    const idx = data?.initiative_current_index;
-    const current =
-      idx !== null && idx !== undefined && idx >= 0 && idx < entries.length
-        ? entries[idx]
-        : null;
+    if (!data?.combat_mode) return true;
 
-    const myTurn = !!(
-      mode &&
-      current &&
-      userEmail &&
-      normalizeEmail(current.user_email) === normalizeEmail(userEmail)
-    );
-    setCombatMode(mode);
-    setCanUseDrawGearNow(Boolean(mode && myTurn && (current?.fast_available || current?.slow_available)));
-    return {
-      mode,
-      myTurn,
-      fast: Boolean(current?.fast_available),
-      slow: Boolean(current?.slow_available),
-    };
-  }, [userEmail]);
-
-  useEffect(() => {
-    loadCombatState();
-    const supabase = createClient();
-    const channel = supabase
-      .channel("inventory-combat-state")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "combat_state" },
-        () => {
-          loadCombatState();
-        }
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [loadCombatState]);
-
-  useEffect(() => {
-    if (drawGearRequestNonce <= 0) return;
-    loadCombatState().then((snapshot) => {
-      if (snapshot.mode && snapshot.myTurn && (snapshot.fast || snapshot.slow)) {
-        setDrawGearPending(true);
-        setReturnAfterDrawGear(drawGearReturnToCombat);
-      } else {
-        setDrawGearPending(false);
-      }
-    });
-  }, [drawGearRequestNonce, drawGearReturnToCombat, loadCombatState]);
-
-  const equipItemToSlot = (slot: keyof EquipmentSlots, itemId: string) => {
-    if (combatMode && !drawGearPending) {
-      setError("In combat mode, use Draw Gear to swap hand equipment.");
-      setTimeout(() => setError(""), 2500);
-      return;
+    const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
+    if (rpcError) {
+      setError(rpcError.message);
+      setTimeout(() => setError(""), 3000);
+      return false;
     }
+
+    return true;
+  };
+
+  const equipItemToSlot = async (slot: keyof EquipmentSlots, itemId: string) => {
     const item = inventory.find((invItem) => invItem.id === itemId);
     if (!item) return;
 
@@ -198,6 +131,9 @@ export default function Inventory({
       setTimeout(() => setError(""), 3000);
       return;
     }
+
+    const canEquip = await consumeEquipActionIfInCombat();
+    if (!canEquip) return;
 
     const nextSlots: EquipmentSlots = { ...equipmentSlots };
 
@@ -225,8 +161,11 @@ export default function Inventory({
 
     const updates = { equipment_slots: nextSlots };
     updateCharacter(updates);
-    saveCharacter(updates);
+    await saveCharacter(updates);
     setError("");
+    if (drawGearReturnToCombat) {
+      onDrawGearFinished();
+    }
   };
 
   const clearSlot = (slot: keyof EquipmentSlots) => {
@@ -248,63 +187,10 @@ export default function Inventory({
   };
 
   const onSlotDrop = (slot: keyof EquipmentSlots, event: React.DragEvent<HTMLDivElement>) => {
-    if (combatMode) return;
     event.preventDefault();
     const itemId = event.dataTransfer.getData("application/x-inventory-item-id");
     if (!itemId) return;
-    equipItemToSlot(slot, itemId);
-  };
-
-  const drawGearSwap = async (item: InventoryItem, hand?: "left" | "right") => {
-    if (!(drawGearPending || canUseDrawGearNow)) return;
-    const snapshot = await loadCombatState();
-    if (!(snapshot.mode && snapshot.myTurn && (snapshot.fast || snapshot.slow))) {
-      setError("You can only Draw Gear on your turn with a fast/slow action available.");
-      setDrawGearPending(false);
-      return;
-    }
-    if (item.wield !== "1H" && item.wield !== "2H") {
-      setError("Draw Gear can only equip hand items.");
-      return;
-    }
-    if (item.wield === "1H" && !hand) {
-      setError("Choose Left or Right hand for this item.");
-      return;
-    }
-
-    const nextSlots: EquipmentSlots = { ...equipmentSlots };
-    if (item.wield === "2H") {
-      nextSlots.left = item.id;
-      nextSlots.right = item.id;
-    } else if (hand) {
-      if (nextSlots.left && nextSlots.right && nextSlots.left === nextSlots.right) {
-        nextSlots.left = null;
-        nextSlots.right = null;
-      }
-      nextSlots[hand] = item.id;
-      const other: "left" | "right" = hand === "left" ? "right" : "left";
-      if (nextSlots[other] === item.id) nextSlots[other] = null;
-    }
-
-    const supabase = createClient();
-    const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
-    if (rpcError) {
-      setError(rpcError.message);
-      return;
-    }
-
-    const updates = { equipment_slots: nextSlots };
-    updateCharacter(updates);
-    await saveCharacter(updates);
-
-    const after = await loadCombatState();
-    if (!(after.mode && after.myTurn && (after.fast || after.slow))) {
-      setDrawGearPending(false);
-    }
-    if (returnAfterDrawGear) {
-      setReturnAfterDrawGear(false);
-      onDrawGearFinished();
-    }
+    void equipItemToSlot(slot, itemId);
   };
 
   const calculateInventoryWeight = (items: InventoryItem[]) => {
@@ -857,9 +743,8 @@ export default function Inventory({
           return (
             <div
               key={item.id}
-              draggable={!combatMode}
+              draggable
               onDragStart={(event) => {
-                if (combatMode) return;
                 event.dataTransfer.setData("application/x-inventory-item-id", item.id);
                 event.dataTransfer.effectAllowed = "move";
               }}
@@ -893,33 +778,6 @@ export default function Inventory({
               </div>
 
               <div className="flex gap-2">
-                {canUseDrawGearNow && (item.wield === "1H" || item.wield === "2H") && (
-                  <>
-                    {item.wield === "2H" ? (
-                      <button
-                        onClick={() => drawGearSwap(item)}
-                        className="px-3 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded text-sm font-bold transition-all"
-                      >
-                        Draw 2H
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => drawGearSwap(item, "left")}
-                          className="px-3 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded text-sm font-bold transition-all"
-                        >
-                          Draw L
-                        </button>
-                        <button
-                          onClick={() => drawGearSwap(item, "right")}
-                          className="px-3 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded text-sm font-bold transition-all"
-                        >
-                          Draw R
-                        </button>
-                      </>
-                    )}
-                  </>
-                )}
                 <button
                   onClick={() => handleTransferToWagon("wagon1", item)}
                   className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-bold transition-all"

@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import {
+  buildMonsterAutoEquipmentSlots,
+  buildMonsterSnapshot,
+  formatMonsterTooltip,
+  MonsterSnapshot,
+  MonsterTemplate,
+} from "@/lib/monsters";
 
 type CombatProps = {
   isDM: boolean;
@@ -28,6 +35,9 @@ type LegacyZoneLine = {
 type InitiativeMonster = {
   id: string;
   name: string;
+  template_id: string | null;
+  icon_url: string | null;
+  monster_snapshot: MonsterSnapshot | null;
 };
 
 type InitiativeEntry = {
@@ -36,6 +46,8 @@ type InitiativeEntry = {
   name: string;
   user_email: string | null;
   icon_url: string | null;
+  monster_template_id?: string | null;
+  monster_snapshot?: MonsterSnapshot | null;
   roll: number | null;
   slow_available: boolean;
   fast_available: boolean;
@@ -66,6 +78,14 @@ type TokenPosition = {
   character_id: string;
   x: number;
   y: number;
+};
+
+type RenderedToken = TokenPosition & {
+  type: "player" | "monster";
+  name: string;
+  email: string | null;
+  icon_url: string | null;
+  tooltip: string;
 };
 
 type EngagementEdge = {
@@ -302,12 +322,18 @@ function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undefined): 
         name: e.name,
         user_email: typeof e.user_email === "string" ? e.user_email : null,
         icon_url: typeof e.icon_url === "string" ? e.icon_url : null,
+        monster_template_id:
+          typeof e.monster_template_id === "string" ? e.monster_template_id : null,
+        monster_snapshot:
+          e.monster_snapshot && typeof e.monster_snapshot === "object"
+            ? (e.monster_snapshot as MonsterSnapshot)
+            : null,
         roll: typeof e.roll === "number" ? e.roll : null,
         slow_available: e.slow_available ?? true,
         fast_available: e.fast_available ?? true,
       };
     })
-    .filter((entry): entry is InitiativeEntry => !!entry);
+    .filter(Boolean) as InitiativeEntry[];
 }
 
 function normalizeTokenPositions(raw: TokenPosition[] | null | undefined): TokenPosition[] {
@@ -429,11 +455,13 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
   const [engagements, setEngagements] = useState<EngagementEdge[]>([]);
   const [combatMode, setCombatMode] = useState(false);
   const [initiativeMonsters, setInitiativeMonsters] = useState<InitiativeMonster[]>([]);
+  const [monsterTemplates, setMonsterTemplates] = useState<MonsterTemplate[]>([]);
+  const [deployMonsterQuery, setDeployMonsterQuery] = useState("");
   const [initiativeEntries, setInitiativeEntries] = useState<InitiativeEntry[]>([]);
   const [initiativeCurrentIndex, setInitiativeCurrentIndex] = useState<number | null>(null);
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
   const [monsterNameDrafts, setMonsterNameDrafts] = useState<Record<string, string>>({});
-  const [selectedTokenCharacterId, setSelectedTokenCharacterId] = useState<string | null>(null);
+  const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [draftLine, setDraftLine] = useState<ZoneStroke | null>(null);
@@ -462,9 +490,25 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       })),
     [characters]
   );
+  const preRollMonsterEntries = useMemo<InitiativeEntry[]>(
+    () =>
+      initiativeMonsters.map((monster) => ({
+        participant_id: monster.id,
+        kind: "monster",
+        name: monster.name,
+        user_email: null,
+        icon_url: monster.icon_url,
+        monster_template_id: monster.template_id,
+        monster_snapshot: monster.monster_snapshot,
+        roll: null,
+        slow_available: true,
+        fast_available: true,
+      })),
+    [initiativeMonsters]
+  );
   const displayedInitiativeEntries = useMemo(
-    () => (initiativeEntries.length > 0 ? initiativeEntries : playerEntries),
-    [initiativeEntries, playerEntries]
+    () => (initiativeEntries.length > 0 ? initiativeEntries : [...playerEntries, ...preRollMonsterEntries]),
+    [initiativeEntries, playerEntries, preRollMonsterEntries]
   );
   const currentEntry =
     initiativeCurrentIndex !== null &&
@@ -476,10 +520,16 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     currentEntry?.kind === "player" && currentEntry.user_email
       ? characters.find((char) => normalizeEmail(char.email) === normalizeEmail(currentEntry.user_email)) || null
       : null;
+  const monsterByParticipantId = useMemo(() => {
+    const map = new Map<string, InitiativeMonster>();
+    for (const monster of initiativeMonsters) {
+      map.set(monster.id, monster);
+    }
+    return map;
+  }, [initiativeMonsters]);
   const selectedTokenCharacter =
-    selectedTokenCharacterId
-      ? characters.find((char) => char.id === selectedTokenCharacterId) || null
-      : null;
+    selectedTokenId ? characters.find((char) => char.id === selectedTokenId) || null : null;
+  const selectedTokenMonster = selectedTokenId ? monsterByParticipantId.get(selectedTokenId) || null : null;
   const zoneRegionMap = useMemo(() => buildZoneRegionMap(zoneLines), [zoneLines]);
   const tokenByCharacterId = useMemo(() => {
     const map = new Map<string, TokenPosition>();
@@ -488,12 +538,15 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     }
     return map;
   }, [tokenPositions]);
+  const actorTokenId = useMemo(() => {
+    if (!currentEntry) return null;
+    if (currentEntry.kind === "monster") return currentEntry.participant_id;
+    return actorCharacter?.id ?? null;
+  }, [currentEntry, actorCharacter]);
   const isActorEngaged = useMemo(() => {
-    if (!actorCharacter) return false;
-    return engagements.some(
-      (edge) => edge.a === actorCharacter.id || edge.b === actorCharacter.id
-    );
-  }, [engagements, actorCharacter]);
+    if (!actorTokenId) return false;
+    return engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId);
+  }, [engagements, actorTokenId]);
 
   const zoneTintUrl = useMemo(() => {
     if (!isDmUser || !showZoneTint) return null;
@@ -511,26 +564,53 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     [isDmUser, userEmail]
   );
 
-  const renderedTokens = useMemo(
+  const renderedTokens = useMemo<RenderedToken[]>(
     () =>
       tokenPositions
-        .map((pos) => {
+        .map((pos): RenderedToken | null => {
           const character = characters.find((char) => char.id === pos.character_id);
-          if (!character) return null;
-          return { ...pos, character };
+          if (character) {
+            return {
+              ...pos,
+              type: "player" as const,
+              name: character.name,
+              email: character.email,
+              icon_url: character.icon_url,
+              tooltip: character.name,
+            };
+          }
+
+          const monster = monsterByParticipantId.get(pos.character_id);
+          if (monster) {
+            const tooltip =
+              isDmUser && monster.monster_snapshot
+                ? formatMonsterTooltip(monster.monster_snapshot)
+                : monster.name;
+            return {
+              ...pos,
+              type: "monster" as const,
+              name: monster.name,
+              email: null,
+              icon_url: monster.icon_url,
+              tooltip,
+            };
+          }
+          return null;
         })
-        .filter((value): value is TokenPosition & { character: CharacterLite } => !!value),
-    [tokenPositions, characters]
+        .filter((value): value is RenderedToken => value !== null),
+    [tokenPositions, characters, isDmUser, monsterByParticipantId]
   );
   const draggableTokenCharacterIds = useMemo(() => {
     const ids = new Set<string>();
     for (const token of renderedTokens) {
-      if (canPlaceTokenFor(token.character.email)) {
+      if (token.type === "monster" && isDmUser) {
+        ids.add(token.character_id);
+      } else if (token.type === "player" && canPlaceTokenFor(token.email)) {
         ids.add(token.character_id);
       }
     }
     return ids;
-  }, [renderedTokens, canPlaceTokenFor]);
+  }, [renderedTokens, canPlaceTokenFor, isDmUser]);
 
   const canPass = useMemo(() => {
     if (!currentEntry || !userEmail) return false;
@@ -543,29 +623,37 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
   }, [currentEntry, isDmUser, userEmail]);
   const canUseDrawGearFromToken = useMemo(() => {
-    if (!combatMode || !selectedTokenCharacter || !userEmail) return false;
-    if (normalizeEmail(selectedTokenCharacter.email) !== normalizeEmail(userEmail)) return false;
+    if (!combatMode || !selectedTokenId || !currentEntry) return false;
+    if (!actorTokenId || selectedTokenId !== actorTokenId) return false;
     if (!isMyTurn) return false;
+    if (currentEntry.kind === "monster" && !isDmUser) return false;
+    if (
+      currentEntry.kind === "player" &&
+      !isDmUser &&
+      (!selectedTokenCharacter || !userEmail || normalizeEmail(selectedTokenCharacter.email) !== normalizeEmail(userEmail))
+    ) {
+      return false;
+    }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, selectedTokenCharacter, userEmail, isMyTurn, currentEntry]);
+  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail]);
   const isSelectedSelf = useMemo(() => {
-    if (!selectedTokenCharacter || !actorCharacter) return false;
-    return selectedTokenCharacter.id === actorCharacter.id;
-  }, [selectedTokenCharacter, actorCharacter]);
+    if (!selectedTokenId || !actorTokenId) return false;
+    return selectedTokenId === actorTokenId;
+  }, [selectedTokenId, actorTokenId]);
   const canUseEngageFromSelection = useMemo(() => {
-    if (!combatMode || !actorCharacter || !selectedTokenCharacter) return false;
-    if (selectedTokenCharacter.id === actorCharacter.id) return false;
+    if (!combatMode || !actorTokenId || !selectedTokenId) return false;
+    if (selectedTokenId === actorTokenId) return false;
     if (!isMyTurn) return false;
     if (isActorEngaged) return false;
 
-    const actorToken = tokenByCharacterId.get(actorCharacter.id);
-    const targetToken = tokenByCharacterId.get(selectedTokenCharacter.id);
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    const targetToken = tokenByCharacterId.get(selectedTokenId);
     if (!actorToken || !targetToken) return false;
 
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
-  }, [combatMode, actorCharacter, selectedTokenCharacter, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap]);
 
   const loadCombatState = useCallback(async () => {
     const supabase = createClient();
@@ -587,7 +675,27 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     setTokenPositions(normalizeTokenPositions(data?.token_positions));
     setEngagements(normalizeEngagements(data?.engagements));
     setCombatMode(Boolean(data?.combat_mode));
-    setInitiativeMonsters(Array.isArray(data?.initiative_monsters) ? data!.initiative_monsters : []);
+    setInitiativeMonsters(
+      Array.isArray(data?.initiative_monsters)
+        ? data!.initiative_monsters
+            .map((monster) => {
+              if (!monster || typeof monster !== "object") return null;
+              const m = monster as Partial<InitiativeMonster>;
+              if (typeof m.id !== "string" || typeof m.name !== "string") return null;
+              return {
+                id: m.id,
+                name: m.name,
+                template_id: typeof m.template_id === "string" ? m.template_id : null,
+                icon_url: typeof m.icon_url === "string" ? m.icon_url : null,
+                monster_snapshot:
+                  m.monster_snapshot && typeof m.monster_snapshot === "object"
+                    ? (m.monster_snapshot as MonsterSnapshot)
+                    : null,
+              };
+            })
+            .filter((monster): monster is InitiativeMonster => !!monster)
+        : []
+    );
     setInitiativeEntries(normalizeInitiativeEntries(data?.initiative_entries));
     setInitiativeCurrentIndex(data?.initiative_current_index ?? null);
     setError(null);
@@ -606,6 +714,16 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     }
 
     setCharacters((data ?? []) as CharacterLite[]);
+  }, []);
+
+  const loadMonsterTemplates = useCallback(async () => {
+    const supabase = createClient();
+    const { data, error: loadError } = await supabase.from("monsters").select("*").order("name");
+    if (loadError) {
+      setError(loadError.message);
+      return;
+    }
+    setMonsterTemplates((data || []) as MonsterTemplate[]);
   }, []);
 
   useEffect(() => {
@@ -639,6 +757,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
 
   useEffect(() => {
     loadCharacters();
+    loadMonsterTemplates();
     loadCombatState();
 
     const supabase = createClient();
@@ -651,12 +770,19 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
           loadCombatState();
         }
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "monsters" },
+        () => {
+          loadMonsterTemplates();
+        }
+      )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [loadCombatState, loadCharacters]);
+  }, [loadCombatState, loadCharacters, loadMonsterTemplates]);
 
   const uploadBattlemap = useCallback(
     async (file: File) => {
@@ -743,24 +869,33 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       currentIndex: number | null,
       combatModeValue: boolean,
       monsters: InitiativeMonster[] = initiativeMonsters,
-      engagementEdges: EngagementEdge[] = engagements
+      engagementEdges: EngagementEdge[] = engagements,
+      tokens: TokenPosition[] | null = null
     ) => {
       if (!isDmUser) return;
+      const payload: {
+        id: number;
+        combat_mode: boolean;
+        initiative_entries: InitiativeEntry[];
+        initiative_current_index: number | null;
+        initiative_monsters: InitiativeMonster[];
+        engagements: EngagementEdge[];
+        token_positions?: TokenPosition[];
+        updated_by_email: string | null;
+      } = {
+        id: 1,
+        combat_mode: combatModeValue,
+        initiative_entries: entries,
+        initiative_current_index: currentIndex,
+        initiative_monsters: monsters,
+        engagements: engagementEdges,
+        updated_by_email: userEmail,
+      };
+      if (tokens) payload.token_positions = tokens;
       const supabase = createClient();
       const { error: saveError } = await supabase
         .from("combat_state")
-        .upsert(
-          {
-            id: 1,
-            combat_mode: combatModeValue,
-            initiative_entries: entries,
-            initiative_current_index: currentIndex,
-            initiative_monsters: monsters,
-            engagements: engagementEdges,
-            updated_by_email: userEmail,
-          },
-          { onConflict: "id" }
-        );
+        .upsert(payload, { onConflict: "id" });
       if (saveError) {
         setError(saveError.message);
       }
@@ -788,7 +923,9 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
         kind: "monster" as const,
         name: monster.name,
         user_email: null,
-        icon_url: null,
+        icon_url: monster.icon_url,
+        monster_template_id: monster.template_id,
+        monster_snapshot: monster.monster_snapshot,
         roll: rollUnique(used),
         slow_available: true,
         fast_available: true,
@@ -804,30 +941,29 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
 
   const resetInitiative = async () => {
     if (!isDmUser) return;
-    setInitiativeMonsters([]);
     setInitiativeEntries([]);
     setInitiativeCurrentIndex(null);
     setEngagements([]);
     setCombatMode(false);
-    setSelectedTokenCharacterId(null);
+    setSelectedTokenId(null);
     setMonsterNameDrafts({});
-    await saveInitiativeState([], null, false, [], []);
+    await saveInitiativeState([], null, false, initiativeMonsters, []);
   };
 
-  const addMonster = async () => {
+  const deployMonsterTemplate = async (monster: MonsterTemplate, quantity = 1) => {
     if (!isDmUser) return;
 
-    const defaultName = `Monster ${initiativeMonsters.length + 1}`;
-    const typed = window.prompt("Monster name", defaultName);
-    if (typed === null) return;
-
-    const name = typed.trim() || defaultName;
-    const monster: InitiativeMonster = {
+    const qty = Math.max(1, quantity);
+    const suffix = (idx: number) => String.fromCharCode("A".charCodeAt(0) + idx);
+    const deployed: InitiativeMonster[] = Array.from({ length: qty }, (_, idx) => ({
       id: `monster:${crypto.randomUUID()}`,
-      name,
-    };
+      name: qty > 1 ? `${monster.name} ${suffix(idx)}` : monster.name,
+      template_id: monster.id,
+      icon_url: monster.icon_url,
+      monster_snapshot: buildMonsterSnapshot(monster),
+    }));
 
-    const nextMonsters = [...initiativeMonsters, monster];
+    const nextMonsters = [...initiativeMonsters, ...deployed];
     setInitiativeMonsters(nextMonsters);
 
     let nextEntries = initiativeEntries;
@@ -841,18 +977,22 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       );
       const currentParticipant = currentEntry?.participant_id ?? null;
 
+      const newEntries = deployed.map((deployedMonster) => ({
+        participant_id: deployedMonster.id,
+        kind: "monster" as const,
+        name: deployedMonster.name,
+        user_email: null,
+        icon_url: deployedMonster.icon_url,
+        monster_template_id: deployedMonster.template_id,
+        monster_snapshot: deployedMonster.monster_snapshot,
+        roll: rollUnique(used),
+        slow_available: true,
+        fast_available: true,
+      }));
+
       nextEntries = [
         ...initiativeEntries,
-        {
-          participant_id: monster.id,
-          kind: "monster" as const,
-          name: monster.name,
-          user_email: null,
-          icon_url: null,
-          roll: rollUnique(used),
-          slow_available: true,
-          fast_available: true,
-        },
+        ...newEntries,
       ].sort((a, b) => rollSortValue(b.roll) - rollSortValue(a.roll));
 
       if (currentParticipant) {
@@ -869,18 +1009,49 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters);
   };
 
+  const deployMonsterFromQuery = async () => {
+    const raw = deployMonsterQuery.trim();
+    if (!raw) return;
+    const qtyMatch = raw.match(/^(.*?)(?:\s*x\s*(\d+))$/i);
+    const baseName = (qtyMatch?.[1] ?? raw).trim().toLowerCase();
+    const quantity = qtyMatch ? Math.max(1, Number.parseInt(qtyMatch[2], 10) || 1) : 1;
+    const monster = monsterTemplates.find((template) => template.name.trim().toLowerCase() === baseName);
+    if (!monster) {
+      return;
+    }
+    await deployMonsterTemplate(monster, quantity);
+    setDeployMonsterQuery("");
+    setError(null);
+  };
+
   const renameMonster = async (monsterId: string, nameRaw: string) => {
     if (!isDmUser) return;
     const name = nameRaw.trim();
     if (!name) return;
 
     const nextMonsters = initiativeMonsters.map((monster) =>
-      monster.id === monsterId ? { ...monster, name } : monster
+      monster.id === monsterId
+        ? {
+            ...monster,
+            name,
+            monster_snapshot: monster.monster_snapshot
+              ? { ...monster.monster_snapshot, name }
+              : monster.monster_snapshot,
+          }
+        : monster
     );
     setInitiativeMonsters(nextMonsters);
 
     const nextEntries = initiativeEntries.map((entry) =>
-      entry.participant_id === monsterId ? { ...entry, name } : entry
+      entry.participant_id === monsterId
+        ? {
+            ...entry,
+            name,
+            monster_snapshot: entry.monster_snapshot
+              ? { ...entry.monster_snapshot, name }
+              : entry.monster_snapshot,
+          }
+        : entry
     );
     setInitiativeEntries(nextEntries);
 
@@ -908,12 +1079,14 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     setInitiativeMonsters(nextMonsters);
     setInitiativeEntries(nextEntries);
     setInitiativeCurrentIndex(nextCurrent);
+    const nextTokens = tokenPositions.filter((token) => token.character_id !== monsterId);
+    setTokenPositions(nextTokens);
     setMonsterNameDrafts((prev) => {
       const next = { ...prev };
       delete next[monsterId];
       return next;
     });
-    await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters);
+    await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters, engagements, nextTokens);
   };
 
   const passTurn = async () => {
@@ -925,9 +1098,126 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     }
   };
 
-  const requestDrawGear = () => {
-    if (!canUseDrawGearFromToken) return;
-    onRequestDrawGear?.();
+  const engageByTokenIds = async (actorTokenIdValue: string, targetTokenIdValue: string) => {
+    if (!isDmUser) return;
+    if (actorTokenIdValue === targetTokenIdValue) return;
+
+    if (engagements.some((edge) => edge.a === actorTokenIdValue || edge.b === actorTokenIdValue)) {
+      return;
+    }
+
+    const component = new Set<string>([targetTokenIdValue]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const edge of engagements) {
+        if (component.has(edge.a) && !component.has(edge.b)) {
+          component.add(edge.b);
+          changed = true;
+        } else if (component.has(edge.b) && !component.has(edge.a)) {
+          component.add(edge.a);
+          changed = true;
+        }
+      }
+    }
+
+    const nextEdges = [...engagements];
+    for (const member of component) {
+      if (member === actorTokenIdValue) continue;
+      const a = actorTokenIdValue < member ? actorTokenIdValue : member;
+      const b = actorTokenIdValue < member ? member : actorTokenIdValue;
+      if (!nextEdges.some((edge) => edge.a === a && edge.b === b)) {
+        nextEdges.push({ a, b });
+      }
+    }
+
+    setEngagements(nextEdges);
+    setSelectedTokenId(null);
+    await saveInitiativeState(initiativeEntries, initiativeCurrentIndex, combatMode, initiativeMonsters, nextEdges);
+  };
+
+  const requestDrawGear = async () => {
+    if (!canUseDrawGearFromToken || !currentEntry) return;
+    if (currentEntry.kind === "player") {
+      onRequestDrawGear?.();
+      return;
+    }
+
+    if (!isDmUser) return;
+    const monsterId = currentEntry.participant_id;
+    const currentMonster = initiativeMonsters.find((monster) => monster.id === monsterId);
+    if (!currentMonster?.monster_snapshot) return;
+
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+
+    const { data: latest, error: latestError } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_monsters, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: InitiativeEntry[] | null;
+        initiative_monsters: InitiativeMonster[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (latestError) {
+      setError(latestError.message);
+      return;
+    }
+
+    const freshEntries = normalizeInitiativeEntries(latest?.initiative_entries);
+    const freshMonsters = Array.isArray(latest?.initiative_monsters) ? latest!.initiative_monsters : [];
+
+    const normalizedFreshMonsters = freshMonsters
+      .map((monster) => {
+        if (!monster || typeof monster !== "object") return null;
+        const m = monster as Partial<InitiativeMonster>;
+        if (typeof m.id !== "string" || typeof m.name !== "string") return null;
+        return {
+          id: m.id,
+          name: m.name,
+          template_id: typeof m.template_id === "string" ? m.template_id : null,
+          icon_url: typeof m.icon_url === "string" ? m.icon_url : null,
+          monster_snapshot:
+            m.monster_snapshot && typeof m.monster_snapshot === "object"
+              ? (m.monster_snapshot as MonsterSnapshot)
+              : null,
+        } as InitiativeMonster;
+      })
+      .filter((monster): monster is InitiativeMonster => !!monster);
+
+    const nextMonsters = normalizedFreshMonsters.map((monster) => {
+      if (monster.id !== monsterId || !monster.monster_snapshot) return monster;
+      return {
+        ...monster,
+        monster_snapshot: {
+          ...monster.monster_snapshot,
+          equipment_slots: buildMonsterAutoEquipmentSlots(monster.monster_snapshot.gear || []),
+        },
+      };
+    });
+
+    const refreshedMonster = nextMonsters.find((monster) => monster.id === monsterId);
+    const nextEntries = freshEntries.map((entry) =>
+      entry.participant_id === monsterId
+        ? { ...entry, monster_snapshot: refreshedMonster?.monster_snapshot ?? entry.monster_snapshot }
+        : entry
+    );
+
+    setInitiativeMonsters(nextMonsters);
+    setInitiativeEntries(nextEntries);
+    setInitiativeCurrentIndex(latest?.initiative_current_index ?? initiativeCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest?.initiative_current_index ?? initiativeCurrentIndex,
+      combatMode,
+      nextMonsters,
+      engagements
+    );
   };
 
   const engageTarget = async (actorCharacterId: string, targetCharacterId: string) => {
@@ -940,11 +1230,18 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       setError(rpcError.message);
       return;
     }
-    setSelectedTokenCharacterId(null);
+    setSelectedTokenId(null);
   };
 
   const requestEngage = async () => {
-    if (!canUseEngageFromSelection || !actorCharacter || !selectedTokenCharacter) return;
+    if (!canUseEngageFromSelection || !actorTokenId || !selectedTokenId) return;
+
+    if (isDmUser) {
+      await engageByTokenIds(actorTokenId, selectedTokenId);
+      return;
+    }
+
+    if (!actorCharacter || !selectedTokenCharacter) return;
     await engageTarget(actorCharacter.id, selectedTokenCharacter.id);
   };
 
@@ -1012,34 +1309,75 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     }
   };
 
+  const placeMonsterToken = async (monsterParticipantId: string, point: ZonePoint) => {
+    if (!isDmUser) return;
+    const currentToken = tokenByCharacterId.get(monsterParticipantId);
+    if (currentToken) {
+      const engaged = engagements.some(
+        (edge) => edge.a === monsterParticipantId || edge.b === monsterParticipantId
+      );
+      if (engaged) {
+        const fromZone = zoneIdAtPoint(zoneRegionMap, currentToken);
+        const toZone = zoneIdAtPoint(zoneRegionMap, point);
+        if (fromZone !== null && toZone !== null && fromZone !== toZone) {
+          return;
+        }
+      }
+    }
+
+    const nextTokens = [
+      ...tokenPositions.filter((token) => token.character_id !== monsterParticipantId),
+      { character_id: monsterParticipantId, x: point.x, y: point.y },
+    ];
+    setTokenPositions(nextTokens);
+
+    const supabase = createClient();
+    const { error: saveError } = await supabase
+      .from("combat_state")
+      .upsert({ id: 1, token_positions: nextTokens, updated_by_email: userEmail }, { onConflict: "id" });
+    if (saveError) {
+      setError(saveError.message);
+    }
+  };
+
   const onDrop = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragging(false);
 
+    const genericTokenId = event.dataTransfer.getData("application/x-combat-token-id");
     const tokenCharacterId = event.dataTransfer.getData("application/x-combat-player-id");
-    if (tokenCharacterId && mapUrl && imageRect) {
+    const droppedTokenId = genericTokenId || tokenCharacterId;
+    if (droppedTokenId && mapUrl && imageRect) {
       const point = dropEventToNormalizedPoint(event);
       if (!point) return;
 
       // Drag directly onto another token to engage.
       const dropTarget = renderedTokens.find((token) => {
-        if (token.character_id === tokenCharacterId) return false;
+        if (token.character_id === droppedTokenId) return false;
         const dx = (token.x - point.x) * imageRect.w;
         const dy = (token.y - point.y) * imageRect.h;
         return Math.hypot(dx, dy) <= 24;
       });
-      if (dropTarget && actorCharacter && tokenCharacterId === actorCharacter.id) {
-        const actorToken = tokenByCharacterId.get(actorCharacter.id);
+      if (dropTarget && actorTokenId && droppedTokenId === actorTokenId) {
+        const actorToken = tokenByCharacterId.get(actorTokenId);
         const targetToken = tokenByCharacterId.get(dropTarget.character_id);
         const actorZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
         const targetZone = targetToken ? zoneIdAtPoint(zoneRegionMap, targetToken) : null;
         if (combatMode && isMyTurn && !isActorEngaged && actorZone !== null && actorZone === targetZone) {
-          await engageTarget(actorCharacter.id, dropTarget.character_id);
+          if (isDmUser) {
+            await engageByTokenIds(actorTokenId, dropTarget.character_id);
+          } else if (actorCharacter && dropTarget.type === "player") {
+            await engageTarget(actorCharacter.id, dropTarget.character_id);
+          }
           return;
         }
       }
 
-      await placePlayerToken(tokenCharacterId, point);
+      if (droppedTokenId.startsWith("monster:")) {
+        await placeMonsterToken(droppedTokenId, point);
+      } else {
+        await placePlayerToken(droppedTokenId, point);
+      }
       return;
     }
 
@@ -1131,7 +1469,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
         <h3 className="text-xl font-bold text-amber-300 mb-3">Combat Actions</h3>
         <div className="rounded border border-amber-500/20 bg-gray-900/30 p-3 text-sm text-amber-100/90 mb-3">
-          {`Selected: ${selectedTokenCharacter ? selectedTokenCharacter.name : "None"}`}
+          {`Selected: ${selectedTokenCharacter?.name || selectedTokenMonster?.name || "None"}`}
         </div>
         <div className="space-y-2">
           {canUseEngageFromSelection && (
@@ -1189,8 +1527,9 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
           ref={mapContainerRef}
           onDragOver={(event) => {
             const hasToken = event.dataTransfer.types.includes("application/x-combat-player-id");
+            const hasGenericToken = event.dataTransfer.types.includes("application/x-combat-token-id");
             const hasFile = event.dataTransfer.files && event.dataTransfer.files.length > 0;
-            const canAcceptToken = hasToken && !!mapUrl && !!imageRect;
+            const canAcceptToken = (hasToken || hasGenericToken) && !!mapUrl && !!imageRect;
             const canAcceptFile = hasFile && isDmUser;
             if (!canAcceptToken && !canAcceptFile) return;
             event.preventDefault();
@@ -1308,6 +1647,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
                     onDragStart={(event) => {
                       if (!draggableTokenCharacterIds.has(token.character_id)) return;
                       draggedTokenRef.current = token.character_id;
+                      event.dataTransfer.setData("application/x-combat-token-id", token.character_id);
                       event.dataTransfer.setData("application/x-combat-player-id", token.character_id);
                       event.dataTransfer.effectAllowed = "move";
                     }}
@@ -1318,9 +1658,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
                     }}
                     onClick={() => {
                       if (draggedTokenRef.current === token.character_id) return;
-                      setSelectedTokenCharacterId((prev) =>
-                        prev === token.character_id ? null : token.character_id
-                      );
+                      setSelectedTokenId((prev) => (prev === token.character_id ? null : token.character_id));
                     }}
                     className={`absolute -translate-x-1/2 -translate-y-1/2 ${
                       draggableTokenCharacterIds.has(token.character_id)
@@ -1331,18 +1669,18 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
                       left: imageRect.x + token.x * imageRect.w,
                       top: imageRect.y + token.y * imageRect.h,
                     }}
-                    title={token.character.name}
+                    title={token.tooltip}
                   >
-                    {token.character.icon_url ? (
+                    {token.icon_url ? (
                       <img
-                        src={token.character.icon_url}
-                        alt={token.character.name}
+                        src={token.icon_url}
+                        alt={token.name}
                         draggable={false}
                         className="h-10 w-10 rounded-full border-2 border-amber-200/90 object-cover shadow-lg"
                       />
                     ) : (
                       <div className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-amber-200/90 bg-gray-800 text-xs font-bold text-amber-100 shadow-lg">
-                        {token.character.name.slice(0, 2).toUpperCase()}
+                        {token.name.slice(0, 2).toUpperCase()}
                       </div>
                     )}
                   </div>
@@ -1415,12 +1753,34 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
             >
               Reset
             </button>
-            <button
-              onClick={addMonster}
-              className="rounded bg-gray-700 px-3 py-1 text-sm font-semibold text-amber-100 hover:bg-gray-600"
-            >
-              Add Monster
-            </button>
+          </div>
+        )}
+
+        {isDmUser && (
+          <div className="mb-3 rounded border border-amber-500/20 bg-gray-900/30 p-2">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-300/90">
+              Deploy Monsters
+            </div>
+            <div className="flex gap-2">
+              <input
+                value={deployMonsterQuery}
+                onChange={(event) => setDeployMonsterQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void deployMonsterFromQuery();
+                  }
+                }}
+                className="w-full rounded bg-gray-800 px-2 py-1 text-xs text-amber-100 outline-none ring-1 ring-gray-600 focus:ring-amber-400"
+                placeholder="Type monster name (optional xN)"
+              />
+              <button
+                onClick={() => void deployMonsterFromQuery()}
+                className="rounded bg-gray-700 px-3 py-1 text-xs font-semibold text-amber-100 hover:bg-gray-600"
+              >
+                Add
+              </button>
+            </div>
           </div>
         )}
 
@@ -1436,17 +1796,25 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
             const nameDraft = monsterNameDrafts[entry.participant_id] ?? entry.name;
             const isPlayer = entry.kind === "player" && entry.participant_id.startsWith("player:");
             const playerCharacterId = isPlayer ? entry.participant_id.slice("player:".length) : null;
-            const draggableToken = isPlayer && canPlaceTokenFor(entry.user_email);
+            const draggableToken =
+              (isPlayer && canPlaceTokenFor(entry.user_email)) || (entry.kind === "monster" && isDmUser);
+            const dragTokenId = isPlayer ? playerCharacterId : entry.participant_id;
+            const entryTitle =
+              isDmUser && entry.kind === "monster" && entry.monster_snapshot
+                ? formatMonsterTooltip(entry.monster_snapshot)
+                : entry.name;
 
             return (
               <div
                 key={entry.participant_id}
                 draggable={draggableToken}
                 onDragStart={(event) => {
-                  if (!draggableToken || !playerCharacterId) return;
-                  event.dataTransfer.setData("application/x-combat-player-id", playerCharacterId);
+                  if (!draggableToken || !dragTokenId) return;
+                  event.dataTransfer.setData("application/x-combat-token-id", dragTokenId);
+                  event.dataTransfer.setData("application/x-combat-player-id", dragTokenId);
                   event.dataTransfer.effectAllowed = "move";
                 }}
+                title={entryTitle}
                 className={`flex items-center gap-2 rounded p-2 ${
                   isCurrent ? "bg-amber-500/20 border border-amber-400/70" : "bg-gray-900/40 border border-transparent"
                 } ${draggableToken ? "cursor-grab active:cursor-grabbing" : ""}`}

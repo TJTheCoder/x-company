@@ -511,6 +511,25 @@ begin
   end if;
 
   if p_declared_type = 'full_house' then
+    pair_rank := coalesce((p_declared_meta->>'pair_rank')::int, 0);
+    if pair_rank >= 2 then
+      return exists (
+        with r as (
+          select (c->>'rank')::int as rank_val, count(*) as cnt
+          from jsonb_array_elements(p_cards) c
+          group by 1
+        )
+        select 1
+        from r t
+        join r p on p.rank_val <> t.rank_val
+        where t.rank_val = p_declared_rank
+          and t.cnt >= 3
+          and p.rank_val = pair_rank
+          and p.cnt >= 2
+        limit 1
+      );
+    end if;
+
     declared_vec := public.kogra_decl_vector('full_house', p_declared_rank, coalesce(p_declared_meta, '{}'::jsonb));
     for best_three in
       select (c->>'rank')::int as rank_val
@@ -1363,19 +1382,17 @@ begin
     raise exception 'No challenge to continue';
   end if;
 
-  if coalesce(g.state->>'challenged_player_id', '') = '' then
-    raise exception 'No challenged player recorded';
+  if coalesce(g.state->>'challenged_player_id', '') = '' or coalesce(g.state->>'challenger_player_id', '') = '' then
+    raise exception 'Challenge metadata missing';
   end if;
 
   if not exists (
     select 1
     from public.kogra_players p
-    where p.id = (g.state->>'challenged_player_id')::uuid
-      and p.user_email = v_email
-      and p.is_active = true
-      and p.eliminated = false
+    where p.user_email = v_email
+      and p.id in ((g.state->>'challenged_player_id')::uuid, (g.state->>'challenger_player_id')::uuid)
   ) then
-    raise exception 'Only the challenged player can continue';
+    raise exception 'Only the challenger or challenged player can continue';
   end if;
 
   winner := (g.state->'last_call_result'->>'winner_player_id')::uuid;
@@ -1505,6 +1522,7 @@ begin
   ) then
     alter publication supabase_realtime add table public.kogra_events;
   end if;
+
 end
 $$;
 

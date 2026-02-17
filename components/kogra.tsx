@@ -503,15 +503,21 @@ export default function Kogra({ character, userEmail }: KograProps) {
   const isRoundOver = game?.status === "round_over";
   const canCallBluff = isMyTurn && game?.status === "in_round" && !!game?.state?.declared_by_player_id;
   const shouldImprove = isMyTurn && game?.status === "in_round" && !!game?.state?.declared_by_player_id;
-  const canContinueAfterChallenge =
-    !!(
-      game &&
-      myPlayer &&
-      isRoundOver &&
-      (game.state?.challenged_player_id
-        ? game.state.challenged_player_id === myPlayer.id
-        : game.current_turn_player_id === myPlayer.id)
+  const canContinueAfterChallenge = useMemo(() => {
+    if (!game || !isRoundOver || !userEmail) return false;
+    const challengedId = game.state?.challenged_player_id;
+    const challengerId = game.state?.challenger_player_id;
+    if (!challengedId && !challengerId) {
+      return game.current_turn_player_id
+        ? players.some((p) => p.user_email === userEmail && p.id === game.current_turn_player_id)
+        : false;
+    }
+    return players.some(
+      (p) =>
+        p.user_email === userEmail &&
+        (p.id === challengedId || p.id === challengerId)
     );
+  }, [game, isRoundOver, userEmail, players]);
 
   const previousDecl: Decl | null = useMemo(() => {
     if (!shouldImprove || !game?.state?.declared_type) return null;

@@ -470,6 +470,16 @@ export default function Dashboard() {
               Arts
             </button>
             <button
+              onClick={() => setActiveTab("combat")}
+              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
+                activeTab === "combat"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Combat
+            </button>
+            <button
               onClick={() => setActiveTab("wagon")}
               className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
                 activeTab === "wagon"
@@ -479,16 +489,6 @@ export default function Dashboard() {
             >
               Wagon
             </button>
-{/*             <button
-              onClick={() => setActiveTab("combat")}
-              className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
-                activeTab === "combat"
-                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
-                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
-              }`}
-            >
-              Combat
-            </button> */}
             <button
               onClick={() => setActiveTab("poll")}
               className={`px-6 py-3 font-semibold rounded-t-lg transition-all ${
@@ -563,7 +563,12 @@ export default function Dashboard() {
               saveCharacter={saveCharacter}
             />
           )}
-          {activeTab === "combat" && <Combat />}
+          {activeTab === "combat" && (
+            <Combat
+              isDM={isAdmin}
+              userEmail={userEmail}
+            />
+          )}
           {activeTab === "poll" && (
             <Poll
               character={character}

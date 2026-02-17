@@ -97,12 +97,15 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"character" | "inventory" | "arts" | "talents" | "wagon" | "combat" | "poll" | "kogra">("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [simulatePlayerMode, setSimulatePlayerMode] = useState(false);
   const [allCharacters, setAllCharacters] = useState<CharacterType[]>([]);
   const [showCharacterSelect, setShowCharacterSelect] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [wagonData, setWagonData] = useState<WagonData>({ wagon1: [], wagon2: [] });
   const [uploadingIcon, setUploadingIcon] = useState(false);
   const [notification, setNotification] = useState<NotificationData | null>(null);
+  const [drawGearRequestNonce, setDrawGearRequestNonce] = useState(0);
+  const [drawGearReturnToCombat, setDrawGearReturnToCombat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -246,26 +249,33 @@ export default function Dashboard() {
       .from("characters")
       .select("*")
       .eq("email", email)
-      .single();
+      .maybeSingle();
 
     if (error) {
-      console.error(error);
-    } else {
-      // Initialize inventory if it doesn't exist
-      if (!data.inventory) {
-        data.inventory = [];
-      }
-      const normalizedInventory = normalizeInventoryItems(data.inventory || []);
-      if (JSON.stringify(data.inventory || []) !== JSON.stringify(normalizedInventory)) {
-        await supabase
-          .from("characters")
-          .update({ inventory: normalizedInventory })
-          .eq("id", data.id);
-      }
-      data.inventory = normalizedInventory;
-      setCharacter(data);
-      setShowCharacterSelect(false);
+      console.error("Error fetching character:", error);
+      return;
     }
+
+    if (!data) {
+      setCharacter(null);
+      setShowCharacterSelect(false);
+      return;
+    }
+
+    // Initialize inventory if it doesn't exist
+    if (!data.inventory) {
+      data.inventory = [];
+    }
+    const normalizedInventory = normalizeInventoryItems(data.inventory || []);
+    if (JSON.stringify(data.inventory || []) !== JSON.stringify(normalizedInventory)) {
+      await supabase
+        .from("characters")
+        .update({ inventory: normalizedInventory })
+        .eq("id", data.id);
+    }
+    data.inventory = normalizedInventory;
+    setCharacter(data);
+    setShowCharacterSelect(false);
   };
 
   const selectCharacter = async (characterId: string) => {
@@ -392,6 +402,11 @@ export default function Dashboard() {
     setCharacter(null);
   };
 
+  const toggleSimulatePlayerMode = async () => {
+    const next = !simulatePlayerMode;
+    setSimulatePlayerMode(next);
+  };
+
   const dismissNotification = async () => {
     if (!notification) return;
     
@@ -402,6 +417,19 @@ export default function Dashboard() {
       .eq("id", notification.id);
     
     setNotification(null);
+  };
+
+  const startDrawGearFromCombat = () => {
+    setDrawGearReturnToCombat(true);
+    setDrawGearRequestNonce((prev) => prev + 1);
+    setActiveTab("inventory");
+  };
+
+  const onDrawGearFinished = () => {
+    if (drawGearReturnToCombat) {
+      setActiveTab("combat");
+      setDrawGearReturnToCombat(false);
+    }
   };
 
   if (showCharacterSelect) {
@@ -454,6 +482,10 @@ export default function Dashboard() {
       </main>
     );
   }
+
+  const effectiveIsAdmin = isAdmin && !simulatePlayerMode;
+  const effectiveUserEmail =
+    simulatePlayerMode && character?.email ? character.email : userEmail;
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
@@ -597,7 +629,19 @@ export default function Dashboard() {
             </button>
           </div>
           <div className="flex gap-3">
-            {isAdmin && character && (
+            {isAdmin && (
+              <button
+                onClick={toggleSimulatePlayerMode}
+                className={`px-4 py-2 rounded-lg shadow-md font-semibold transition-all hover:scale-105 ${
+                  simulatePlayerMode
+                    ? "bg-emerald-700 hover:bg-emerald-600 text-emerald-100"
+                    : "bg-blue-700 hover:bg-blue-600 text-amber-200"
+                }`}
+              >
+                {simulatePlayerMode ? "Simulating Player" : "Simulate Player"}
+              </button>
+            )}
+            {effectiveIsAdmin && character && (
               <button
                 onClick={switchCharacter}
                 className="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-amber-200 rounded-lg shadow-md font-semibold transition-all hover:scale-105"
@@ -630,6 +674,10 @@ export default function Dashboard() {
               saveCharacter={saveCharacter}
               wagonData={wagonData}
               setWagonData={setWagonData}
+              userEmail={effectiveUserEmail}
+              drawGearRequestNonce={drawGearRequestNonce}
+              drawGearReturnToCombat={drawGearReturnToCombat}
+              onDrawGearFinished={onDrawGearFinished}
             />
           )}
           {activeTab === "wagon" && (
@@ -656,8 +704,9 @@ export default function Dashboard() {
           )}
           {activeTab === "combat" && (
             <Combat
-              isDM={isAdmin}
-              userEmail={userEmail}
+              isDM={effectiveIsAdmin}
+              userEmail={effectiveUserEmail}
+              onRequestDrawGear={startDrawGearFromCombat}
             />
           )}
           {activeTab === "poll" && (
@@ -669,7 +718,7 @@ export default function Dashboard() {
           {activeTab === "kogra" && (
             <Kogra
               character={character}
-              userEmail={userEmail}
+              userEmail={effectiveUserEmail}
             />
           )}
         </div>

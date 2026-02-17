@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 type CombatProps = {
   isDM: boolean;
   userEmail: string | null;
+  onRequestDrawGear?: () => void;
 };
 
 type ZonePoint = {
@@ -52,6 +53,8 @@ type CombatStateRow = {
   map_url: string | null;
   zone_lines: (ZoneStroke | LegacyZoneLine)[] | null;
   token_positions: TokenPosition[] | null;
+  engagements: EngagementEdge[] | null;
+  combat_mode: boolean | null;
   initiative_monsters: InitiativeMonster[] | null;
   initiative_entries: InitiativeEntry[] | null;
   initiative_current_index: number | null;
@@ -65,6 +68,11 @@ type TokenPosition = {
   y: number;
 };
 
+type EngagementEdge = {
+  a: string;
+  b: string;
+};
+
 type ImageRect = {
   x: number;
   y: number;
@@ -74,6 +82,9 @@ type ImageRect = {
 
 const MAP_BUCKET = "combat-assets";
 const DM_EMAIL = "drocasma9@gmail.com";
+
+const normalizeEmail = (value: string | null | undefined): string =>
+  (value || "").trim().toLowerCase();
 
 function isLegacyLine(value: unknown): value is LegacyZoneLine {
   if (!value || typeof value !== "object") return false;
@@ -313,15 +324,116 @@ function normalizeTokenPositions(raw: TokenPosition[] | null | undefined): Token
     .filter((value): value is TokenPosition => !!value);
 }
 
-export default function Combat({ isDM, userEmail }: CombatProps) {
+function normalizeEngagements(raw: EngagementEdge[] | null | undefined): EngagementEdge[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((value) => {
+      if (!value || typeof value !== "object") return null;
+      const v = value as Partial<EngagementEdge>;
+      if (typeof v.a !== "string" || typeof v.b !== "string") return null;
+      if (!v.a || !v.b || v.a === v.b) return null;
+      return v.a < v.b ? { a: v.a, b: v.b } : { a: v.b, b: v.a };
+    })
+    .filter((value): value is EngagementEdge => !!value);
+}
+
+type ZoneRegionMap = {
+  width: number;
+  height: number;
+  regions: Int32Array;
+};
+
+function buildZoneRegionMap(strokes: ZoneStroke[], width = 320, height = 320): ZoneRegionMap | null {
+  if (typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.strokeStyle = "black";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeRect(0, 0, width, height);
+
+  for (const stroke of strokes) {
+    if (!stroke.points || stroke.points.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(stroke.points[0].x * width, stroke.points[0].y * height);
+    for (let i = 1; i < stroke.points.length; i++) {
+      ctx.lineTo(stroke.points[i].x * width, stroke.points[i].y * height);
+    }
+    ctx.stroke();
+  }
+
+  const img = ctx.getImageData(0, 0, width, height);
+  const data = img.data;
+  const regions = new Int32Array(width * height);
+  const qx = new Int32Array(width * height);
+  const qy = new Int32Array(width * height);
+  const isBoundary = (cell: number) => data[cell * 4 + 3] > 100;
+  let regionId = 1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const start = y * width + x;
+      if (regions[start] !== 0 || isBoundary(start)) continue;
+      let head = 0;
+      let tail = 0;
+      qx[tail] = x;
+      qy[tail] = y;
+      tail++;
+      regions[start] = regionId;
+
+      while (head < tail) {
+        const cx = qx[head];
+        const cy = qy[head];
+        head++;
+        const neighbors = [
+          [cx + 1, cy],
+          [cx - 1, cy],
+          [cx, cy + 1],
+          [cx, cy - 1],
+        ];
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const cell = ny * width + nx;
+          if (regions[cell] !== 0 || isBoundary(cell)) continue;
+          regions[cell] = regionId;
+          qx[tail] = nx;
+          qy[tail] = ny;
+          tail++;
+        }
+      }
+      regionId++;
+    }
+  }
+
+  return { width, height, regions };
+}
+
+function zoneIdAtPoint(map: ZoneRegionMap | null, point: ZonePoint): number | null {
+  if (!map) return null;
+  const x = Math.max(0, Math.min(map.width - 1, Math.floor(point.x * map.width)));
+  const y = Math.max(0, Math.min(map.height - 1, Math.floor(point.y * map.height)));
+  const id = map.regions[y * map.width + x];
+  return id > 0 ? id : null;
+}
+
+export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [zoneLines, setZoneLines] = useState<ZoneStroke[]>([]);
   const [tokenPositions, setTokenPositions] = useState<TokenPosition[]>([]);
+  const [engagements, setEngagements] = useState<EngagementEdge[]>([]);
+  const [combatMode, setCombatMode] = useState(false);
   const [initiativeMonsters, setInitiativeMonsters] = useState<InitiativeMonster[]>([]);
   const [initiativeEntries, setInitiativeEntries] = useState<InitiativeEntry[]>([]);
   const [initiativeCurrentIndex, setInitiativeCurrentIndex] = useState<number | null>(null);
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
   const [monsterNameDrafts, setMonsterNameDrafts] = useState<Record<string, string>>({});
+  const [selectedTokenCharacterId, setSelectedTokenCharacterId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [draftLine, setDraftLine] = useState<ZoneStroke | null>(null);
@@ -332,6 +444,7 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
   const [imageRect, setImageRect] = useState<ImageRect | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const draggedTokenRef = useRef<string | null>(null);
 
   const isDmUser = isDM && userEmail === DM_EMAIL;
   const canDraw = isDmUser && !!mapUrl && !!imageRect;
@@ -359,6 +472,28 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     initiativeCurrentIndex < displayedInitiativeEntries.length
       ? displayedInitiativeEntries[initiativeCurrentIndex]
       : null;
+  const actorCharacter =
+    currentEntry?.kind === "player" && currentEntry.user_email
+      ? characters.find((char) => normalizeEmail(char.email) === normalizeEmail(currentEntry.user_email)) || null
+      : null;
+  const selectedTokenCharacter =
+    selectedTokenCharacterId
+      ? characters.find((char) => char.id === selectedTokenCharacterId) || null
+      : null;
+  const zoneRegionMap = useMemo(() => buildZoneRegionMap(zoneLines), [zoneLines]);
+  const tokenByCharacterId = useMemo(() => {
+    const map = new Map<string, TokenPosition>();
+    for (const token of tokenPositions) {
+      map.set(token.character_id, token);
+    }
+    return map;
+  }, [tokenPositions]);
+  const isActorEngaged = useMemo(() => {
+    if (!actorCharacter) return false;
+    return engagements.some(
+      (edge) => edge.a === actorCharacter.id || edge.b === actorCharacter.id
+    );
+  }, [engagements, actorCharacter]);
 
   const zoneTintUrl = useMemo(() => {
     if (!isDmUser || !showZoneTint) return null;
@@ -400,15 +535,44 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
   const canPass = useMemo(() => {
     if (!currentEntry || !userEmail) return false;
     if (isDmUser) return true;
-    return !!currentEntry.user_email && currentEntry.user_email === userEmail;
+    return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
   }, [currentEntry, userEmail, isDmUser]);
+  const isMyTurn = useMemo(() => {
+    if (!currentEntry || !userEmail) return false;
+    if (isDmUser) return true;
+    return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
+  }, [currentEntry, isDmUser, userEmail]);
+  const canUseDrawGearFromToken = useMemo(() => {
+    if (!combatMode || !selectedTokenCharacter || !userEmail) return false;
+    if (normalizeEmail(selectedTokenCharacter.email) !== normalizeEmail(userEmail)) return false;
+    if (!isMyTurn) return false;
+    return !!(currentEntry?.fast_available || currentEntry?.slow_available);
+  }, [combatMode, selectedTokenCharacter, userEmail, isMyTurn, currentEntry]);
+  const isSelectedSelf = useMemo(() => {
+    if (!selectedTokenCharacter || !actorCharacter) return false;
+    return selectedTokenCharacter.id === actorCharacter.id;
+  }, [selectedTokenCharacter, actorCharacter]);
+  const canUseEngageFromSelection = useMemo(() => {
+    if (!combatMode || !actorCharacter || !selectedTokenCharacter) return false;
+    if (selectedTokenCharacter.id === actorCharacter.id) return false;
+    if (!isMyTurn) return false;
+    if (isActorEngaged) return false;
+
+    const actorToken = tokenByCharacterId.get(actorCharacter.id);
+    const targetToken = tokenByCharacterId.get(selectedTokenCharacter.id);
+    if (!actorToken || !targetToken) return false;
+
+    const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
+    return actorZone !== null && targetZone !== null && actorZone === targetZone;
+  }, [combatMode, actorCharacter, selectedTokenCharacter, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap]);
 
   const loadCombatState = useCallback(async () => {
     const supabase = createClient();
     const { data, error: loadError } = await supabase
       .from("combat_state")
       .select(
-        "id, map_url, zone_lines, token_positions, initiative_monsters, initiative_entries, initiative_current_index, updated_by_email, updated_at"
+        "id, map_url, zone_lines, token_positions, engagements, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, updated_by_email, updated_at"
       )
       .eq("id", 1)
       .maybeSingle<CombatStateRow>();
@@ -421,6 +585,8 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     setMapUrl(data?.map_url ?? null);
     setZoneLines(normalizeZoneLines(data?.zone_lines));
     setTokenPositions(normalizeTokenPositions(data?.token_positions));
+    setEngagements(normalizeEngagements(data?.engagements));
+    setCombatMode(Boolean(data?.combat_mode));
     setInitiativeMonsters(Array.isArray(data?.initiative_monsters) ? data!.initiative_monsters : []);
     setInitiativeEntries(normalizeInitiativeEntries(data?.initiative_entries));
     setInitiativeCurrentIndex(data?.initiative_current_index ?? null);
@@ -575,7 +741,9 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     async (
       entries: InitiativeEntry[],
       currentIndex: number | null,
-      monsters: InitiativeMonster[] = initiativeMonsters
+      combatModeValue: boolean,
+      monsters: InitiativeMonster[] = initiativeMonsters,
+      engagementEdges: EngagementEdge[] = engagements
     ) => {
       if (!isDmUser) return;
       const supabase = createClient();
@@ -584,9 +752,11 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
         .upsert(
           {
             id: 1,
+            combat_mode: combatModeValue,
             initiative_entries: entries,
             initiative_current_index: currentIndex,
             initiative_monsters: monsters,
+            engagements: engagementEdges,
             updated_by_email: userEmail,
           },
           { onConflict: "id" }
@@ -595,7 +765,7 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
         setError(saveError.message);
       }
     },
-    [initiativeMonsters, isDmUser, userEmail]
+    [initiativeMonsters, engagements, isDmUser, userEmail]
   );
 
   const rollInitiative = async () => {
@@ -626,9 +796,10 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     ].sort((a, b) => rollSortValue(b.roll) - rollSortValue(a.roll));
 
     const currentIndex = entries.length > 0 ? 0 : null;
+    setCombatMode(true);
     setInitiativeEntries(entries);
     setInitiativeCurrentIndex(currentIndex);
-    await saveInitiativeState(entries, currentIndex);
+    await saveInitiativeState(entries, currentIndex, true);
   };
 
   const resetInitiative = async () => {
@@ -636,8 +807,11 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     setInitiativeMonsters([]);
     setInitiativeEntries([]);
     setInitiativeCurrentIndex(null);
+    setEngagements([]);
+    setCombatMode(false);
+    setSelectedTokenCharacterId(null);
     setMonsterNameDrafts({});
-    await saveInitiativeState([], null, []);
+    await saveInitiativeState([], null, false, [], []);
   };
 
   const addMonster = async () => {
@@ -692,7 +866,7 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
       setInitiativeCurrentIndex(nextCurrent);
     }
 
-    await saveInitiativeState(nextEntries, nextCurrent, nextMonsters);
+    await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters);
   };
 
   const renameMonster = async (monsterId: string, nameRaw: string) => {
@@ -710,7 +884,7 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     );
     setInitiativeEntries(nextEntries);
 
-    await saveInitiativeState(nextEntries, initiativeCurrentIndex, nextMonsters);
+    await saveInitiativeState(nextEntries, initiativeCurrentIndex, combatMode, nextMonsters);
   };
 
   const deleteMonster = async (monsterId: string) => {
@@ -739,7 +913,7 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
       delete next[monsterId];
       return next;
     });
-    await saveInitiativeState(nextEntries, nextCurrent, nextMonsters);
+    await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters);
   };
 
   const passTurn = async () => {
@@ -749,6 +923,29 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     if (rpcError) {
       setError(rpcError.message);
     }
+  };
+
+  const requestDrawGear = () => {
+    if (!canUseDrawGearFromToken) return;
+    onRequestDrawGear?.();
+  };
+
+  const engageTarget = async (actorCharacterId: string, targetCharacterId: string) => {
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_engage", {
+      p_actor_character_id: actorCharacterId,
+      p_target_character_id: targetCharacterId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    setSelectedTokenCharacterId(null);
+  };
+
+  const requestEngage = async () => {
+    if (!canUseEngageFromSelection || !actorCharacter || !selectedTokenCharacter) return;
+    await engageTarget(actorCharacter.id, selectedTokenCharacter.id);
   };
 
   const consumeAction = async (actionType: "fast" | "slow") => {
@@ -792,6 +989,17 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
       setError("You can only place your own token.");
       return;
     }
+    const currentToken = tokenByCharacterId.get(characterId);
+    if (currentToken) {
+      const engaged = engagements.some((edge) => edge.a === characterId || edge.b === characterId);
+      if (engaged) {
+        const fromZone = zoneIdAtPoint(zoneRegionMap, currentToken);
+        const toZone = zoneIdAtPoint(zoneRegionMap, point);
+        if (fromZone !== null && toZone !== null && fromZone !== toZone) {
+          return;
+        }
+      }
+    }
 
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_upsert_player_token", {
@@ -812,6 +1020,25 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
     if (tokenCharacterId && mapUrl && imageRect) {
       const point = dropEventToNormalizedPoint(event);
       if (!point) return;
+
+      // Drag directly onto another token to engage.
+      const dropTarget = renderedTokens.find((token) => {
+        if (token.character_id === tokenCharacterId) return false;
+        const dx = (token.x - point.x) * imageRect.w;
+        const dy = (token.y - point.y) * imageRect.h;
+        return Math.hypot(dx, dy) <= 24;
+      });
+      if (dropTarget && actorCharacter && tokenCharacterId === actorCharacter.id) {
+        const actorToken = tokenByCharacterId.get(actorCharacter.id);
+        const targetToken = tokenByCharacterId.get(dropTarget.character_id);
+        const actorZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
+        const targetZone = targetToken ? zoneIdAtPoint(zoneRegionMap, targetToken) : null;
+        if (combatMode && isMyTurn && !isActorEngaged && actorZone !== null && actorZone === targetZone) {
+          await engageTarget(actorCharacter.id, dropTarget.character_id);
+          return;
+        }
+      }
+
       await placePlayerToken(tokenCharacterId, point);
       return;
     }
@@ -904,29 +1131,46 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
       <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
         <h3 className="text-xl font-bold text-amber-300 mb-3">Combat Actions</h3>
         <div className="rounded border border-amber-500/20 bg-gray-900/30 p-3 text-sm text-amber-100/90 mb-3">
-          {currentEntry ? `Current: ${currentEntry.name}` : "No active turn"}
+          {`Selected: ${selectedTokenCharacter ? selectedTokenCharacter.name : "None"}`}
         </div>
         <div className="space-y-2">
+          {canUseEngageFromSelection && (
           <button
-            onClick={() => consumeAction("slow")}
-            disabled={!canPass || !currentEntry?.slow_available}
-            className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={requestEngage}
+            className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Dummy Slow
+            Engage
           </button>
+          )}
+          {isSelectedSelf && (
           <button
-            onClick={() => consumeAction("fast")}
-            disabled={!canPass || !currentEntry?.fast_available}
+            onClick={requestDrawGear}
+            disabled={!canUseDrawGearFromToken}
             className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Dummy Fast
+            Draw Gear
           </button>
+          )}
           <button
             onClick={passTurn}
             disabled={!canPass}
             className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Pass
+          </button>
+          <button
+            onClick={() => consumeAction("slow")}
+            disabled={!canPass || !currentEntry?.slow_available}
+            className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Generic Slow
+          </button>
+          <button
+            onClick={() => consumeAction("fast")}
+            disabled={!canPass || !currentEntry?.fast_available}
+            className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Generic Fast
           </button>
         </div>
       </aside>
@@ -1034,6 +1278,28 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
                   }}
                 />
               )}
+              {imageRect && (
+                <svg className="absolute inset-0 h-full w-full pointer-events-none">
+                  {engagements.map((edge, idx) => {
+                    const a = tokenByCharacterId.get(edge.a);
+                    const b = tokenByCharacterId.get(edge.b);
+                    if (!a || !b) return null;
+                    return (
+                      <line
+                        key={`engagement-${idx}-${edge.a}-${edge.b}`}
+                        x1={imageRect.x + a.x * imageRect.w}
+                        y1={imageRect.y + a.y * imageRect.h}
+                        x2={imageRect.x + b.x * imageRect.w}
+                        y2={imageRect.y + b.y * imageRect.h}
+                        stroke="#60a5fa"
+                        strokeWidth={3}
+                        strokeDasharray="8 6"
+                        opacity={0.95}
+                      />
+                    );
+                  })}
+                </svg>
+              )}
               {imageRect &&
                 renderedTokens.map((token) => (
                   <div
@@ -1041,8 +1307,20 @@ export default function Combat({ isDM, userEmail }: CombatProps) {
                     draggable={draggableTokenCharacterIds.has(token.character_id)}
                     onDragStart={(event) => {
                       if (!draggableTokenCharacterIds.has(token.character_id)) return;
+                      draggedTokenRef.current = token.character_id;
                       event.dataTransfer.setData("application/x-combat-player-id", token.character_id);
                       event.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragEnd={() => {
+                      window.setTimeout(() => {
+                        draggedTokenRef.current = null;
+                      }, 0);
+                    }}
+                    onClick={() => {
+                      if (draggedTokenRef.current === token.character_id) return;
+                      setSelectedTokenCharacterId((prev) =>
+                        prev === token.character_id ? null : token.character_id
+                      );
                     }}
                     className={`absolute -translate-x-1/2 -translate-y-1/2 ${
                       draggableTokenCharacterIds.has(token.character_id)

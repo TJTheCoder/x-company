@@ -7,9 +7,9 @@ import {
   MonsterTemplate,
   monsterToArtsCsv,
   monsterToGearCsv,
-  monsterToTagsCsv,
+  monsterToTraitsCsv,
   parseMonsterArtsCsv,
-  normalizeMonsterTagsCsv,
+  normalizeMonsterTraitsCsv,
   parseMonsterGearCsv,
 } from "@/lib/monsters";
 
@@ -37,10 +37,11 @@ const initialForm = {
   physical: "1",
   mental: "1",
   special: "0",
+  size: "1",
   gear: "",
   arts: "",
   range_band: "Near" as MonsterRangeBand,
-  tags: "",
+  traits: "",
 };
 
 const parseIconPath = (url: string | null): string | null => {
@@ -87,7 +88,7 @@ export default function Monsters({ isDM }: MonstersProps) {
   const isEditing = Boolean(editingId);
   const parsedGear = useMemo(() => parseMonsterGearCsv(form.gear), [form.gear]);
   const parsedArts = useMemo(() => parseMonsterArtsCsv(form.arts), [form.arts]);
-  const parsedTags = useMemo(() => normalizeMonsterTagsCsv(form.tags), [form.tags]);
+  const parsedTraits = useMemo(() => normalizeMonsterTraitsCsv(form.traits), [form.traits]);
 
   const loadMonsters = async () => {
     setLoading(true);
@@ -101,7 +102,11 @@ export default function Monsters({ isDM }: MonstersProps) {
       setLoading(false);
       return;
     }
-    setMonsters((data || []) as MonsterTemplate[]);
+    const normalized = ((data || []) as MonsterTemplate[]).map((monster) => ({
+      ...monster,
+      size: Number.isFinite(monster.size) ? Math.trunc(monster.size) : 1,
+    }));
+    setMonsters(normalized);
     setLoading(false);
   };
 
@@ -255,11 +260,13 @@ export default function Monsters({ isDM }: MonstersProps) {
     const physical = Number.parseInt(form.physical, 10);
     const mental = Number.parseInt(form.mental, 10);
     const special = Number.parseInt(form.special, 10);
+    const size = Number.parseInt(form.size, 10);
 
     if (!name) return "Name is required.";
     if (!Number.isInteger(physical) || physical <= 0) return "Physical must be an integer greater than 0.";
     if (!Number.isInteger(mental) || mental <= 0) return "Mental must be an integer greater than 0.";
     if (!Number.isInteger(special) || special < 0) return "Special must be a non-negative integer.";
+    if (!Number.isInteger(size)) return "Size must be an integer.";
     return null;
   };
 
@@ -278,6 +285,7 @@ export default function Monsters({ isDM }: MonstersProps) {
     const physical = Number.parseInt(form.physical, 10);
     const mental = Number.parseInt(form.mental, 10);
     const special = Number.parseInt(form.special, 10);
+    const size = Number.parseInt(form.size, 10);
     const nowId = editingId || crypto.randomUUID();
 
     const payload: MonsterTemplate = {
@@ -286,10 +294,11 @@ export default function Monsters({ isDM }: MonstersProps) {
       physical,
       mental,
       special,
+      size,
       gear: parsedGear,
       arts: parsedArts,
       range_band: form.range_band,
-      tags: parsedTags,
+      traits: parsedTraits,
       icon_url: null,
     };
 
@@ -326,10 +335,11 @@ export default function Monsters({ isDM }: MonstersProps) {
       physical: `${monster.physical}`,
       mental: `${monster.mental}`,
       special: `${monster.special}`,
+      size: `${Number.isFinite(monster.size) ? Math.trunc(monster.size) : 1}`,
       gear: monsterToGearCsv(monster),
       arts: monsterToArtsCsv(monster),
       range_band: monster.range_band,
-      tags: monsterToTagsCsv(monster),
+      traits: monsterToTraitsCsv(monster),
     });
     if (iconPreviewUrl?.startsWith("blob:")) URL.revokeObjectURL(iconPreviewUrl);
     if (iconSourceUrl?.startsWith("blob:")) URL.revokeObjectURL(iconSourceUrl);
@@ -456,6 +466,15 @@ export default function Monsters({ isDM }: MonstersProps) {
             />
           </label>
           <label className="block text-sm text-amber-200">
+            Size
+            <input
+              value={form.size}
+              onChange={(event) => setForm((prev) => ({ ...prev, size: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="1"
+            />
+          </label>
+          <label className="block text-sm text-amber-200">
             Range
             <select
               value={form.range_band}
@@ -490,10 +509,10 @@ export default function Monsters({ isDM }: MonstersProps) {
             />
           </label>
           <label className="block text-sm text-amber-200 lg:col-span-2">
-            Tags
+            Traits
             <input
-              value={form.tags}
-              onChange={(event) => setForm((prev) => ({ ...prev, tags: event.target.value }))}
+              value={form.traits}
+              onChange={(event) => setForm((prev) => ({ ...prev, traits: event.target.value }))}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
               placeholder="beast, fast, cave"
             />
@@ -626,7 +645,7 @@ export default function Monsters({ isDM }: MonstersProps) {
           <div>Derived: Natural Armor {Number.parseInt(form.special, 10) || 0}</div>
           <div>Filtered Gear: {parsedGear.length > 0 ? parsedGear.map((item) => item.name).join(", ") : "None"}</div>
           <div>Filtered Arts: {parsedArts.length > 0 ? parsedArts.map((art) => art.name).join(", ") : "None"}</div>
-          <div>Normalized Tags: {parsedTags.length > 0 ? parsedTags.join(", ") : "None"}</div>
+          <div>Normalized Traits: {parsedTraits.length > 0 ? parsedTraits.join(", ") : "None"}</div>
         </div>
 
         <div className="mt-4 flex gap-2">
@@ -673,10 +692,10 @@ export default function Monsters({ isDM }: MonstersProps) {
                   <div>
                     <div className="font-semibold text-amber-100">{monster.name}</div>
                     <div className="text-xs text-amber-200/80">
-                      PHY {monster.physical} | MEN {monster.mental} | SPC {monster.special}
+                      PHY {monster.physical} | MEN {monster.mental} | SPC {monster.special} | SIZE {monster.size ?? 1}
                     </div>
                     <div className="text-xs text-amber-200/70">
-                      Range {monster.range_band} | Tags {(monster.tags || []).join(", ") || "None"}
+                      Range {monster.range_band} | Traits {(monster.traits || []).join(", ") || "None"}
                     </div>
                   </div>
                 </div>

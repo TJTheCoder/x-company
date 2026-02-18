@@ -10,10 +10,11 @@ export type MonsterTemplate = {
   physical: number;
   mental: number;
   special: number;
+  size: number;
   gear: InventoryItem[];
   arts: Art[];
   range_band: MonsterRangeBand;
-  tags: string[];
+  traits: string[];
   icon_url: string | null;
   created_at?: string;
   updated_at?: string;
@@ -25,6 +26,7 @@ export type MonsterSnapshot = {
   physical: number;
   mental: number;
   special: number;
+  size: number;
   natural_armor: number;
   str: number;
   agl: number;
@@ -35,7 +37,7 @@ export type MonsterSnapshot = {
   arts: Art[];
   equipment_slots: MonsterEquipmentSlots;
   range_band: MonsterRangeBand;
-  tags: string[];
+  traits: string[];
 };
 
 export type MonsterEquipmentSlots = {
@@ -45,8 +47,8 @@ export type MonsterEquipmentSlots = {
   right: string | null;
 };
 
-const normalizeTag = (tag: string): string => {
-  const t = tag.trim();
+const normalizeTrait = (trait: string): string => {
+  const t = trait.trim();
   if (!t) return "";
   return `${t.slice(0, 1).toUpperCase()}${t.slice(1).toLowerCase()}`;
 };
@@ -80,10 +82,10 @@ export function parseMonsterGearCsv(csv: string): InventoryItem[] {
   return parsed;
 }
 
-export function normalizeMonsterTagsCsv(csv: string): string[] {
+export function normalizeMonsterTraitsCsv(csv: string): string[] {
   return csv
     .split(",")
-    .map(normalizeTag)
+    .map(normalizeTrait)
     .filter(Boolean);
 }
 
@@ -108,8 +110,9 @@ export function monsterToGearCsv(monster: MonsterTemplate): string {
   return (monster.gear || []).map((item) => item.name).join(", ");
 }
 
-export function monsterToTagsCsv(monster: MonsterTemplate): string {
-  return (monster.tags || []).join(", ");
+export function monsterToTraitsCsv(monster: MonsterTemplate): string {
+  const legacyTags = (monster as unknown as { tags?: string[] }).tags;
+  return (monster.traits || legacyTags || []).join(", ");
 }
 
 export function monsterToArtsCsv(monster: MonsterTemplate): string {
@@ -118,12 +121,16 @@ export function monsterToArtsCsv(monster: MonsterTemplate): string {
 
 export function buildMonsterSnapshot(monster: MonsterTemplate): MonsterSnapshot {
   const gear = monster.gear || [];
+  const legacyTags = (monster as unknown as { tags?: string[] }).tags;
+  const traits = monster.traits || legacyTags || [];
+  const size = Number.isFinite(monster.size) ? Math.trunc(monster.size) : 1;
   return {
     template_id: monster.id,
     name: monster.name,
     physical: monster.physical,
     mental: monster.mental,
     special: monster.special,
+    size,
     natural_armor: monster.special,
     str: monster.physical * 2,
     agl: monster.physical * 2,
@@ -134,7 +141,7 @@ export function buildMonsterSnapshot(monster: MonsterTemplate): MonsterSnapshot 
     arts: monster.arts || [],
     equipment_slots: buildMonsterAutoEquipmentSlots(gear),
     range_band: monster.range_band,
-    tags: monster.tags || [],
+    traits,
   };
 }
 
@@ -157,18 +164,19 @@ export function formatMonsterTooltip(snapshot: MonsterSnapshot): string {
   ]
     .filter(Boolean)
     .join(", ");
-  const tags = snapshot.tags && snapshot.tags.length > 0 ? snapshot.tags.join(", ") : "None";
+  const traits = snapshot.traits && snapshot.traits.length > 0 ? snapshot.traits.join(", ") : "None";
   return [
     snapshot.name,
-    `Physical ${snapshot.physical} (STR ${snapshot.str}, AGL ${snapshot.agl})`,
-    `Mental ${snapshot.mental} (WIT ${snapshot.wit}, EMP ${snapshot.emp})`,
-    `Special ${snapshot.special} (+${snapshot.special} all skills, Spirit ${snapshot.starting_spirits})`,
-    `Natural Armor ${snapshot.natural_armor}`,
-    `Range ${snapshot.range_band}`,
-    `Gear ${gear}`,
-    `Arts ${arts}`,
-    `Equipped ${equipped || "None"}`,
-    `Tags ${tags}`,
+    `Size: ${snapshot.size}`,
+    `Physical: ${snapshot.physical} (STR ${snapshot.str}, AGL ${snapshot.agl})`,
+    `Mental: ${snapshot.mental} (WIT ${snapshot.wit}, EMP ${snapshot.emp})`,
+    `Special: ${snapshot.special} (+${snapshot.special} all skills, Spirit ${snapshot.starting_spirits})`,
+    `Natural Armor: ${snapshot.natural_armor}`,
+    `Range: ${snapshot.range_band}`,
+    `Gear: ${gear}`,
+    `Arts: ${arts}`,
+    `Equipped: ${equipped || "None"}`,
+    `Traits: ${traits}`,
   ].join("\n");
 }
 

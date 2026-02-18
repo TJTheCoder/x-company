@@ -88,7 +88,15 @@ export type PendingMeleeAction = {
   weaponItemId?: string | null;
   weaponName: string;
   weaponBaseDamage: number;
-  maneuver: "Slash" | "Stab" | "Strike";
+  maneuver: "Slash" | "Stab" | "Strike" | "Retreat" | "Shove" | "Disarm";
+  rollAttribute?: keyof Attributes;
+  rollSkill?: string;
+  requiredSuccesses?: number;
+  swingBonusDamage?: number;
+  bonusDice?: number;
+  disarmTargetItemId?: string | null;
+  disarmTargetItemName?: string | null;
+  disarmZoneId?: number | null;
 };
 
 export type ResolvedMeleeAttack = {
@@ -97,8 +105,12 @@ export type ResolvedMeleeAttack = {
   targetCharacterId: string;
   weaponName: string;
   weaponBaseDamage: number;
-  maneuver: "Slash" | "Stab" | "Strike";
+  maneuver: "Slash" | "Stab" | "Strike" | "Retreat" | "Shove" | "Disarm";
   totalSuccesses: number;
+  requiredSuccesses?: number;
+  swingBonusDamage?: number;
+  disarmTargetItemId?: string | null;
+  disarmZoneId?: number | null;
 };
 
 type WagonData = {
@@ -474,12 +486,60 @@ export default function Dashboard() {
 
   const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
     const successes = Math.max(0, attack.totalSuccesses);
+    const requiredSuccesses = Math.max(0, attack.requiredSuccesses ?? 1);
+    const supabase = createClient();
+
+    if (attack.maneuver === "Retreat") {
+      if (successes < requiredSuccesses) return;
+      const { error: retreatError } = await supabase.rpc("combat_break_engagement_token", {
+        p_actor_token_id: attack.attackerCharacterId,
+      });
+      if (retreatError) {
+        console.error("Failed to resolve retreat:", retreatError);
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Shove") {
+      const { error: shoveError } = await supabase.rpc("combat_resolve_shove", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_target_token_id: attack.targetCharacterId,
+        p_success: successes >= requiredSuccesses,
+      });
+      if (shoveError) {
+        console.error("Failed to resolve shove:", shoveError);
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Disarm") {
+      if (!attack.disarmTargetItemId || attack.disarmZoneId === null || attack.disarmZoneId === undefined) {
+        return;
+      }
+      const { error: disarmError } = await supabase.rpc("combat_resolve_disarm", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_target_token_id: attack.targetCharacterId,
+        p_target_item_id: attack.disarmTargetItemId,
+        p_zone_id: attack.disarmZoneId,
+        p_success: successes >= requiredSuccesses,
+      });
+      if (disarmError) {
+        console.error(
+          "Failed to resolve disarm:",
+          disarmError.message || disarmError.details || JSON.stringify(disarmError)
+        );
+      }
+      return;
+    }
+
     if (successes <= 0) return;
 
-    const damage = Math.max(0, attack.weaponBaseDamage) + Math.max(0, successes - 1);
+    const damage =
+      Math.max(0, attack.weaponBaseDamage) +
+      Math.max(0, successes - 1) +
+      Math.max(0, attack.swingBonusDamage ?? 0);
     if (damage <= 0) return;
 
-    const supabase = createClient();
     if (attack.targetCharacterId.startsWith("monster:")) {
       const { data: combatState, error: combatError } = await supabase
         .from("combat_state")

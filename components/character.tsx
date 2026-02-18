@@ -182,6 +182,10 @@ export default function Character({
       weaponBaseDamage: pending.weaponBaseDamage,
       maneuver: pending.maneuver,
       totalSuccesses: totalSuccessesFromRoll(roll),
+      requiredSuccesses: pending.requiredSuccesses,
+      swingBonusDamage: pending.swingBonusDamage,
+      disarmTargetItemId: pending.disarmTargetItemId,
+      disarmZoneId: pending.disarmZoneId,
     });
     onMeleeRollCleared();
   };
@@ -548,6 +552,10 @@ export default function Character({
               weaponBaseDamage: pendingAttack.weaponBaseDamage,
               maneuver: pendingAttack.maneuver,
               totalSuccesses: totalSuccessesFromRoll(pendingRoll),
+              requiredSuccesses: pendingAttack.requiredSuccesses,
+              swingBonusDamage: pendingAttack.swingBonusDamage,
+              disarmTargetItemId: pendingAttack.disarmTargetItemId,
+              disarmZoneId: pendingAttack.disarmZoneId,
             } satisfies ResolvedMeleeAttack),
           );
         } catch {
@@ -578,41 +586,47 @@ export default function Character({
     if (!character || !pendingMeleeAction) return;
     if (pendingMeleeAction.attackerCharacterId !== character.id) return;
     if (handledPendingMeleeActionIdRef.current === pendingMeleeAction.id) return;
-    const isStrike = pendingMeleeAction.maneuver === "Strike";
+    const isRetreat = pendingMeleeAction.maneuver === "Retreat";
+    const actionBonusDice = pendingMeleeAction.bonusDice ?? 0;
+    const rollAttribute = pendingMeleeAction.rollAttribute ?? (isRetreat ? "AGL" : "STR");
+    const rollSkill = pendingMeleeAction.rollSkill ?? (isRetreat ? "MOVE" : "MELEE");
+    const usesWeaponGear = Boolean(pendingMeleeAction.weaponItemId);
     const weapon = pendingMeleeAction.weaponItemId
       ? (character.inventory || []).find((item) => item.id === pendingMeleeAction.weaponItemId) || null
       : null;
-    if (!isStrike && !weapon) {
+    if (usesWeaponGear && !weapon) {
       onConsumePendingMeleeAction(pendingMeleeAction.id);
       handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
       return;
     }
 
-    clearPreviousRoll("STR");
-    if (hasRollFor("STR")) {
-      clearRollAndResolveSpirit("STR");
+    clearPreviousRoll(rollAttribute);
+    if (hasRollFor(rollAttribute)) {
+      clearRollAndResolveSpirit(rollAttribute);
     }
 
-    setSelectedAttribute("STR");
-    setSelectedSkill("MELEE");
-    setSelectedGear(weapon);
-    setBonusDice("0");
-    setActiveMeleeAttack({ ...pendingMeleeAction, attr: "STR" });
+    setSelectedAttribute(rollAttribute);
+    setSelectedSkill(rollSkill);
+    setSelectedGear(usesWeaponGear ? weapon : null);
+    setBonusDice(`${actionBonusDice}`);
+    setActiveMeleeAttack({ ...pendingMeleeAction, attr: rollAttribute });
 
-    const attrCount = character.attributes.STR ?? 0;
-    const skillCount = Math.max(0, character.skills.MELEE ?? 0);
-    const gearCount = isStrike ? 0 : Math.max(0, weapon?.gearBonus ?? 0);
+    const attrCount = character.attributes[rollAttribute] ?? 0;
+    const signedSkillCount = (character.skills[rollSkill] ?? 0) + actionBonusDice;
+    const skillCount = Math.abs(signedSkillCount);
+    const skillIsNegative = signedSkillCount < 0;
+    const gearCount = usesWeaponGear ? Math.max(0, weapon?.gearBonus ?? 0) : 0;
 
     setRollStates((prev) => ({
       ...prev,
-      STR: {
+      [rollAttribute]: {
         attributeDice: Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1),
         skillDice: Array.from({ length: skillCount }, () => Math.floor(Math.random() * 6) + 1),
-        skillIsNegative: false,
+        skillIsNegative,
         gearDice: Array.from({ length: gearCount }, () => Math.floor(Math.random() * 6) + 1),
         poolUsed: gearCount > 0 ? "all" : "attribute+skill",
         hasBeenPushed: false,
-        requiredSuccesses: 1,
+        requiredSuccesses: Math.max(0, pendingMeleeAction.requiredSuccesses ?? 1),
         gearItemId: weapon?.id,
       },
     }));

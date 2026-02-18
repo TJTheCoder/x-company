@@ -66,6 +66,8 @@ type InitiativeEntry = {
   clinging_target_name?: string | null;
   clung_onto_by_id?: string | null;
   clung_onto_by_name?: string | null;
+  clung_onto_by_ids?: string[] | null;
+  clung_onto_by_names?: string[] | null;
 };
 
 type CharacterLite = {
@@ -389,6 +391,12 @@ function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undefined): 
         clung_onto_by_id: typeof e.clung_onto_by_id === "string" ? e.clung_onto_by_id : null,
         clung_onto_by_name:
           typeof e.clung_onto_by_name === "string" ? e.clung_onto_by_name : null,
+        clung_onto_by_ids: Array.isArray(e.clung_onto_by_ids)
+          ? e.clung_onto_by_ids.filter((v): v is string => typeof v === "string")
+          : null,
+        clung_onto_by_names: Array.isArray(e.clung_onto_by_names)
+          ? e.clung_onto_by_names.filter((v): v is string => typeof v === "string")
+          : null,
       };
     })
     .filter(Boolean) as InitiativeEntry[];
@@ -909,6 +917,20 @@ export default function Combat({
     }
     return map;
   }, [tokenPositions]);
+  const clingersByTarget = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const entry of initiativeEntries) {
+      const clingingTargetId = entry.clinging_target_id;
+      if (!clingingTargetId) continue;
+      const clingerTokenId = entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (!map.has(clingingTargetId)) map.set(clingingTargetId, []);
+      map.get(clingingTargetId)!.push(clingerTokenId);
+    }
+    for (const [, ids] of map) {
+      ids.sort();
+    }
+    return map;
+  }, [initiativeEntries]);
   const actorTokenId = useMemo(() => {
     if (!currentEntry) return null;
     if (currentEntry.kind === "monster") return currentEntry.participant_id;
@@ -932,20 +954,33 @@ export default function Combat({
   const actorGrapplingTargetId = currentEntry?.grappling_target_id ?? null;
   const actorGrappledById = currentEntry?.grappled_by_id ?? null;
   const actorClingingTargetId = currentEntry?.clinging_target_id ?? null;
-  const actorClungOntoById = currentEntry?.clung_onto_by_id ?? null;
+  const actorClungOntoByIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const id of currentEntry?.clung_onto_by_ids || []) {
+      if (id) ids.add(id);
+    }
+    if (currentEntry?.clung_onto_by_id) ids.add(currentEntry.clung_onto_by_id);
+    return Array.from(ids);
+  }, [currentEntry]);
+  const actorClungOntoById = actorClungOntoByIds[0] ?? null;
   const isActorGrappling = Boolean(actorGrapplingTargetId);
   const isActorGrappled = Boolean(actorGrappledById);
   const isActorClinging = Boolean(actorClingingTargetId);
-  const isActorClungOnto = Boolean(actorClungOntoById);
+  const isActorClungOnto = actorClungOntoByIds.length > 0;
   const actorHardLockedByHold = isActorGrappling || isActorGrappled || isActorClinging;
-  const actorHoldCounterpartId =
-    actorGrapplingTargetId || actorGrappledById || actorClingingTargetId || actorClungOntoById || null;
+  const actorHoldCounterpartIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (actorGrapplingTargetId) ids.add(actorGrapplingTargetId);
+    if (actorGrappledById) ids.add(actorGrappledById);
+    if (actorClingingTargetId) ids.add(actorClingingTargetId);
+    for (const id of actorClungOntoByIds) ids.add(id);
+    return ids;
+  }, [actorGrapplingTargetId, actorGrappledById, actorClingingTargetId, actorClungOntoByIds]);
   const selectedIsActorOrHoldCounterpart = useMemo(() => {
     if (!selectedTokenId || !actorTokenId) return false;
     if (selectedTokenId === actorTokenId) return true;
-    if (!actorHoldCounterpartId) return false;
-    return selectedTokenId === actorHoldCounterpartId;
-  }, [selectedTokenId, actorTokenId, actorHoldCounterpartId]);
+    return actorHoldCounterpartIds.has(selectedTokenId);
+  }, [selectedTokenId, actorTokenId, actorHoldCounterpartIds]);
   const actorSize = useMemo(() => {
     if (!currentEntry) return 1;
     if (currentEntry.kind === "monster") {
@@ -960,6 +995,15 @@ export default function Combat({
     }
     return 1;
   }, [selectedTokenId, monsterByParticipantId]);
+  const selectedTargetEntry = useMemo(() => {
+    if (!selectedTokenId) return null;
+    return (
+      initiativeEntries.find(
+        (entry) =>
+          entry.participant_id === selectedTokenId || entry.participant_id === `player:${selectedTokenId}`
+      ) || null
+    );
+  }, [selectedTokenId, initiativeEntries]);
 
   const zoneTintUrl = useMemo(() => {
     if (!isDmUser || !showZoneTint) return null;
@@ -1000,8 +1044,12 @@ export default function Combat({
           if (entry?.clinging_target_name) {
             flags.push(`Clinging (${entry.clinging_target_name})`);
           }
-          if (entry?.clung_onto_by_name) {
-            flags.push(`Clung Onto (${entry.clung_onto_by_name})`);
+          const clungOntoNames = [
+            ...(entry?.clung_onto_by_names || []),
+            ...(entry?.clung_onto_by_name ? [entry.clung_onto_by_name] : []),
+          ].filter(Boolean);
+          if (clungOntoNames.length > 0) {
+            flags.push(`Clung Onto (${Array.from(new Set(clungOntoNames)).join(", ")})`);
           }
 
           const character = characters.find((char) => char.id === pos.character_id);
@@ -1205,9 +1253,20 @@ export default function Combat({
   const canUseGrappleFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
-    if (actorHardLockedByHold || isActorProne) return false;
+    if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
     if (actorHasOccupiedHands) return false;
     if (selectedRange !== "Engaged") return false;
+    if (!selectedTargetEntry) return false;
+    const targetHasClungIds =
+      (selectedTargetEntry.clung_onto_by_ids?.length ?? 0) > 0 || !!selectedTargetEntry.clung_onto_by_id;
+    if (
+      selectedTargetEntry.grappling_target_id ||
+      selectedTargetEntry.grappled_by_id ||
+      selectedTargetEntry.clinging_target_id ||
+      targetHasClungIds
+    ) {
+      return false;
+    }
     const targetSize = selectedTargetSize;
     if (targetSize === null) return false;
     return actorSize >= targetSize;
@@ -1219,8 +1278,10 @@ export default function Combat({
     selectedTokenId,
     actorHardLockedByHold,
     isActorProne,
+    isActorClungOnto,
     actorHasOccupiedHands,
     selectedRange,
+    selectedTargetEntry,
     selectedTargetSize,
     actorSize,
   ]);
@@ -1228,9 +1289,11 @@ export default function Combat({
   const canUseClingFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
-    if (actorHardLockedByHold || isActorProne) return false;
+    if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
     if (actorHasOccupiedHands) return false;
     if (selectedRange !== "Engaged") return false;
+    if (!selectedTargetEntry) return false;
+    if (selectedTargetEntry.clinging_target_id) return false;
     const targetSize = selectedTargetSize;
     if (targetSize === null) return false;
     return targetSize > actorSize;
@@ -1242,8 +1305,10 @@ export default function Combat({
     selectedTokenId,
     actorHardLockedByHold,
     isActorProne,
+    isActorClungOnto,
     actorHasOccupiedHands,
     selectedRange,
+    selectedTargetEntry,
     selectedTargetSize,
     actorSize,
   ]);
@@ -1277,7 +1342,8 @@ export default function Combat({
     if (actorHardLockedByHold) {
       if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
       if (!(isActorGrappling || isActorClinging)) return [];
-      if (!actorHoldCounterpartId || selectedTokenId !== actorHoldCounterpartId) return [];
+      const onlyCounterpart = actorGrapplingTargetId || actorClingingTargetId;
+      if (!onlyCounterpart || selectedTokenId !== onlyCounterpart) return [];
       return [
         {
           maneuver: "Grapple Attack" as const,
@@ -1391,7 +1457,7 @@ export default function Combat({
     }
 
     return options;
-  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorHoldCounterpartId]);
+  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorGrapplingTargetId, actorClingingTargetId]);
 
   const shoveActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) {
@@ -2004,15 +2070,91 @@ export default function Combat({
       setZoneLoot([]);
     }
 
+    const detachedTokenPositions = (() => {
+      if (!imageRect || tokenPositions.length === 0 || initiativeEntries.length === 0) return tokenPositions;
+
+      const byId = new Map<string, TokenPosition>();
+      for (const token of tokenPositions) byId.set(token.character_id, token);
+
+      const clingersByTargetMap = new Map<string, string[]>();
+      for (const entry of initiativeEntries) {
+        if (!entry.clinging_target_id) continue;
+        const clingerId =
+          entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+        if (!clingersByTargetMap.has(entry.clinging_target_id)) clingersByTargetMap.set(entry.clinging_target_id, []);
+        clingersByTargetMap.get(entry.clinging_target_id)!.push(clingerId);
+      }
+      for (const [, ids] of clingersByTargetMap) ids.sort();
+
+      const baseDiameter = 40;
+      const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+      const findEntry = (tokenId: string) =>
+        initiativeEntries.find(
+          (entry) => entry.participant_id === tokenId || entry.participant_id === `player:${tokenId}`
+        );
+      const tokenSize = (tokenId: string) => {
+        if (!tokenId.startsWith("monster:")) return baseDiameter;
+        const size = Math.trunc(monsterByParticipantId.get(tokenId)?.monster_snapshot?.size ?? 1);
+        const scale = Math.pow(2, Math.max(1, size) - 1);
+        return Number.isFinite(scale) && scale > 0 ? baseDiameter * scale : baseDiameter;
+      };
+
+      return tokenPositions.map((token) => {
+        const entry = findEntry(token.character_id);
+        const attachedTargetId = entry?.grappling_target_id || entry?.clinging_target_id || null;
+        if (!attachedTargetId) return token;
+
+        const target = byId.get(attachedTargetId);
+        if (!target) return token;
+
+        let unitX = 1;
+        let unitY = 0;
+        if (entry?.clinging_target_id) {
+          const peers = clingersByTargetMap.get(attachedTargetId) || [];
+          const idx = Math.max(0, peers.indexOf(token.character_id));
+          const angle = (idx / Math.max(1, peers.length)) * Math.PI * 2;
+          unitX = Math.cos(angle);
+          unitY = Math.sin(angle);
+        } else {
+          const dx = token.x - target.x;
+          const dy = token.y - target.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 0.0001) {
+            unitX = dx / dist;
+            unitY = dy / dist;
+          } else {
+            unitX = token.character_id < attachedTargetId ? 1 : -1;
+            unitY = 0;
+          }
+        }
+
+        const desiredPx = tokenSize(token.character_id) / 2 + tokenSize(attachedTargetId) / 2;
+        return {
+          character_id: token.character_id,
+          x: clamp01(target.x + (unitX * desiredPx) / imageRect.w),
+          y: clamp01(target.y + (unitY * desiredPx) / imageRect.h),
+        };
+      });
+    })();
+
     setInitiativeEntries([]);
     setInitiativeCurrentIndex(null);
     setEngagements([]);
     setCombatMode(false);
+    setTokenPositions(detachedTokenPositions);
     setSelectedTokenId(null);
     setSelectedZoneTarget(null);
     setMonsterNameDrafts({});
     setInitiativeMonsters(preservedMonsters);
-    await saveInitiativeState([], null, false, preservedMonsters, [], null, nextZoneLootAfterReset);
+    await saveInitiativeState(
+      [],
+      null,
+      false,
+      preservedMonsters,
+      [],
+      detachedTokenPositions,
+      nextZoneLootAfterReset
+    );
   };
 
   const deployMonsterTemplate = async (monster: MonsterTemplate, quantity = 1) => {
@@ -2816,7 +2958,9 @@ export default function Combat({
 
   const requestBreakFree = async () => {
     if (!currentEntry || !actorTokenId || !canUseBreakFree) return;
-    const otherTokenId = actorGrappledById || actorClungOntoById;
+    const selectedClinger =
+      selectedTokenId && actorClungOntoByIds.includes(selectedTokenId) ? selectedTokenId : null;
+    const otherTokenId = actorGrappledById || selectedClinger || actorClungOntoByIds[0] || null;
     if (!otherTokenId) return;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
@@ -2828,7 +2972,7 @@ export default function Combat({
         ? Math.trunc(monsterByParticipantId.get(otherTokenId)?.monster_snapshot?.size ?? 1)
         : 1;
     const sizeDiff = actorSize - targetSize;
-    const againstCling = Boolean(actorClungOntoById && actorClungOntoById === otherTokenId);
+    const againstCling = actorClungOntoByIds.includes(otherTokenId);
     const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
 
     if (currentEntry.kind === "player") {
@@ -3028,13 +3172,15 @@ export default function Combat({
       ...tokenPositions.filter((token) => token.character_id !== monsterParticipantId),
       { character_id: monsterParticipantId, x: point.x, y: point.y },
     ];
-    const attachedTokenId =
-      actorEntry?.grappling_target_id ||
-      actorEntry?.grappled_by_id ||
-      actorEntry?.clinging_target_id ||
-      actorEntry?.clung_onto_by_id ||
-      null;
-    if (attachedTokenId) {
+    const attachedTokenIds = new Set<string>();
+    if (actorEntry?.grappling_target_id) attachedTokenIds.add(actorEntry.grappling_target_id);
+    if (actorEntry?.grappled_by_id) attachedTokenIds.add(actorEntry.grappled_by_id);
+    if (actorEntry?.clinging_target_id) attachedTokenIds.add(actorEntry.clinging_target_id);
+    if (actorEntry?.clung_onto_by_id) attachedTokenIds.add(actorEntry.clung_onto_by_id);
+    for (const id of actorEntry?.clung_onto_by_ids || []) {
+      if (id) attachedTokenIds.add(id);
+    }
+    for (const attachedTokenId of attachedTokenIds) {
       nextTokens = [
         ...nextTokens.filter((token) => token.character_id !== attachedTokenId),
         { character_id: attachedTokenId, x: point.x, y: point.y },
@@ -3569,11 +3715,21 @@ export default function Combat({
                       const targetScale = targetIsMonster ? Math.pow(2, targetSize - 1) : 1;
                       const targetDiameter =
                         Number.isFinite(targetScale) && targetScale > 0 ? baseDiameter * targetScale : baseDiameter;
-                      const dx = token.x - targetToken.x;
-                      const dy = token.y - targetToken.y;
-                      const dist = Math.hypot(dx, dy);
-                      const unitX = dist > 0.0001 ? dx / dist : 1;
-                      const unitY = dist > 0.0001 ? dy / dist : 0;
+                      let unitX = 1;
+                      let unitY = 0;
+                      if (tokenEntry?.clinging_target_id) {
+                        const peers = clingersByTarget.get(attachedTargetId) || [];
+                        const idx = Math.max(0, peers.indexOf(token.character_id));
+                        const angle = (idx / Math.max(1, peers.length)) * Math.PI * 2;
+                        unitX = Math.cos(angle);
+                        unitY = Math.sin(angle);
+                      } else {
+                        const dx = token.x - targetToken.x;
+                        const dy = token.y - targetToken.y;
+                        const dist = Math.hypot(dx, dy);
+                        unitX = dist > 0.0001 ? dx / dist : 1;
+                        unitY = dist > 0.0001 ? dy / dist : 0;
+                      }
                       const desiredPx = diameter / 2 + targetDiameter / 2;
                       displayX = targetToken.x + (unitX * desiredPx) / imageRect.w;
                       displayY = targetToken.y + (unitY * desiredPx) / imageRect.h;

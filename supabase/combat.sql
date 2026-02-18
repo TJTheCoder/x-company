@@ -158,6 +158,7 @@ declare
   v_entries jsonb;
   v_actor_entry jsonb;
   v_actor_idx int;
+  v_attached_token_ids text[] := array[]::text[];
   v_attached_token_id text;
 begin
   if v_email = '' then
@@ -196,23 +197,42 @@ begin
   limit 1;
 
   if v_actor_idx is not null then
-    v_attached_token_id :=
-      nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
-    if v_attached_token_id is null then
-      v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
+    if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
     end if;
-    if v_attached_token_id is null then
-      v_attached_token_id := nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '');
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+    if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
     end if;
-    if v_attached_token_id is null then
-      v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '');
+    if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+    end if;
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+    if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+    end if;
+    for v_attached_token_id in
+      select jsonb_array_elements_text(
+        case
+          when jsonb_typeof(v_actor_entry->'clung_onto_by_ids') = 'array' then v_actor_entry->'clung_onto_by_ids'
+          else '[]'::jsonb
+        end
+      )
+    loop
+      if v_attached_token_id is not null and btrim(v_attached_token_id) <> '' and not (v_attached_token_id = any(v_attached_token_ids)) then
+        v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+      end if;
+    end loop;
+
+    if array_length(v_attached_token_ids, 1) is not null then
+      v_attached_token_ids := array_remove(v_attached_token_ids, p_character_id::text);
     end if;
 
     if nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null then
       raise exception 'Cannot move while clinging';
     end if;
-  else
-    v_attached_token_id := null;
   end if;
 
   v_tokens := coalesce(
@@ -232,7 +252,7 @@ begin
     )
   );
 
-  if v_attached_token_id is not null then
+  foreach v_attached_token_id in array v_attached_token_ids loop
     v_tokens := coalesce(
       (
         select jsonb_agg(t.value)
@@ -249,7 +269,7 @@ begin
         'y', p_y
       )
     );
-  end if;
+  end loop;
 
   update public.combat_state
   set token_positions = v_tokens,
@@ -721,7 +741,10 @@ declare
   v_component text[];
   v_changed boolean;
   e record;
+  rel record;
   v_member text;
+  v_entry_token text;
+  v_linked_token text;
   v_a text;
   v_b text;
   v_actor_uuid uuid;
@@ -832,6 +855,57 @@ begin
         end if;
       end if;
     end loop;
+
+    -- Expand through active grapple/cling relationships as well.
+    for rel in
+      select en.value as entry
+      from jsonb_array_elements(v_entries) as en(value)
+    loop
+      v_entry_token := coalesce(rel.entry->>'participant_id', '');
+      if left(v_entry_token, 7) = 'player:' then
+        v_entry_token := substr(v_entry_token, 8);
+      end if;
+      if v_entry_token = '' then
+        continue;
+      end if;
+
+      foreach v_linked_token in array array[
+        nullif(coalesce(rel.entry->>'grappling_target_id', ''), ''),
+        nullif(coalesce(rel.entry->>'grappled_by_id', ''), ''),
+        nullif(coalesce(rel.entry->>'clinging_target_id', ''), ''),
+        nullif(coalesce(rel.entry->>'clung_onto_by_id', ''), '')
+      ] loop
+        if v_linked_token is null then
+          continue;
+        end if;
+        if v_entry_token = any(v_component) and not (v_linked_token = any(v_component)) then
+          v_component := array_append(v_component, v_linked_token);
+          v_changed := true;
+        elsif v_linked_token = any(v_component) and not (v_entry_token = any(v_component)) then
+          v_component := array_append(v_component, v_entry_token);
+          v_changed := true;
+        end if;
+      end loop;
+
+      for v_linked_token in
+        select jsonb_array_elements_text(
+          case
+            when jsonb_typeof(rel.entry->'clung_onto_by_ids') = 'array'
+            then rel.entry->'clung_onto_by_ids'
+            else '[]'::jsonb
+          end
+        )
+      loop
+        if v_entry_token = any(v_component) and not (v_linked_token = any(v_component)) then
+          v_component := array_append(v_component, v_linked_token);
+          v_changed := true;
+        elsif v_linked_token = any(v_component) and not (v_entry_token = any(v_component)) then
+          v_component := array_append(v_component, v_entry_token);
+          v_changed := true;
+        end if;
+      end loop;
+    end loop;
+
     exit when not v_changed;
   end loop;
 
@@ -891,6 +965,7 @@ declare
   v_other_token text;
   v_actor_entry jsonb;
   v_actor_entry_idx int;
+  v_attached_token_ids text[] := array[]::text[];
   v_attached_token_id text;
 begin
   if v_email = '' then
@@ -955,11 +1030,31 @@ begin
   end if;
 
   v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
-  if v_attached_token_id is null then
-    v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
   end if;
-  if v_attached_token_id is null then
-    v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+  end if;
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+  end if;
+  for v_attached_token_id in
+    select jsonb_array_elements_text(
+      case
+        when jsonb_typeof(v_actor_entry->'clung_onto_by_ids') = 'array' then v_actor_entry->'clung_onto_by_ids'
+        else '[]'::jsonb
+      end
+    )
+  loop
+    if v_attached_token_id is not null and btrim(v_attached_token_id) <> '' and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+    end if;
+  end loop;
+  if array_length(v_attached_token_ids, 1) is not null then
+    v_attached_token_ids := array_remove(v_attached_token_ids, p_actor_token_id);
   end if;
 
   if not v_is_dm then
@@ -1042,7 +1137,7 @@ begin
     )
   );
 
-  if v_attached_token_id is not null then
+  foreach v_attached_token_id in array v_attached_token_ids loop
     v_tokens := coalesce(
       (
         select jsonb_agg(t.value)
@@ -1059,7 +1154,7 @@ begin
         'y', p_y
       )
     );
-  end if;
+  end loop;
 
   -- Break all engagements involving the actor token (ally engagements).
   v_edges := coalesce(
@@ -1252,12 +1347,6 @@ begin
 
   if v_entry_idx is null then
     raise exception 'Actor participant not found';
-  end if;
-
-  if nullif(coalesce(v_entry->>'grappling_target_id', ''), '') is not null
-     or nullif(coalesce(v_entry->>'clinging_target_id', ''), '') is not null
-     or nullif(coalesce(v_entry->>'grappled_by_id', ''), '') is not null then
-    raise exception 'Cannot get up while grappling, clinging, or grappled';
   end if;
 
   v_entry_kind := coalesce(v_entry->>'kind', '');
@@ -1501,6 +1590,12 @@ begin
 
   if v_entry_idx is null then
     raise exception 'Actor participant not found';
+  end if;
+
+  if nullif(coalesce(v_entry->>'grappling_target_id', ''), '') is not null
+     or nullif(coalesce(v_entry->>'clinging_target_id', ''), '') is not null
+     or nullif(coalesce(v_entry->>'grappled_by_id', ''), '') is not null then
+    raise exception 'Cannot get up while grappling, clinging, or grappled';
   end if;
 
   v_entry_kind := coalesce(v_entry->>'kind', '');
@@ -2140,6 +2235,14 @@ declare
   v_target_snapshot_slots jsonb;
   v_target_monster_id text;
   v_drop_items jsonb;
+  v_target_clung_ids jsonb := '[]'::jsonb;
+  v_target_clung_names jsonb := '[]'::jsonb;
+  v_legacy_clinger_id text;
+  v_legacy_clinger_name text;
+  v_first_clinger_id text;
+  v_first_clinger_name text;
+  v_a text;
+  v_b text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -2243,14 +2346,28 @@ begin
   if nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '') is not null
      or nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '') is not null
      or nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null
-     or nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '') is not null then
+     or nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '') is not null
+     or (
+       jsonb_typeof(v_actor_entry->'clung_onto_by_ids') = 'array'
+       and jsonb_array_length(v_actor_entry->'clung_onto_by_ids') > 0
+     ) then
     raise exception 'Actor is already in a grapple/cling relationship';
   end if;
-  if nullif(coalesce(v_target_entry->>'grappling_target_id', ''), '') is not null
-     or nullif(coalesce(v_target_entry->>'grappled_by_id', ''), '') is not null
-     or nullif(coalesce(v_target_entry->>'clinging_target_id', ''), '') is not null
-     or nullif(coalesce(v_target_entry->>'clung_onto_by_id', ''), '') is not null then
-    raise exception 'Target is already in a grapple/cling relationship';
+  if v_mode = 'grapple' then
+    if nullif(coalesce(v_target_entry->>'grappling_target_id', ''), '') is not null
+       or nullif(coalesce(v_target_entry->>'grappled_by_id', ''), '') is not null
+       or nullif(coalesce(v_target_entry->>'clinging_target_id', ''), '') is not null
+       or nullif(coalesce(v_target_entry->>'clung_onto_by_id', ''), '') is not null
+       or (
+         jsonb_typeof(v_target_entry->'clung_onto_by_ids') = 'array'
+         and jsonb_array_length(v_target_entry->'clung_onto_by_ids') > 0
+       ) then
+      raise exception 'Target is already in a grapple/cling relationship';
+    end if;
+  else
+    if nullif(coalesce(v_target_entry->>'clinging_target_id', ''), '') is not null then
+      raise exception 'Cannot cling onto a clinging creature';
+    end if;
   end if;
 
   v_actor_kind := coalesce(v_actor_entry->>'kind', '');
@@ -2300,8 +2417,52 @@ begin
     v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_name}', to_jsonb(coalesce(v_target_entry->>'name', 'Target')), true);
     v_actor_entry := jsonb_set(v_actor_entry, '{prone}', 'true'::jsonb, true);
 
-    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', to_jsonb(p_actor_token_id), true);
-    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', to_jsonb(coalesce(v_actor_entry->>'name', 'Actor')), true);
+    v_target_clung_ids :=
+      case
+        when jsonb_typeof(v_target_entry->'clung_onto_by_ids') = 'array'
+        then coalesce(v_target_entry->'clung_onto_by_ids', '[]'::jsonb)
+        else '[]'::jsonb
+      end;
+    v_target_clung_names :=
+      case
+        when jsonb_typeof(v_target_entry->'clung_onto_by_names') = 'array'
+        then coalesce(v_target_entry->'clung_onto_by_names', '[]'::jsonb)
+        else '[]'::jsonb
+      end;
+
+    v_legacy_clinger_id := nullif(coalesce(v_target_entry->>'clung_onto_by_id', ''), '');
+    v_legacy_clinger_name := nullif(coalesce(v_target_entry->>'clung_onto_by_name', ''), '');
+    if v_legacy_clinger_id is not null and not exists (
+      select 1
+      from jsonb_array_elements_text(v_target_clung_ids) as x(value)
+      where x.value = v_legacy_clinger_id
+    ) then
+      v_target_clung_ids := v_target_clung_ids || jsonb_build_array(v_legacy_clinger_id);
+      v_target_clung_names := v_target_clung_names || jsonb_build_array(coalesce(v_legacy_clinger_name, v_legacy_clinger_id));
+    end if;
+
+    if not exists (
+      select 1
+      from jsonb_array_elements_text(v_target_clung_ids) as x(value)
+      where x.value = p_actor_token_id
+    ) then
+      v_target_clung_ids := v_target_clung_ids || jsonb_build_array(p_actor_token_id);
+      v_target_clung_names := v_target_clung_names || jsonb_build_array(coalesce(v_actor_entry->>'name', 'Actor'));
+    end if;
+
+    select x.value
+    into v_first_clinger_id
+    from jsonb_array_elements_text(v_target_clung_ids) as x(value)
+    limit 1;
+    select x.value
+    into v_first_clinger_name
+    from jsonb_array_elements_text(v_target_clung_names) as x(value)
+    limit 1;
+
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_ids}', v_target_clung_ids, true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_names}', v_target_clung_names, true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', to_jsonb(v_first_clinger_id), true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', to_jsonb(v_first_clinger_name), true);
   end if;
 
   if v_mode = 'grapple' then
@@ -2415,12 +2576,25 @@ begin
     end if;
   end if;
 
+  -- Relationship implies engagement; ensure the pair edge exists.
+  v_a := least(p_actor_token_id, p_target_token_id);
+  v_b := greatest(p_actor_token_id, p_target_token_id);
+  if not exists (
+    select 1
+    from jsonb_array_elements(v_edges) as ed(value)
+    where ed.value->>'a' = v_a
+      and ed.value->>'b' = v_b
+  ) then
+    v_edges := v_edges || jsonb_build_array(jsonb_build_object('a', v_a, 'b', v_b));
+  end if;
+
   v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
   v_entries := jsonb_set(v_entries, array[v_target_idx::text], v_target_entry, false);
 
   update public.combat_state
   set initiative_entries = v_entries,
       initiative_monsters = coalesce(v_monsters, initiative_monsters),
+      engagements = v_edges,
       zone_loot = v_zone_loot,
       token_positions = (
         select coalesce(
@@ -2468,6 +2642,10 @@ declare
   v_target_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_target_clung_ids jsonb := '[]'::jsonb;
+  v_target_clung_names jsonb := '[]'::jsonb;
+  v_first_clinger_id text;
+  v_first_clinger_name text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -2531,15 +2709,64 @@ begin
     raise exception 'No release relationship found';
   end if;
 
-  v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_id}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_name}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_id}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_name}', 'null'::jsonb, true);
+  if (v_actor_entry->>'grappling_target_id') = p_target_token_id then
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_id}', 'null'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_name}', 'null'::jsonb, true);
+    v_target_entry := jsonb_set(v_target_entry, '{grappled_by_id}', 'null'::jsonb, true);
+    v_target_entry := jsonb_set(v_target_entry, '{grappled_by_name}', 'null'::jsonb, true);
+  end if;
 
-  v_target_entry := jsonb_set(v_target_entry, '{grappled_by_id}', 'null'::jsonb, true);
-  v_target_entry := jsonb_set(v_target_entry, '{grappled_by_name}', 'null'::jsonb, true);
-  v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', 'null'::jsonb, true);
-  v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', 'null'::jsonb, true);
+  if (v_actor_entry->>'clinging_target_id') = p_target_token_id then
+    v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_id}', 'null'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_name}', 'null'::jsonb, true);
+
+    v_target_clung_ids :=
+      case
+        when jsonb_typeof(v_target_entry->'clung_onto_by_ids') = 'array'
+        then coalesce(v_target_entry->'clung_onto_by_ids', '[]'::jsonb)
+        else '[]'::jsonb
+      end;
+    v_target_clung_names :=
+      case
+        when jsonb_typeof(v_target_entry->'clung_onto_by_names') = 'array'
+        then coalesce(v_target_entry->'clung_onto_by_names', '[]'::jsonb)
+        else '[]'::jsonb
+      end;
+
+    select coalesce(
+      jsonb_agg(v.value),
+      '[]'::jsonb
+    )
+    into v_target_clung_ids
+    from jsonb_array_elements(v_target_clung_ids) with ordinality as v(value, ord)
+    where v.value::text <> to_jsonb(p_actor_token_id)::text;
+
+    select coalesce(
+      jsonb_agg(n.value),
+      '[]'::jsonb
+    )
+    into v_target_clung_names
+    from jsonb_array_elements(v_target_clung_names) with ordinality as n(value, ord)
+    where n.ord not in (
+      select v.ord
+      from jsonb_array_elements(
+        case
+          when jsonb_typeof(v_target_entry->'clung_onto_by_ids') = 'array'
+          then coalesce(v_target_entry->'clung_onto_by_ids', '[]'::jsonb)
+          else '[]'::jsonb
+        end
+      ) with ordinality as v(value, ord)
+      where v.value::text = to_jsonb(p_actor_token_id)::text
+    );
+
+    select x.value into v_first_clinger_id from jsonb_array_elements_text(v_target_clung_ids) as x(value) limit 1;
+    select x.value into v_first_clinger_name from jsonb_array_elements_text(v_target_clung_names) as x(value) limit 1;
+
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_ids}', v_target_clung_ids, true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_names}', v_target_clung_names, true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', to_jsonb(v_first_clinger_id), true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', to_jsonb(v_first_clinger_name), true);
+  end if;
 
   v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
   v_entries := jsonb_set(v_entries, array[v_target_idx::text], v_target_entry, false);
@@ -2574,6 +2801,12 @@ declare
   v_other_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_actor_clung_ids jsonb := '[]'::jsonb;
+  v_has_cling_relationship boolean := false;
+  v_has_grapple_relationship boolean := false;
+  v_clinger_id text;
+  v_entry jsonb;
+  v_entry_idx int;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -2632,8 +2865,28 @@ begin
     end if;
   end if;
 
-  if (v_actor_entry->>'grappled_by_id') <> p_other_token_id
-     and (v_actor_entry->>'clung_onto_by_id') <> p_other_token_id then
+  v_actor_clung_ids :=
+    case
+      when jsonb_typeof(v_actor_entry->'clung_onto_by_ids') = 'array'
+      then coalesce(v_actor_entry->'clung_onto_by_ids', '[]'::jsonb)
+      else '[]'::jsonb
+    end;
+  if nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '') is not null and not exists (
+    select 1
+    from jsonb_array_elements_text(v_actor_clung_ids) as x(value)
+    where x.value = v_actor_entry->>'clung_onto_by_id'
+  ) then
+    v_actor_clung_ids := v_actor_clung_ids || jsonb_build_array(v_actor_entry->>'clung_onto_by_id');
+  end if;
+
+  v_has_grapple_relationship := (v_actor_entry->>'grappled_by_id') = p_other_token_id;
+  v_has_cling_relationship := exists (
+    select 1
+    from jsonb_array_elements_text(v_actor_clung_ids) as x(value)
+    where x.value = p_other_token_id
+  );
+
+  if not v_has_grapple_relationship and not v_has_cling_relationship then
     raise exception 'No break free relationship found';
   end if;
 
@@ -2641,18 +2894,46 @@ begin
     return;
   end if;
 
-  v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_id}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_name}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_id}', 'null'::jsonb, true);
-  v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_name}', 'null'::jsonb, true);
+  if v_has_grapple_relationship then
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_id}', 'null'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_name}', 'null'::jsonb, true);
+    v_other_entry := jsonb_set(v_other_entry, '{grappling_target_id}', 'null'::jsonb, true);
+    v_other_entry := jsonb_set(v_other_entry, '{grappling_target_name}', 'null'::jsonb, true);
+    v_entries := jsonb_set(v_entries, array[v_other_idx::text], v_other_entry, false);
+  end if;
 
-  v_other_entry := jsonb_set(v_other_entry, '{grappling_target_id}', 'null'::jsonb, true);
-  v_other_entry := jsonb_set(v_other_entry, '{grappling_target_name}', 'null'::jsonb, true);
-  v_other_entry := jsonb_set(v_other_entry, '{clinging_target_id}', 'null'::jsonb, true);
-  v_other_entry := jsonb_set(v_other_entry, '{clinging_target_name}', 'null'::jsonb, true);
+  if v_has_cling_relationship then
+    v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_id}', 'null'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_name}', 'null'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_ids}', '[]'::jsonb, true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_names}', '[]'::jsonb, true);
+
+    for v_clinger_id in
+      select x.value
+      from jsonb_array_elements_text(v_actor_clung_ids) as x(value)
+    loop
+      select e.ord - 1, e.entry
+      into v_entry_idx, v_entry
+      from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+      where e.entry->>'participant_id' = v_clinger_id
+         or e.entry->>'participant_id' = ('player:' || v_clinger_id)
+      order by e.ord
+      limit 1;
+
+      if v_entry_idx is null then
+        continue;
+      end if;
+
+      v_entry := jsonb_set(v_entry, '{clinging_target_id}', 'null'::jsonb, true);
+      v_entry := jsonb_set(v_entry, '{clinging_target_name}', 'null'::jsonb, true);
+      v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+    end loop;
+  end if;
 
   v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
-  v_entries := jsonb_set(v_entries, array[v_other_idx::text], v_other_entry, false);
+  if not v_has_grapple_relationship then
+    v_entries := jsonb_set(v_entries, array[v_other_idx::text], v_other_entry, false);
+  end if;
 
   update public.combat_state
   set initiative_entries = v_entries,

@@ -155,6 +155,10 @@ declare
   v_is_dm boolean := v_email = 'drocasma9@gmail.com';
   v_owner_email text;
   v_tokens jsonb;
+  v_entries jsonb;
+  v_actor_entry jsonb;
+  v_actor_idx int;
+  v_attached_token_id text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -177,11 +181,39 @@ begin
     raise exception 'You can only place your own token';
   end if;
 
-  select coalesce(token_positions, '[]'::jsonb)
-  into v_tokens
+  select coalesce(token_positions, '[]'::jsonb), coalesce(initiative_entries, '[]'::jsonb)
+  into v_tokens, v_entries
   from public.combat_state
   where id = 1
   for update;
+
+  select e.ord - 1, e.entry
+  into v_actor_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_character_id::text
+     or e.entry->>'participant_id' = ('player:' || p_character_id::text)
+  order by e.ord
+  limit 1;
+
+  if v_actor_idx is not null then
+    v_attached_token_id :=
+      nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
+    if v_attached_token_id is null then
+      v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+    end if;
+    if v_attached_token_id is null then
+      v_attached_token_id := nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '');
+    end if;
+    if v_attached_token_id is null then
+      v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+    end if;
+
+    if nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null then
+      raise exception 'Cannot move while clinging';
+    end if;
+  else
+    v_attached_token_id := null;
+  end if;
 
   v_tokens := coalesce(
     (
@@ -199,6 +231,25 @@ begin
       'y', p_y
     )
   );
+
+  if v_attached_token_id is not null then
+    v_tokens := coalesce(
+      (
+        select jsonb_agg(t.value)
+        from jsonb_array_elements(v_tokens) as t(value)
+        where coalesce(t.value->>'character_id', '') <> v_attached_token_id
+      ),
+      '[]'::jsonb
+    );
+
+    v_tokens := v_tokens || jsonb_build_array(
+      jsonb_build_object(
+        'character_id', v_attached_token_id,
+        'x', p_x,
+        'y', p_y
+      )
+    );
+  end if;
 
   update public.combat_state
   set token_positions = v_tokens,
@@ -838,6 +889,9 @@ declare
   v_actor_owner_email text;
   v_actor_is_monster boolean;
   v_other_token text;
+  v_actor_entry jsonb;
+  v_actor_entry_idx int;
+  v_attached_token_id text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -883,6 +937,30 @@ begin
   v_current_participant := coalesce(v_current ->> 'participant_id', '');
   v_current_email := nullif(coalesce(v_current ->> 'user_email', ''), '');
   v_actor_is_monster := p_actor_token_id like 'monster:%';
+
+  select e.ord - 1, e.entry
+  into v_actor_entry_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_actor_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  if nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null then
+    raise exception 'Cannot run while clinging';
+  end if;
+
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
+  if v_attached_token_id is null then
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+  end if;
+  if v_attached_token_id is null then
+    v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+  end if;
 
   if not v_is_dm then
     if v_current_email is null or lower(v_current_email) <> lower(v_email) then
@@ -963,6 +1041,25 @@ begin
       'y', p_y
     )
   );
+
+  if v_attached_token_id is not null then
+    v_tokens := coalesce(
+      (
+        select jsonb_agg(t.value)
+        from jsonb_array_elements(v_tokens) as t(value)
+        where coalesce(t.value->>'character_id', '') <> v_attached_token_id
+      ),
+      '[]'::jsonb
+    );
+
+    v_tokens := v_tokens || jsonb_build_array(
+      jsonb_build_object(
+        'character_id', v_attached_token_id,
+        'x', p_x,
+        'y', p_y
+      )
+    );
+  end if;
 
   -- Break all engagements involving the actor token (ally engagements).
   v_edges := coalesce(
@@ -1155,6 +1252,12 @@ begin
 
   if v_entry_idx is null then
     raise exception 'Actor participant not found';
+  end if;
+
+  if nullif(coalesce(v_entry->>'grappling_target_id', ''), '') is not null
+     or nullif(coalesce(v_entry->>'clinging_target_id', ''), '') is not null
+     or nullif(coalesce(v_entry->>'grappled_by_id', ''), '') is not null then
+    raise exception 'Cannot get up while grappling, clinging, or grappled';
   end if;
 
   v_entry_kind := coalesce(v_entry->>'kind', '');
@@ -1996,6 +2099,569 @@ end;
 $$;
 
 grant execute on function public.combat_break_engagement_token(text) to authenticated;
+
+create or replace function public.combat_resolve_grapple_or_cling(
+  p_actor_token_id text,
+  p_target_token_id text,
+  p_mode text,
+  p_success boolean,
+  p_zone_id int
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_mode text := lower(coalesce(p_mode, ''));
+  v_entries jsonb;
+  v_monsters jsonb;
+  v_edges jsonb;
+  v_tokens jsonb;
+  v_zone_loot jsonb;
+  v_mode_on boolean;
+  v_actor_entry jsonb;
+  v_target_entry jsonb;
+  v_actor_idx int;
+  v_target_idx int;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_actor_size int := 1;
+  v_target_size int := 1;
+  v_actor_kind text;
+  v_target_kind text;
+  v_target_uuid uuid;
+  v_target_inventory jsonb;
+  v_target_slots jsonb;
+  v_target_snapshot jsonb;
+  v_target_snapshot_gear jsonb;
+  v_target_snapshot_slots jsonb;
+  v_target_monster_id text;
+  v_drop_items jsonb;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_target_token_id is null or btrim(p_target_token_id) = '' then
+    raise exception 'Target token is required';
+  end if;
+  if p_actor_token_id = p_target_token_id then
+    raise exception 'Cannot target self';
+  end if;
+  if v_mode not in ('grapple', 'cling') then
+    raise exception 'Invalid grapple mode';
+  end if;
+  if p_zone_id is null or p_zone_id <= 0 then
+    raise exception 'Zone is required';
+  end if;
+
+  select combat_mode,
+         initiative_entries,
+         initiative_monsters,
+         coalesce(engagements, '[]'::jsonb),
+         coalesce(token_positions, '[]'::jsonb),
+         coalesce(zone_loot, '[]'::jsonb)
+  into v_mode_on, v_entries, v_monsters, v_edges, v_tokens, v_zone_loot
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode_on, false) = false then
+    raise exception 'Combat mode is not active';
+  end if;
+  if v_entries is null or jsonb_array_length(v_entries) = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  if not exists (
+    select 1 from jsonb_array_elements(v_tokens) as t(value)
+    where t.value->>'character_id' = p_actor_token_id
+  ) then
+    raise exception 'Actor token not found';
+  end if;
+  if not exists (
+    select 1 from jsonb_array_elements(v_tokens) as t(value)
+    where t.value->>'character_id' = p_target_token_id
+  ) then
+    raise exception 'Target token not found';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_actor_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  select e.ord - 1, e.entry
+  into v_target_idx, v_target_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_target_token_id
+     or e.entry->>'participant_id' = ('player:' || p_target_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_actor_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+  if v_target_idx is null then
+    raise exception 'Target participant not found';
+  end if;
+
+  if not v_is_dm then
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can use this action';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only use this action with your own character';
+    end if;
+  end if;
+
+  if not exists (
+    select 1
+    from jsonb_array_elements(v_edges) as ed(value)
+    where (ed.value->>'a' = p_actor_token_id and ed.value->>'b' = p_target_token_id)
+       or (ed.value->>'a' = p_target_token_id and ed.value->>'b' = p_actor_token_id)
+  ) then
+    raise exception 'Target is not engaged';
+  end if;
+
+  if nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '') is not null
+     or nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '') is not null
+     or nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null
+     or nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '') is not null then
+    raise exception 'Actor is already in a grapple/cling relationship';
+  end if;
+  if nullif(coalesce(v_target_entry->>'grappling_target_id', ''), '') is not null
+     or nullif(coalesce(v_target_entry->>'grappled_by_id', ''), '') is not null
+     or nullif(coalesce(v_target_entry->>'clinging_target_id', ''), '') is not null
+     or nullif(coalesce(v_target_entry->>'clung_onto_by_id', ''), '') is not null then
+    raise exception 'Target is already in a grapple/cling relationship';
+  end if;
+
+  v_actor_kind := coalesce(v_actor_entry->>'kind', '');
+  v_target_kind := coalesce(v_target_entry->>'kind', '');
+  if v_actor_kind = 'monster' then
+    v_actor_size := coalesce((v_actor_entry->'monster_snapshot'->>'size')::int, 1);
+  end if;
+  if v_target_kind = 'monster' then
+    v_target_size := coalesce((v_target_entry->'monster_snapshot'->>'size')::int, 1);
+  end if;
+
+  if v_mode = 'grapple' and v_actor_size < v_target_size then
+    raise exception 'Cannot grapple larger target';
+  end if;
+  if v_mode = 'cling' and v_target_size <= v_actor_size then
+    raise exception 'Can only cling to larger target';
+  end if;
+
+  if v_actor_kind = 'player' then
+    select coalesce(to_jsonb(equipment_slots), '{}'::jsonb)
+    into v_target_slots
+    from public.characters
+    where id = p_actor_token_id::uuid
+    limit 1;
+  else
+    v_target_slots := coalesce(v_actor_entry->'monster_snapshot'->'equipment_slots', '{}'::jsonb);
+  end if;
+  if nullif(coalesce(v_target_slots->>'left', ''), '') is not null
+     or nullif(coalesce(v_target_slots->>'right', ''), '') is not null then
+    raise exception 'Must be unarmed to grapple or cling';
+  end if;
+
+  if not coalesce(p_success, false) then
+    return;
+  end if;
+
+  if v_mode = 'grapple' then
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_id}', to_jsonb(p_target_token_id), true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_name}', to_jsonb(coalesce(v_target_entry->>'name', 'Target')), true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{prone}', 'true'::jsonb, true);
+
+    v_target_entry := jsonb_set(v_target_entry, '{grappled_by_id}', to_jsonb(p_actor_token_id), true);
+    v_target_entry := jsonb_set(v_target_entry, '{grappled_by_name}', to_jsonb(coalesce(v_actor_entry->>'name', 'Actor')), true);
+    v_target_entry := jsonb_set(v_target_entry, '{prone}', 'true'::jsonb, true);
+  else
+    v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_id}', to_jsonb(p_target_token_id), true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_name}', to_jsonb(coalesce(v_target_entry->>'name', 'Target')), true);
+    v_actor_entry := jsonb_set(v_actor_entry, '{prone}', 'true'::jsonb, true);
+
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', to_jsonb(p_actor_token_id), true);
+    v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', to_jsonb(coalesce(v_actor_entry->>'name', 'Actor')), true);
+  end if;
+
+  if v_mode = 'grapple' then
+    if v_target_kind = 'player' then
+      begin
+        v_target_uuid := p_target_token_id::uuid;
+      exception when others then
+        raise exception 'Target character not found';
+      end;
+
+      select coalesce(inventory, '[]'::jsonb), coalesce(to_jsonb(equipment_slots), '{}'::jsonb)
+      into v_target_inventory, v_target_slots
+      from public.characters
+      where id = v_target_uuid
+      limit 1;
+
+      v_drop_items := (
+        select coalesce(jsonb_agg(i.value), '[]'::jsonb)
+        from jsonb_array_elements(v_target_inventory) as i(value)
+        where coalesce(i.value->>'id', '') = coalesce(v_target_slots->>'left', '')
+           or coalesce(i.value->>'name', '') = coalesce(v_target_slots->>'left', '')
+           or coalesce(i.value->>'id', '') = coalesce(v_target_slots->>'right', '')
+           or coalesce(i.value->>'name', '') = coalesce(v_target_slots->>'right', '')
+      );
+
+      v_target_inventory := coalesce(
+        (
+          select jsonb_agg(i.value)
+          from jsonb_array_elements(v_target_inventory) as i(value)
+          where not (
+            coalesce(i.value->>'id', '') = coalesce(v_target_slots->>'left', '')
+            or coalesce(i.value->>'name', '') = coalesce(v_target_slots->>'left', '')
+            or coalesce(i.value->>'id', '') = coalesce(v_target_slots->>'right', '')
+            or coalesce(i.value->>'name', '') = coalesce(v_target_slots->>'right', '')
+          )
+        ),
+        '[]'::jsonb
+      );
+
+      v_target_slots := jsonb_set(v_target_slots, '{left}', 'null'::jsonb, true);
+      v_target_slots := jsonb_set(v_target_slots, '{right}', 'null'::jsonb, true);
+
+      update public.characters
+      set equipment_slots = v_target_slots,
+          inventory = v_target_inventory
+      where id = v_target_uuid;
+    else
+      v_target_snapshot := coalesce(v_target_entry->'monster_snapshot', '{}'::jsonb);
+      v_target_snapshot_gear := coalesce(v_target_snapshot->'gear', '[]'::jsonb);
+      v_target_snapshot_slots := coalesce(v_target_snapshot->'equipment_slots', '{}'::jsonb);
+
+      v_drop_items := (
+        select coalesce(jsonb_agg(i.value), '[]'::jsonb)
+        from jsonb_array_elements(v_target_snapshot_gear) as i(value)
+        where coalesce(i.value->>'id', '') = coalesce(v_target_snapshot_slots->>'left', '')
+           or coalesce(i.value->>'name', '') = coalesce(v_target_snapshot_slots->>'left', '')
+           or coalesce(i.value->>'id', '') = coalesce(v_target_snapshot_slots->>'right', '')
+           or coalesce(i.value->>'name', '') = coalesce(v_target_snapshot_slots->>'right', '')
+      );
+
+      v_target_snapshot_gear := coalesce(
+        (
+          select jsonb_agg(i.value)
+          from jsonb_array_elements(v_target_snapshot_gear) as i(value)
+          where not (
+            coalesce(i.value->>'id', '') = coalesce(v_target_snapshot_slots->>'left', '')
+            or coalesce(i.value->>'name', '') = coalesce(v_target_snapshot_slots->>'left', '')
+            or coalesce(i.value->>'id', '') = coalesce(v_target_snapshot_slots->>'right', '')
+            or coalesce(i.value->>'name', '') = coalesce(v_target_snapshot_slots->>'right', '')
+          )
+        ),
+        '[]'::jsonb
+      );
+
+      v_target_snapshot_slots := jsonb_set(v_target_snapshot_slots, '{left}', 'null'::jsonb, true);
+      v_target_snapshot_slots := jsonb_set(v_target_snapshot_slots, '{right}', 'null'::jsonb, true);
+      v_target_snapshot := jsonb_set(v_target_snapshot, '{gear}', v_target_snapshot_gear, true);
+      v_target_snapshot := jsonb_set(v_target_snapshot, '{equipment_slots}', v_target_snapshot_slots, true);
+      v_target_entry := jsonb_set(v_target_entry, '{monster_snapshot}', v_target_snapshot, true);
+
+      v_monsters := coalesce(v_monsters, '[]'::jsonb);
+      v_target_monster_id := coalesce(v_target_entry->>'participant_id', '');
+      select coalesce(
+        jsonb_agg(
+          case
+            when mon.value->>'id' = v_target_monster_id
+            then jsonb_set(mon.value, '{monster_snapshot}', v_target_snapshot, true)
+            else mon.value
+          end
+        ),
+        '[]'::jsonb
+      )
+      into v_monsters
+      from jsonb_array_elements(v_monsters) as mon(value);
+    end if;
+
+    if coalesce(v_drop_items, '[]'::jsonb) <> '[]'::jsonb then
+      select coalesce(
+        jsonb_agg(
+          jsonb_build_object(
+            'zone_id', p_zone_id,
+            'item', drop_item.value
+          )
+        ),
+        '[]'::jsonb
+      )
+      into v_drop_items
+      from jsonb_array_elements(v_drop_items) as drop_item(value);
+
+      v_zone_loot := coalesce(v_zone_loot, '[]'::jsonb) || v_drop_items;
+    end if;
+  end if;
+
+  v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
+  v_entries := jsonb_set(v_entries, array[v_target_idx::text], v_target_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      initiative_monsters = coalesce(v_monsters, initiative_monsters),
+      zone_loot = v_zone_loot,
+      token_positions = (
+        select coalesce(
+          jsonb_agg(
+            case
+              when t.value->>'character_id' = p_target_token_id
+              then jsonb_build_object('character_id', p_target_token_id, 'x', a.value->'x', 'y', a.value->'y')
+              else t.value
+            end
+          ),
+          '[]'::jsonb
+        )
+        from jsonb_array_elements(v_tokens) as t(value),
+             lateral (
+               select tok.value
+               from jsonb_array_elements(v_tokens) as tok(value)
+               where tok.value->>'character_id' = p_actor_token_id
+               limit 1
+             ) as a
+      ),
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_resolve_grapple_or_cling(text, text, text, boolean, int) to authenticated;
+
+create or replace function public.combat_release_grapple_or_cling(
+  p_actor_token_id text,
+  p_target_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_mode_on boolean;
+  v_actor_entry jsonb;
+  v_target_entry jsonb;
+  v_actor_idx int;
+  v_target_idx int;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_target_token_id is null or btrim(p_target_token_id) = '' then
+    raise exception 'Target token is required';
+  end if;
+
+  select combat_mode, coalesce(initiative_entries, '[]'::jsonb)
+  into v_mode_on, v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode_on, false) = false then
+    raise exception 'Combat mode is not active';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_actor_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  select e.ord - 1, e.entry
+  into v_target_idx, v_target_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_target_token_id
+     or e.entry->>'participant_id' = ('player:' || p_target_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_actor_idx is null or v_target_idx is null then
+    raise exception 'Participants not found';
+  end if;
+
+  if not v_is_dm then
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can release';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only release with your own character';
+    end if;
+  end if;
+
+  if (v_actor_entry->>'grappling_target_id') <> p_target_token_id
+     and (v_actor_entry->>'clinging_target_id') <> p_target_token_id then
+    raise exception 'No release relationship found';
+  end if;
+
+  v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_id}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_name}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_id}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{clinging_target_name}', 'null'::jsonb, true);
+
+  v_target_entry := jsonb_set(v_target_entry, '{grappled_by_id}', 'null'::jsonb, true);
+  v_target_entry := jsonb_set(v_target_entry, '{grappled_by_name}', 'null'::jsonb, true);
+  v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_id}', 'null'::jsonb, true);
+  v_target_entry := jsonb_set(v_target_entry, '{clung_onto_by_name}', 'null'::jsonb, true);
+
+  v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
+  v_entries := jsonb_set(v_entries, array[v_target_idx::text], v_target_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_release_grapple_or_cling(text, text) to authenticated;
+
+create or replace function public.combat_break_free(
+  p_actor_token_id text,
+  p_other_token_id text,
+  p_success boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_mode_on boolean;
+  v_actor_entry jsonb;
+  v_other_entry jsonb;
+  v_actor_idx int;
+  v_other_idx int;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_other_token_id is null or btrim(p_other_token_id) = '' then
+    raise exception 'Other token is required';
+  end if;
+
+  select combat_mode, coalesce(initiative_entries, '[]'::jsonb)
+  into v_mode_on, v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode_on, false) = false then
+    raise exception 'Combat mode is not active';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_actor_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  select e.ord - 1, e.entry
+  into v_other_idx, v_other_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_other_token_id
+     or e.entry->>'participant_id' = ('player:' || p_other_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_actor_idx is null or v_other_idx is null then
+    raise exception 'Participants not found';
+  end if;
+
+  if not v_is_dm then
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can break free';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only break free with your own character';
+    end if;
+  end if;
+
+  if (v_actor_entry->>'grappled_by_id') <> p_other_token_id
+     and (v_actor_entry->>'clung_onto_by_id') <> p_other_token_id then
+    raise exception 'No break free relationship found';
+  end if;
+
+  if not coalesce(p_success, false) then
+    return;
+  end if;
+
+  v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_id}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{grappled_by_name}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_id}', 'null'::jsonb, true);
+  v_actor_entry := jsonb_set(v_actor_entry, '{clung_onto_by_name}', 'null'::jsonb, true);
+
+  v_other_entry := jsonb_set(v_other_entry, '{grappling_target_id}', 'null'::jsonb, true);
+  v_other_entry := jsonb_set(v_other_entry, '{grappling_target_name}', 'null'::jsonb, true);
+  v_other_entry := jsonb_set(v_other_entry, '{clinging_target_id}', 'null'::jsonb, true);
+  v_other_entry := jsonb_set(v_other_entry, '{clinging_target_name}', 'null'::jsonb, true);
+
+  v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
+  v_entries := jsonb_set(v_entries, array[v_other_idx::text], v_other_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_break_free(text, text, boolean) to authenticated;
 
 insert into storage.buckets (id, name, public)
 values ('combat-assets', 'combat-assets', true)

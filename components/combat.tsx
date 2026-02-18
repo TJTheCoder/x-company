@@ -58,6 +58,14 @@ type InitiativeEntry = {
   prone?: boolean;
   swing_weapon_item_id?: string | null;
   swing_weapon_name?: string | null;
+  grappling_target_id?: string | null;
+  grappling_target_name?: string | null;
+  grappled_by_id?: string | null;
+  grappled_by_name?: string | null;
+  clinging_target_id?: string | null;
+  clinging_target_name?: string | null;
+  clung_onto_by_id?: string | null;
+  clung_onto_by_name?: string | null;
 };
 
 type CharacterLite = {
@@ -368,6 +376,19 @@ function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undefined): 
         swing_weapon_item_id:
           typeof e.swing_weapon_item_id === "string" ? e.swing_weapon_item_id : null,
         swing_weapon_name: typeof e.swing_weapon_name === "string" ? e.swing_weapon_name : null,
+        grappling_target_id:
+          typeof e.grappling_target_id === "string" ? e.grappling_target_id : null,
+        grappling_target_name:
+          typeof e.grappling_target_name === "string" ? e.grappling_target_name : null,
+        grappled_by_id: typeof e.grappled_by_id === "string" ? e.grappled_by_id : null,
+        grappled_by_name: typeof e.grappled_by_name === "string" ? e.grappled_by_name : null,
+        clinging_target_id:
+          typeof e.clinging_target_id === "string" ? e.clinging_target_id : null,
+        clinging_target_name:
+          typeof e.clinging_target_name === "string" ? e.clinging_target_name : null,
+        clung_onto_by_id: typeof e.clung_onto_by_id === "string" ? e.clung_onto_by_id : null,
+        clung_onto_by_name:
+          typeof e.clung_onto_by_name === "string" ? e.clung_onto_by_name : null,
       };
     })
     .filter(Boolean) as InitiativeEntry[];
@@ -908,6 +929,23 @@ export default function Combat({
     });
   }, [engagements, actorTokenId]);
   const isActorProne = Boolean(currentEntry?.prone);
+  const actorGrapplingTargetId = currentEntry?.grappling_target_id ?? null;
+  const actorGrappledById = currentEntry?.grappled_by_id ?? null;
+  const actorClingingTargetId = currentEntry?.clinging_target_id ?? null;
+  const actorClungOntoById = currentEntry?.clung_onto_by_id ?? null;
+  const isActorGrappling = Boolean(actorGrapplingTargetId);
+  const isActorGrappled = Boolean(actorGrappledById);
+  const isActorClinging = Boolean(actorClingingTargetId);
+  const isActorClungOnto = Boolean(actorClungOntoById);
+  const actorHardLockedByHold = isActorGrappling || isActorGrappled || isActorClinging;
+  const actorHoldCounterpartId =
+    actorGrapplingTargetId || actorGrappledById || actorClingingTargetId || actorClungOntoById || null;
+  const selectedIsActorOrHoldCounterpart = useMemo(() => {
+    if (!selectedTokenId || !actorTokenId) return false;
+    if (selectedTokenId === actorTokenId) return true;
+    if (!actorHoldCounterpartId) return false;
+    return selectedTokenId === actorHoldCounterpartId;
+  }, [selectedTokenId, actorTokenId, actorHoldCounterpartId]);
   const actorSize = useMemo(() => {
     if (!currentEntry) return 1;
     if (currentEntry.kind === "monster") {
@@ -953,6 +991,18 @@ export default function Combat({
           if (entry?.swing_weapon_name) {
             flags.push(`Swinging (${entry.swing_weapon_name})`);
           }
+          if (entry?.grappling_target_name) {
+            flags.push(`Grappling (${entry.grappling_target_name})`);
+          }
+          if (entry?.grappled_by_name) {
+            flags.push(`Grappled (${entry.grappled_by_name})`);
+          }
+          if (entry?.clinging_target_name) {
+            flags.push(`Clinging (${entry.clinging_target_name})`);
+          }
+          if (entry?.clung_onto_by_name) {
+            flags.push(`Clung Onto (${entry.clung_onto_by_name})`);
+          }
 
           const character = characters.find((char) => char.id === pos.character_id);
           if (character) {
@@ -989,6 +1039,12 @@ export default function Combat({
   const draggableTokenCharacterIds = useMemo(() => {
     const ids = new Set<string>();
     for (const token of renderedTokens) {
+      const entry = initiativeEntries.find(
+        (e) => e.participant_id === token.character_id || e.participant_id === `player:${token.character_id}`
+      );
+      if (entry?.clinging_target_id) {
+        continue;
+      }
       if (token.type === "monster" && isDmUser) {
         ids.add(token.character_id);
       } else if (token.type === "player" && canPlaceTokenFor(token.email)) {
@@ -996,7 +1052,7 @@ export default function Combat({
       }
     }
     return ids;
-  }, [renderedTokens, canPlaceTokenFor, isDmUser]);
+  }, [renderedTokens, canPlaceTokenFor, isDmUser, initiativeEntries]);
 
   const canPass = useMemo(() => {
     if (!currentEntry || !userEmail) return false;
@@ -1012,7 +1068,7 @@ export default function Combat({
     if (!combatMode || !selectedTokenId || !currentEntry) return false;
     if (!actorTokenId || selectedTokenId !== actorTokenId) return false;
     if (!isMyTurn) return false;
-    if (isActorProne) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
     if (currentEntry.kind === "monster" && !isDmUser) return false;
     if (
       currentEntry.kind === "player" &&
@@ -1022,7 +1078,7 @@ export default function Combat({
       return false;
     }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail, isActorProne]);
+  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail, isActorProne, actorHardLockedByHold]);
   const isSelectedSelf = useMemo(() => {
     if (!selectedTokenId || !actorTokenId) return false;
     return selectedTokenId === actorTokenId;
@@ -1041,7 +1097,7 @@ export default function Combat({
     if (!combatMode || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
     if (!isMyTurn) return false;
-    if (isActorProne) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
     if (isActorEngaged) return false;
 
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -1051,11 +1107,11 @@ export default function Combat({
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorHardLockedByHold]);
   const canUseRunFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (isActorProne) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
     if (isActorEnemyEngaged) return false;
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
@@ -1064,26 +1120,27 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorHardLockedByHold]);
   const canUseRetreatFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
-    if (isActorProne) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
     if (!isActorEnemyEngaged) return false;
     if (selectedTokenId === actorTokenId) return true;
     return areTokensEngaged(actorTokenId, selectedTokenId, engagements);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEnemyEngaged, engagements, isActorProne]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEnemyEngaged, engagements, isActorProne, actorHardLockedByHold]);
   const canUseGetUpFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
     if (!isActorProne) return false;
+    if (isActorGrappling || isActorClinging || isActorGrappled) return false;
     if (selectedTokenId !== actorTokenId) return false;
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled]);
 
   const swingWeaponOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return [] as Array<{ id: string; name: string }>;
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
-    if (isActorProne) return [];
+    if (isActorProne || actorHardLockedByHold) return [];
 
     if (currentEntry.kind === "player") {
       if (!actorCharacter || !character || actorCharacter.id !== character.id) return [];
@@ -1102,7 +1159,7 @@ export default function Combat({
     return monsterEquippedMeleeWeapons(actorMonster.monster_snapshot)
       .filter((weapon) => weapon.wield === "2H")
       .map((weapon) => ({ id: weapon.id, name: weapon.name }));
-  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne]);
+  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold]);
 
   useEffect(() => {
     setMonsterRollResult(null);
@@ -1128,10 +1185,86 @@ export default function Combat({
     return "Distant";
   }, [actorTokenId, selectedTokenId, engagements, tokenByCharacterId, zoneRegionMap, zoneAdjacency]);
 
+  const actorHasOccupiedHands = useMemo(() => {
+    if (!currentEntry) return false;
+    if (currentEntry.kind === "player") {
+      const actor = actorTokenCharacter;
+      if (!actor) return false;
+      const slots = actor.equipment_slots || { left: null, right: null };
+      return Boolean(slots.left || slots.right);
+    }
+    const slots = currentEntry.monster_snapshot?.equipment_slots || {
+      left: null,
+      right: null,
+      armor: null,
+      helmet: null,
+    };
+    return Boolean(slots.left || slots.right);
+  }, [currentEntry, actorTokenCharacter]);
+
+  const canUseGrappleFromSelection = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
+    if (actorHardLockedByHold || isActorProne) return false;
+    if (actorHasOccupiedHands) return false;
+    if (selectedRange !== "Engaged") return false;
+    const targetSize = selectedTargetSize;
+    if (targetSize === null) return false;
+    return actorSize >= targetSize;
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    actorTokenId,
+    selectedTokenId,
+    actorHardLockedByHold,
+    isActorProne,
+    actorHasOccupiedHands,
+    selectedRange,
+    selectedTargetSize,
+    actorSize,
+  ]);
+
+  const canUseClingFromSelection = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
+    if (actorHardLockedByHold || isActorProne) return false;
+    if (actorHasOccupiedHands) return false;
+    if (selectedRange !== "Engaged") return false;
+    const targetSize = selectedTargetSize;
+    if (targetSize === null) return false;
+    return targetSize > actorSize;
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    actorTokenId,
+    selectedTokenId,
+    actorHardLockedByHold,
+    isActorProne,
+    actorHasOccupiedHands,
+    selectedRange,
+    selectedTargetSize,
+    actorSize,
+  ]);
+
+  const canUseRelease = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
+    if (!(isActorGrappling || isActorClinging)) return false;
+    return selectedIsActorOrHoldCounterpart;
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappling, isActorClinging, selectedIsActorOrHoldCounterpart]);
+
+  const canUseBreakFree = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
+    if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
+    if (!(isActorGrappled || isActorClungOnto)) return false;
+    return selectedIsActorOrHoldCounterpart;
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart]);
+
   const meleeActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available || isActorProne) {
+    if (!combatMode || !currentEntry || !isMyTurn || (isActorProne && !actorHardLockedByHold)) {
       return [] as Array<{
-        maneuver: "Slash" | "Stab" | "Strike";
+        maneuver: "Slash" | "Stab" | "Strike" | "Grapple Attack";
         weaponItemId?: string | null;
         weaponName: string;
         weaponBaseDamage: number;
@@ -1141,13 +1274,29 @@ export default function Combat({
     if (!selectedTokenId || !selectedRange) return [];
     if (selectedTokenId === actorTokenId) return [];
 
+    if (actorHardLockedByHold) {
+      if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
+      if (!(isActorGrappling || isActorClinging)) return [];
+      if (!actorHoldCounterpartId || selectedTokenId !== actorHoldCounterpartId) return [];
+      return [
+        {
+          maneuver: "Grapple Attack" as const,
+          weaponItemId: null,
+          weaponName: "Grapple Attack",
+          weaponBaseDamage: 1,
+          gearDice: 0,
+        },
+      ];
+    }
+
     const options: Array<{
-      maneuver: "Slash" | "Stab" | "Strike";
+      maneuver: "Slash" | "Stab" | "Strike" | "Grapple Attack";
       weaponItemId?: string | null;
       weaponName: string;
       weaponBaseDamage: number;
       gearDice: number;
     }> = [];
+    if (!currentEntry.slow_available) return options;
 
     if (currentEntry.kind === "player") {
       if (!actorCharacter || !character || actorCharacter.id !== character.id) return [];
@@ -1242,10 +1391,10 @@ export default function Combat({
     }
 
     return options;
-  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne]);
+  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorHoldCounterpartId]);
 
   const shoveActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne) {
+    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) {
       return [] as Array<{ weaponItemId?: string | null; weaponName: string; gearDice: number; bonusDice: number }>;
     }
     if (!selectedTokenId || !selectedRange || selectedRange !== "Engaged") return [];
@@ -1320,6 +1469,7 @@ export default function Combat({
     currentEntry,
     isMyTurn,
     isActorProne,
+    actorHardLockedByHold,
     selectedTokenId,
     selectedRange,
     actorTokenId,
@@ -1331,7 +1481,7 @@ export default function Combat({
   ]);
 
   const disarmActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne) {
+    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) {
       return [] as Array<{
         actorWeaponItemId: string;
         actorWeaponName: string;
@@ -1406,6 +1556,7 @@ export default function Combat({
     currentEntry,
     isMyTurn,
     isActorProne,
+    actorHardLockedByHold,
     selectedTokenId,
     selectedRange,
     actorTokenId,
@@ -1417,7 +1568,7 @@ export default function Combat({
   ]);
 
   const pickUpActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne) return [] as InventoryItem[];
+    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
     if (!selectedZoneTarget || !actorTokenId) return [];
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -1446,6 +1597,7 @@ export default function Combat({
     currentEntry,
     isMyTurn,
     isActorProne,
+    actorHardLockedByHold,
     selectedZoneTarget,
     actorTokenId,
     tokenByCharacterId,
@@ -2261,17 +2413,20 @@ export default function Combat({
   };
 
   const requestMeleeAction = async (option: {
-    maneuver: "Slash" | "Stab" | "Strike";
+    maneuver: "Slash" | "Stab" | "Strike" | "Grapple Attack";
     weaponItemId?: string | null;
     weaponName: string;
     weaponBaseDamage: number;
     gearDice: number;
   }) => {
-    if (!selectedTokenId || !currentEntry?.slow_available || !isMyTurn) return;
+    if (!selectedTokenId || !currentEntry || !isMyTurn) return;
     if (selectedTokenId === actorTokenId) return;
     const actingParticipantId = currentEntry.participant_id;
     const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
-    const didConsume = await consumeAction("slow");
+    const didConsume =
+      option.maneuver === "Grapple Attack"
+        ? await consumeFastOrSlow()
+        : await consumeAction("slow");
     if (!didConsume) return;
     const swingMatch =
       !!currentSwing &&
@@ -2575,6 +2730,159 @@ export default function Combat({
     await clearProneForToken(actorTokenId);
   };
 
+  const requestGrappleLike = async (mode: "Grapple" | "Cling") => {
+    if (!currentEntry || !actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return;
+    if (mode === "Grapple" && !canUseGrappleFromSelection) return;
+    if (mode === "Cling" && !canUseClingFromSelection) return;
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    const zoneId = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
+    const sizeDiff = actorSize - (selectedTargetSize ?? 1);
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `${mode.toLowerCase().replace(/\s+/g, "-")}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: selectedTokenId,
+        targetName,
+        weaponItemId: null,
+        weaponName: mode,
+        weaponBaseDamage: 0,
+        maneuver: mode,
+        rollAttribute: "STR",
+        rollSkill: "MELEE",
+        requiredSuccesses: 1,
+        bonusDice: sizeDiff,
+        disarmZoneId: zoneId ?? undefined,
+      });
+      setSelectedTokenId(null);
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
+    const signedSkillPool = Math.max(0, snapshot.special ?? 0) + sizeDiff;
+    const skillIsNegative = signedSkillPool < 0;
+    const skillDice = rollD6Pool(Math.abs(signedSkillPool));
+    const successesRaw = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    const successes = skillIsNegative
+      ? Math.max(0, successesRaw - skillDice.filter((d) => d === 6).length * 2)
+      : successesRaw;
+
+    setMonsterRollResult({
+      actionLabel: mode,
+      attributeDice,
+      skillDice,
+      skillIsNegative,
+      gearDice: [],
+      successes,
+    });
+
+    await onResolveMeleeAttack({
+      id: `monster-${mode.toLowerCase()}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: selectedTokenId,
+      weaponName: mode,
+      weaponBaseDamage: 0,
+      maneuver: mode,
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+      disarmZoneId: zoneId ?? undefined,
+    });
+  };
+
+  const requestRelease = async () => {
+    if (!currentEntry || !actorTokenId || !canUseRelease) return;
+    const otherTokenId = actorGrapplingTargetId || actorClingingTargetId;
+    if (!otherTokenId) return;
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_release_grapple_or_cling", {
+      p_actor_token_id: actorTokenId,
+      p_target_token_id: otherTokenId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    setSelectedTokenId(null);
+  };
+
+  const requestBreakFree = async () => {
+    if (!currentEntry || !actorTokenId || !canUseBreakFree) return;
+    const otherTokenId = actorGrappledById || actorClungOntoById;
+    if (!otherTokenId) return;
+    const didConsume = await consumeFastOrSlow();
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+
+    const targetSize =
+      otherTokenId.startsWith("monster:")
+        ? Math.trunc(monsterByParticipantId.get(otherTokenId)?.monster_snapshot?.size ?? 1)
+        : 1;
+    const sizeDiff = actorSize - targetSize;
+    const againstCling = Boolean(actorClungOntoById && actorClungOntoById === otherTokenId);
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `break-free:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: otherTokenId,
+        targetName,
+        weaponItemId: null,
+        weaponName: "Break Free",
+        weaponBaseDamage: 0,
+        maneuver: "Break Free",
+        rollAttribute: againstCling ? "AGL" : "STR",
+        rollSkill: againstCling ? "MOVE" : "MELEE",
+        requiredSuccesses: 1,
+        bonusDice: sizeDiff,
+      });
+      setSelectedTokenId(null);
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const attributeDice = rollD6Pool(Math.max(0, againstCling ? snapshot.agl ?? 0 : snapshot.str ?? 0));
+    const signedSkillPool = Math.max(0, snapshot.special ?? 0) + sizeDiff;
+    const skillIsNegative = signedSkillPool < 0;
+    const skillDice = rollD6Pool(Math.abs(signedSkillPool));
+    const successesRaw = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    const successes = skillIsNegative
+      ? Math.max(0, successesRaw - skillDice.filter((d) => d === 6).length * 2)
+      : successesRaw;
+
+    setMonsterRollResult({
+      actionLabel: "Break Free",
+      attributeDice,
+      skillDice,
+      skillIsNegative,
+      gearDice: [],
+      successes,
+    });
+
+    await onResolveMeleeAttack({
+      id: `monster-break-free:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: otherTokenId,
+      weaponName: "Break Free",
+      weaponBaseDamage: 0,
+      maneuver: "Break Free",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+    });
+  };
+
   const requestRun = async () => {
     if (!selectedZoneTarget) return;
     await requestRunToPoint(selectedZoneTarget.point, false);
@@ -2621,6 +2929,7 @@ export default function Combat({
 
   const requestRunToPoint = async (point: ZonePoint, silentInvalid = false): Promise<boolean> => {
     if (!actorTokenId || !combatMode || !isMyTurn) return false;
+    if (actorHardLockedByHold) return false;
     const actingParticipantId = currentEntry?.participant_id ?? null;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
     if (isActorEnemyEngaged) return false;
@@ -2656,6 +2965,13 @@ export default function Combat({
   };
 
   const placePlayerToken = async (characterId: string, point: ZonePoint) => {
+    const actorEntry = initiativeEntries.find(
+      (entry) => entry.participant_id === characterId || entry.participant_id === `player:${characterId}`
+    );
+    if (actorEntry?.clinging_target_id) {
+      return;
+    }
+
     const player = characters.find((char) => char.id === characterId);
     if (!player) {
       setError("Could not find player for token placement.");
@@ -2690,6 +3006,10 @@ export default function Combat({
 
   const placeMonsterToken = async (monsterParticipantId: string, point: ZonePoint) => {
     if (!isDmUser) return;
+    const actorEntry = initiativeEntries.find((entry) => entry.participant_id === monsterParticipantId);
+    if (actorEntry?.clinging_target_id) {
+      return;
+    }
     const currentToken = tokenByCharacterId.get(monsterParticipantId);
     if (currentToken) {
       const engaged = engagements.some(
@@ -2704,10 +3024,22 @@ export default function Combat({
       }
     }
 
-    const nextTokens = [
+    let nextTokens = [
       ...tokenPositions.filter((token) => token.character_id !== monsterParticipantId),
       { character_id: monsterParticipantId, x: point.x, y: point.y },
     ];
+    const attachedTokenId =
+      actorEntry?.grappling_target_id ||
+      actorEntry?.grappled_by_id ||
+      actorEntry?.clinging_target_id ||
+      actorEntry?.clung_onto_by_id ||
+      null;
+    if (attachedTokenId) {
+      nextTokens = [
+        ...nextTokens.filter((token) => token.character_id !== attachedTokenId),
+        { character_id: attachedTokenId, x: point.x, y: point.y },
+      ];
+    }
     setTokenPositions(nextTokens);
 
     const supabase = createClient();
@@ -2742,7 +3074,15 @@ export default function Combat({
         const targetToken = tokenByCharacterId.get(dropTarget.character_id);
         const actorZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
         const targetZone = targetToken ? zoneIdAtPoint(zoneRegionMap, targetToken) : null;
-        if (combatMode && isMyTurn && !isActorEngaged && actorZone !== null && actorZone === targetZone) {
+        if (
+          combatMode &&
+          isMyTurn &&
+          !isActorEngaged &&
+          !isActorProne &&
+          !actorHardLockedByHold &&
+          actorZone !== null &&
+          actorZone === targetZone
+        ) {
           if (isDmUser) {
             await engageByTokenIds(actorTokenId, dropTarget.character_id);
           } else if (actorTokenId) {
@@ -2881,6 +3221,38 @@ export default function Combat({
             Engage
           </button>
           )}
+          {canUseGrappleFromSelection && (
+            <button
+              onClick={() => void requestGrappleLike("Grapple")}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Grapple
+            </button>
+          )}
+          {canUseClingFromSelection && (
+            <button
+              onClick={() => void requestGrappleLike("Cling")}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Cling
+            </button>
+          )}
+          {canUseRelease && (
+            <button
+              onClick={() => void requestRelease()}
+              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+            >
+              Release
+            </button>
+          )}
+          {canUseBreakFree && (
+            <button
+              onClick={() => void requestBreakFree()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Break Free
+            </button>
+          )}
           {canUseRetreatFromSelection && (
           <button
             onClick={() => void requestRetreat()}
@@ -2912,7 +3284,11 @@ export default function Combat({
               onClick={() => void requestMeleeAction(option)}
               className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
             >
-              {option.maneuver === "Strike" ? "Strike" : `${option.maneuver} (${option.weaponName})`}
+              {option.maneuver === "Strike"
+                ? "Strike"
+                : option.maneuver === "Grapple Attack"
+                  ? "Grapple Attack"
+                  : `${option.maneuver} (${option.weaponName})`}
             </button>
           ))}
           {shoveActionOptions.map((option) => (
@@ -3175,6 +3551,34 @@ export default function Combat({
                   const scale = token.type === "monster" ? Math.pow(2, monsterSize - 1) : 1;
                   const diameter = Number.isFinite(scale) && scale > 0 ? baseDiameter * scale : baseDiameter;
                   const tokenSizeStyle = { width: `${diameter}px`, height: `${diameter}px` };
+                  const tokenEntry = initiativeEntries.find(
+                    (entry) =>
+                      entry.participant_id === token.character_id ||
+                      entry.participant_id === `player:${token.character_id}`
+                  );
+                  let displayX = token.x;
+                  let displayY = token.y;
+                  const attachedTargetId = tokenEntry?.grappling_target_id || tokenEntry?.clinging_target_id || null;
+                  if (attachedTargetId) {
+                    const targetToken = tokenByCharacterId.get(attachedTargetId);
+                    if (targetToken) {
+                      const targetIsMonster = attachedTargetId.startsWith("monster:");
+                      const targetSize = targetIsMonster
+                        ? Math.trunc(monsterByParticipantId.get(attachedTargetId)?.monster_snapshot?.size ?? 1)
+                        : 1;
+                      const targetScale = targetIsMonster ? Math.pow(2, targetSize - 1) : 1;
+                      const targetDiameter =
+                        Number.isFinite(targetScale) && targetScale > 0 ? baseDiameter * targetScale : baseDiameter;
+                      const dx = token.x - targetToken.x;
+                      const dy = token.y - targetToken.y;
+                      const dist = Math.hypot(dx, dy);
+                      const unitX = dist > 0.0001 ? dx / dist : 1;
+                      const unitY = dist > 0.0001 ? dy / dist : 0;
+                      const desiredPx = diameter / 2 + targetDiameter / 2;
+                      displayX = targetToken.x + (unitX * desiredPx) / imageRect.w;
+                      displayY = targetToken.y + (unitY * desiredPx) / imageRect.h;
+                    }
+                  }
                   return (
                   <div
                     key={token.character_id}
@@ -3203,8 +3607,8 @@ export default function Combat({
                         : "cursor-default"
                     }`}
                     style={{
-                      left: imageRect.x + token.x * imageRect.w,
-                      top: imageRect.y + token.y * imageRect.h,
+                      left: imageRect.x + displayX * imageRect.w,
+                      top: imageRect.y + displayY * imageRect.h,
                     }}
                     title={token.tooltip}
                   >

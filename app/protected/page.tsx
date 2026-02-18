@@ -88,7 +88,17 @@ export type PendingMeleeAction = {
   weaponItemId?: string | null;
   weaponName: string;
   weaponBaseDamage: number;
-  maneuver: "Slash" | "Stab" | "Strike" | "Retreat" | "Shove" | "Disarm";
+  maneuver:
+    | "Slash"
+    | "Stab"
+    | "Strike"
+    | "Grapple Attack"
+    | "Retreat"
+    | "Shove"
+    | "Disarm"
+    | "Grapple"
+    | "Cling"
+    | "Break Free";
   rollAttribute?: keyof Attributes;
   rollSkill?: string;
   requiredSuccesses?: number;
@@ -105,7 +115,17 @@ export type ResolvedMeleeAttack = {
   targetCharacterId: string;
   weaponName: string;
   weaponBaseDamage: number;
-  maneuver: "Slash" | "Stab" | "Strike" | "Retreat" | "Shove" | "Disarm";
+  maneuver:
+    | "Slash"
+    | "Stab"
+    | "Strike"
+    | "Grapple Attack"
+    | "Retreat"
+    | "Shove"
+    | "Disarm"
+    | "Grapple"
+    | "Cling"
+    | "Break Free";
   totalSuccesses: number;
   requiredSuccesses?: number;
   swingBonusDamage?: number;
@@ -528,6 +548,33 @@ export default function Dashboard() {
           "Failed to resolve disarm:",
           disarmError.message || disarmError.details || JSON.stringify(disarmError)
         );
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Grapple" || attack.maneuver === "Cling") {
+      const zoneId = attack.disarmZoneId ?? 1;
+      const { error: grappleError } = await supabase.rpc("combat_resolve_grapple_or_cling", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_target_token_id: attack.targetCharacterId,
+        p_mode: attack.maneuver === "Grapple" ? "grapple" : "cling",
+        p_success: successes >= requiredSuccesses,
+        p_zone_id: zoneId,
+      });
+      if (grappleError) {
+        console.error("Failed to resolve grapple/cling:", grappleError);
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Break Free") {
+      const { error: breakFreeError } = await supabase.rpc("combat_break_free", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_other_token_id: attack.targetCharacterId,
+        p_success: successes >= requiredSuccesses,
+      });
+      if (breakFreeError) {
+        console.error("Failed to resolve break free:", breakFreeError);
       }
       return;
     }

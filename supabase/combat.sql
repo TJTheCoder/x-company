@@ -619,6 +619,346 @@ $$;
 
 grant execute on function public.combat_engage(uuid, uuid) to authenticated;
 
+create or replace function public.combat_engage_token(
+  p_actor_token_id text,
+  p_target_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_idx int;
+  v_count int;
+  v_current jsonb;
+  v_current_email text;
+  v_mode boolean;
+  v_edges jsonb;
+  v_tokens jsonb;
+  v_actor_exists boolean;
+  v_target_exists boolean;
+  v_component text[];
+  v_changed boolean;
+  e record;
+  v_member text;
+  v_a text;
+  v_b text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  if p_target_token_id is null or btrim(p_target_token_id) = '' then
+    raise exception 'Target token is required';
+  end if;
+
+  if p_actor_token_id = p_target_token_id then
+    raise exception 'Cannot engage yourself';
+  end if;
+
+  select combat_mode, initiative_entries, initiative_current_index, coalesce(engagements, '[]'::jsonb), coalesce(token_positions, '[]'::jsonb)
+  into v_mode, v_entries, v_idx, v_edges, v_tokens
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode, false) = false then
+    raise exception 'Combat mode is not active';
+  end if;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  if v_idx is null or v_idx < 0 or v_idx >= v_count then
+    v_idx := 0;
+  end if;
+  v_current := v_entries -> v_idx;
+  v_current_email := nullif(coalesce(v_current ->> 'user_email', ''), '');
+
+  if not v_is_dm and (v_current_email is null or lower(v_current_email) <> lower(v_email)) then
+    raise exception 'Only the active player can engage';
+  end if;
+
+  select exists (
+    select 1
+    from jsonb_array_elements(v_tokens) as t(value)
+    where t.value ->> 'character_id' = p_actor_token_id
+  ) into v_actor_exists;
+  if not v_actor_exists then
+    raise exception 'Actor token not found';
+  end if;
+
+  select exists (
+    select 1
+    from jsonb_array_elements(v_tokens) as t(value)
+    where t.value ->> 'character_id' = p_target_token_id
+  ) into v_target_exists;
+  if not v_target_exists then
+    raise exception 'Target token not found';
+  end if;
+
+  if not v_is_dm then
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can engage';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only engage using your own character';
+    end if;
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(v_edges) as ed(value)
+    where ed.value->>'a' = p_actor_token_id
+       or ed.value->>'b' = p_actor_token_id
+  ) then
+    raise exception 'Actor is already engaged';
+  end if;
+
+  v_component := array[p_target_token_id];
+  loop
+    v_changed := false;
+    for e in
+      select ed.value->>'a' as a, ed.value->>'b' as b
+      from jsonb_array_elements(v_edges) as ed(value)
+    loop
+      if e.a is not null and e.b is not null then
+        if (e.a = any(v_component)) and not (e.b = any(v_component)) then
+          v_component := array_append(v_component, e.b);
+          v_changed := true;
+        elsif (e.b = any(v_component)) and not (e.a = any(v_component)) then
+          v_component := array_append(v_component, e.a);
+          v_changed := true;
+        end if;
+      end if;
+    end loop;
+    exit when not v_changed;
+  end loop;
+
+  foreach v_member in array v_component loop
+    if v_member = p_actor_token_id then
+      continue;
+    end if;
+
+    v_a := least(p_actor_token_id, v_member);
+    v_b := greatest(p_actor_token_id, v_member);
+
+    if not exists (
+      select 1
+      from jsonb_array_elements(v_edges) as ed(value)
+      where ed.value->>'a' = v_a
+        and ed.value->>'b' = v_b
+    ) then
+      v_edges := v_edges || jsonb_build_array(jsonb_build_object('a', v_a, 'b', v_b));
+    end if;
+  end loop;
+
+  update public.combat_state
+  set engagements = v_edges,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_engage_token(text, text) to authenticated;
+
+create or replace function public.combat_run_token(
+  p_actor_token_id text,
+  p_x double precision,
+  p_y double precision
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_idx int;
+  v_count int;
+  v_current jsonb;
+  v_current_kind text;
+  v_current_participant text;
+  v_current_email text;
+  v_edges jsonb;
+  v_tokens jsonb;
+  v_mode boolean;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_actor_is_monster boolean;
+  v_other_token text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  if p_x < 0 or p_x > 1 or p_y < 0 or p_y > 1 then
+    raise exception 'Token position must be normalized between 0 and 1';
+  end if;
+
+  select combat_mode,
+         initiative_entries,
+         initiative_current_index,
+         coalesce(engagements, '[]'::jsonb),
+         coalesce(token_positions, '[]'::jsonb)
+  into v_mode, v_entries, v_idx, v_edges, v_tokens
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode, false) = false then
+    raise exception 'Combat mode is not active';
+  end if;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  if v_idx is null or v_idx < 0 or v_idx >= v_count then
+    v_idx := 0;
+  end if;
+
+  v_current := v_entries -> v_idx;
+  v_current_kind := coalesce(v_current ->> 'kind', '');
+  v_current_participant := coalesce(v_current ->> 'participant_id', '');
+  v_current_email := nullif(coalesce(v_current ->> 'user_email', ''), '');
+  v_actor_is_monster := p_actor_token_id like 'monster:%';
+
+  if not v_is_dm then
+    if v_current_email is null or lower(v_current_email) <> lower(v_email) then
+      raise exception 'Only the active player can run';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can run';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only run with your own character';
+    end if;
+  end if;
+
+  if v_current_kind = 'monster' then
+    if v_current_participant <> p_actor_token_id then
+      raise exception 'Only the active participant can run';
+    end if;
+  elsif v_current_kind = 'player' then
+    if v_current_participant <> ('player:' || p_actor_token_id) then
+      raise exception 'Only the active participant can run';
+    end if;
+  else
+    raise exception 'Invalid initiative participant';
+  end if;
+
+  if not exists (
+    select 1
+    from jsonb_array_elements(v_tokens) as t(value)
+    where t.value ->> 'character_id' = p_actor_token_id
+  ) then
+    raise exception 'Actor token not found';
+  end if;
+
+  -- Cannot run while engaged with any enemy.
+  for v_other_token in
+    select case
+             when ed.value->>'a' = p_actor_token_id then ed.value->>'b'
+             when ed.value->>'b' = p_actor_token_id then ed.value->>'a'
+             else null
+           end as other_token
+    from jsonb_array_elements(v_edges) as ed(value)
+  loop
+    if v_other_token is null then
+      continue;
+    end if;
+
+    if (v_other_token like 'monster:%') <> v_actor_is_monster then
+      raise exception 'Cannot run while engaged with an enemy';
+    end if;
+  end loop;
+
+  -- Consume fast first, and if unavailable consume slow as fast.
+  perform public.combat_use_fast_or_slow();
+
+  -- Move token.
+  v_tokens := coalesce(
+    (
+      select jsonb_agg(t.value)
+      from jsonb_array_elements(v_tokens) as t(value)
+      where coalesce(t.value->>'character_id', '') <> p_actor_token_id
+    ),
+    '[]'::jsonb
+  );
+
+  v_tokens := v_tokens || jsonb_build_array(
+    jsonb_build_object(
+      'character_id', p_actor_token_id,
+      'x', p_x,
+      'y', p_y
+    )
+  );
+
+  -- Break all engagements involving the actor token (ally engagements).
+  v_edges := coalesce(
+    (
+      select jsonb_agg(ed.value)
+      from jsonb_array_elements(v_edges) as ed(value)
+      where ed.value->>'a' <> p_actor_token_id
+        and ed.value->>'b' <> p_actor_token_id
+    ),
+    '[]'::jsonb
+  );
+
+  update public.combat_state
+  set token_positions = v_tokens,
+      engagements = v_edges,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_run_token(text, double precision, double precision) to authenticated;
+
 insert into storage.buckets (id, name, public)
 values ('combat-assets', 'combat-assets', true)
 on conflict (id) do nothing;

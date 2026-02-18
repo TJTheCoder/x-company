@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import type { CharacterType, PendingMeleeAction, ResolvedMeleeAttack } from "@/app/protected/page";
+import { isImplementedItem } from "@/lib/item-catalog";
 import {
-  buildMonsterAutoEquipmentSlots,
   buildMonsterSnapshot,
   formatMonsterTooltip,
   MonsterSnapshot,
@@ -14,6 +15,9 @@ type CombatProps = {
   isDM: boolean;
   userEmail: string | null;
   onRequestDrawGear?: () => void;
+  character: CharacterType | null;
+  onQueueMeleeAction?: (action: PendingMeleeAction) => void;
+  onResolveMeleeAttack?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
 };
 
 type ZonePoint = {
@@ -58,6 +62,13 @@ type CharacterLite = {
   name: string;
   email: string;
   icon_url: string | null;
+  attributes: {
+    STR: number;
+    AGL: number;
+    WIT: number;
+    EMP: number;
+  } | null;
+  spirits: number | null;
 };
 
 type CombatStateRow = {
@@ -99,9 +110,17 @@ type ImageRect = {
   w: number;
   h: number;
 };
+type MonsterRollResult = {
+  actionLabel: string;
+  attributeDice: number[];
+  skillDice: number[];
+  gearDice: number[];
+  successes: number;
+};
 
 const MAP_BUCKET = "combat-assets";
 const DM_EMAIL = "drocasma9@gmail.com";
+type TokenSide = "player" | "monster";
 
 const normalizeEmail = (value: string | null | undefined): string =>
   (value || "").trim().toLowerCase();
@@ -369,6 +388,8 @@ type ZoneRegionMap = {
   regions: Int32Array;
 };
 
+type CombatRange = "Engaged" | "Near" | "Close" | "Long" | "Distant";
+
 function buildZoneRegionMap(strokes: ZoneStroke[], width = 320, height = 320): ZoneRegionMap | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
@@ -448,7 +469,227 @@ function zoneIdAtPoint(map: ZoneRegionMap | null, point: ZonePoint): number | nu
   return id > 0 ? id : null;
 }
 
-export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatProps) {
+function buildZoneAdjacency(map: ZoneRegionMap | null): Map<number, Set<number>> {
+  const adjacency = new Map<number, Set<number>>();
+  if (!map) return adjacency;
+
+  const ensure = (id: number) => {
+    if (!adjacency.has(id)) adjacency.set(id, new Set<number>());
+    return adjacency.get(id)!;
+  };
+
+  // Zones are separated by drawn boundary strokes (several pixels wide), so
+  // adjacency must look across a small pixel gap rather than only direct neighbors.
+  const maxGap = 4;
+  for (let y = 0; y < map.height; y++) {
+    for (let x = 0; x < map.width; x++) {
+      const current = map.regions[y * map.width + x];
+      if (current <= 0) continue;
+      ensure(current);
+
+      for (let d = 1; d <= maxGap; d++) {
+        if (x + d < map.width) {
+          const right = map.regions[y * map.width + (x + d)];
+          if (right > 0 && right !== current) {
+            ensure(current).add(right);
+            ensure(right).add(current);
+            break;
+          }
+        }
+      }
+
+      for (let d = 1; d <= maxGap; d++) {
+        if (y + d < map.height) {
+          const down = map.regions[(y + d) * map.width + x];
+          if (down > 0 && down !== current) {
+            ensure(current).add(down);
+            ensure(down).add(current);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return adjacency;
+}
+
+function shortestZoneDistance(
+  fromZone: number,
+  toZone: number,
+  adjacency: Map<number, Set<number>>
+): number | null {
+  if (fromZone === toZone) return 0;
+  const visited = new Set<number>([fromZone]);
+  const queue: Array<{ zone: number; dist: number }> = [{ zone: fromZone, dist: 0 }];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const neighbors = adjacency.get(current.zone);
+    if (!neighbors) continue;
+
+    for (const neighbor of neighbors) {
+      if (visited.has(neighbor)) continue;
+      const nextDist = current.dist + 1;
+      if (neighbor === toZone) return nextDist;
+      visited.add(neighbor);
+      queue.push({ zone: neighbor, dist: nextDist });
+    }
+  }
+
+  return null;
+}
+
+function areTokensEngaged(actorTokenId: string, targetTokenId: string, edges: EngagementEdge[]): boolean {
+  if (actorTokenId === targetTokenId) return false;
+  const visited = new Set<string>([actorTokenId]);
+  const queue: string[] = [actorTokenId];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const edge of edges) {
+      const neighbor =
+        edge.a === current ? edge.b : edge.b === current ? edge.a : null;
+      if (!neighbor || visited.has(neighbor)) continue;
+      if (neighbor === targetTokenId) return true;
+      visited.add(neighbor);
+      queue.push(neighbor);
+    }
+  }
+
+  return false;
+}
+
+function weaponSupportsRange(rangeBand: string | undefined, range: CombatRange): boolean {
+  const normalized = (rangeBand || "").trim().toLowerCase();
+  if (normalized === "engaged") return range === "Engaged";
+  if (normalized === "near") return range === "Engaged" || range === "Near";
+  if (normalized === "close" || normalized === "short") {
+    return range === "Engaged" || range === "Near" || range === "Close";
+  }
+  if (normalized === "long") {
+    return range === "Engaged" || range === "Near" || range === "Close" || range === "Long";
+  }
+  return false;
+}
+
+function tokenSideOf(tokenId: string): TokenSide {
+  return tokenId.startsWith("monster:") ? "monster" : "player";
+}
+
+function rollD6Pool(count: number): number[] {
+  return Array.from({ length: Math.max(0, count) }, () => Math.floor(Math.random() * 6) + 1);
+}
+
+function formatCharacterTooltip(character: CharacterLite): string {
+  const attrs = character.attributes || { STR: 0, AGL: 0, WIT: 0, EMP: 0 };
+  return [
+    character.name,
+    `STR ${attrs.STR} | AGL ${attrs.AGL} | WIT ${attrs.WIT} | EMP ${attrs.EMP}`,
+    `Spirit ${character.spirits ?? 0}`,
+  ].join("\n");
+}
+
+function formatMonsterPublicTooltip(name: string, snapshot: MonsterSnapshot | null | undefined): string {
+  if (!snapshot) return name;
+  const slots = snapshot.equipment_slots || {
+    armor: null,
+    helmet: null,
+    left: null,
+    right: null,
+  };
+  const equipped = [
+    slots.helmet ? `Helmet: ${slots.helmet}` : null,
+    slots.armor ? `Armor: ${slots.armor}` : null,
+    slots.left ? `Left: ${slots.left}` : null,
+    slots.right ? `Right: ${slots.right}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return [name, `Equipped ${equipped || "None"}`].join("\n");
+}
+
+function slotMatchesItem(slotValue: string | null | undefined, item: { id?: string; name?: string }): boolean {
+  if (!slotValue) return false;
+  return slotValue === item.id || slotValue === item.name;
+}
+
+function monsterEquippedMeleeWeapons(snapshot: MonsterSnapshot): Array<{
+  id: string;
+  name: string;
+  damage: number;
+  gearBonus: number;
+  rangeBand?: string;
+  properties: string[];
+}> {
+  const slots = snapshot.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+  const gear = snapshot.gear || [];
+  return gear
+    .filter((item) => item.item_type === "Melee Weapon")
+    .filter((item) => slotMatchesItem(slots.left, item) || slotMatchesItem(slots.right, item))
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      damage: Math.max(0, item.damage ?? 0),
+      gearBonus: Math.max(0, item.gearBonus ?? 0),
+      rangeBand: item.range_band,
+      properties: (item.properties || []).map((p) => p.toLowerCase()),
+    }));
+}
+
+function cycleMonsterDrawGear(snapshot: MonsterSnapshot): MonsterSnapshot {
+  const slots = snapshot.equipment_slots || { armor: null, helmet: null, left: null, right: null };
+  const equipable = (snapshot.gear || []).filter((item) =>
+    item.item_type === "Armor" || item.item_type === "Helmet" || item.wield === "1H" || item.wield === "2H"
+  );
+  const equippedIds = new Set<string>(
+    equipable
+      .filter((item) =>
+        slotMatchesItem(slots.armor, item) ||
+        slotMatchesItem(slots.helmet, item) ||
+        slotMatchesItem(slots.left, item) ||
+        slotMatchesItem(slots.right, item)
+      )
+      .map((item) => item.id)
+  );
+  const stowed = equipable.filter((item) => !equippedIds.has(item.id));
+  if (stowed.length === 0) return snapshot;
+
+  const item = stowed[0];
+  const nextSlots = { ...slots };
+
+  if (item.item_type === "Armor") {
+    nextSlots.armor = item.name;
+  } else if (item.item_type === "Helmet") {
+    nextSlots.helmet = item.name;
+  } else if (item.wield === "2H") {
+    nextSlots.left = item.name;
+    nextSlots.right = item.name;
+  } else if (item.wield === "1H") {
+    const twoHandedOccupied = Boolean(nextSlots.left && nextSlots.right && nextSlots.left === nextSlots.right);
+    if (twoHandedOccupied) {
+      nextSlots.left = null;
+      nextSlots.right = null;
+    }
+    if (!nextSlots.left) nextSlots.left = item.name;
+    else if (!nextSlots.right) nextSlots.right = item.name;
+    else nextSlots.left = item.name;
+  }
+
+  return {
+    ...snapshot,
+    equipment_slots: nextSlots,
+  };
+}
+
+export default function Combat({
+  isDM,
+  userEmail,
+  onRequestDrawGear,
+  character,
+  onQueueMeleeAction,
+  onResolveMeleeAttack,
+}: CombatProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [zoneLines, setZoneLines] = useState<ZoneStroke[]>([]);
   const [tokenPositions, setTokenPositions] = useState<TokenPosition[]>([]);
@@ -462,6 +703,8 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
   const [monsterNameDrafts, setMonsterNameDrafts] = useState<Record<string, string>>({});
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
+  const [selectedZoneTarget, setSelectedZoneTarget] = useState<{ zoneId: number; point: ZonePoint } | null>(null);
+  const [monsterRollResult, setMonsterRollResult] = useState<MonsterRollResult | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [draftLine, setDraftLine] = useState<ZoneStroke | null>(null);
@@ -531,6 +774,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     selectedTokenId ? characters.find((char) => char.id === selectedTokenId) || null : null;
   const selectedTokenMonster = selectedTokenId ? monsterByParticipantId.get(selectedTokenId) || null : null;
   const zoneRegionMap = useMemo(() => buildZoneRegionMap(zoneLines), [zoneLines]);
+  const zoneAdjacency = useMemo(() => buildZoneAdjacency(zoneRegionMap), [zoneRegionMap]);
   const tokenByCharacterId = useMemo(() => {
     const map = new Map<string, TokenPosition>();
     for (const token of tokenPositions) {
@@ -546,6 +790,15 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
   const isActorEngaged = useMemo(() => {
     if (!actorTokenId) return false;
     return engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId);
+  }, [engagements, actorTokenId]);
+  const isActorEnemyEngaged = useMemo(() => {
+    if (!actorTokenId) return false;
+    const actorSide = tokenSideOf(actorTokenId);
+    return engagements.some((edge) => {
+      const otherTokenId = edge.a === actorTokenId ? edge.b : edge.b === actorTokenId ? edge.a : null;
+      if (!otherTokenId) return false;
+      return tokenSideOf(otherTokenId) !== actorSide;
+    });
   }, [engagements, actorTokenId]);
 
   const zoneTintUrl = useMemo(() => {
@@ -576,7 +829,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
               name: character.name,
               email: character.email,
               icon_url: character.icon_url,
-              tooltip: character.name,
+              tooltip: formatCharacterTooltip(character),
             };
           }
 
@@ -585,7 +838,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
             const tooltip =
               isDmUser && monster.monster_snapshot
                 ? formatMonsterTooltip(monster.monster_snapshot)
-                : monster.name;
+                : formatMonsterPublicTooltip(monster.name, monster.monster_snapshot);
             return {
               ...pos,
               type: "monster" as const,
@@ -654,6 +907,158 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
   }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap]);
+  const canUseRunFromSelection = useMemo(() => {
+    if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
+    if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
+    if (isActorEnemyEngaged) return false;
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    if (!actorToken) return false;
+    const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    if (actorZone === null) return false;
+    if (actorZone === selectedZoneTarget.zoneId) return false;
+    const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
+    return distance === 1;
+  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency]);
+
+  useEffect(() => {
+    setMonsterRollResult(null);
+  }, [selectedTokenId, selectedZoneTarget?.zoneId, currentEntry?.participant_id]);
+
+  const selectedRange = useMemo<CombatRange | null>(() => {
+    if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return null;
+    if (areTokensEngaged(actorTokenId, selectedTokenId, engagements)) return "Engaged";
+
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    const targetToken = tokenByCharacterId.get(selectedTokenId);
+    if (!actorToken || !targetToken) return null;
+
+    const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
+    if (actorZone === null || targetZone === null) return null;
+
+    const distance = shortestZoneDistance(actorZone, targetZone, zoneAdjacency);
+    if (distance === null) return null;
+    if (distance === 0) return "Near";
+    if (distance === 1) return "Close";
+    if (distance <= 3) return "Long";
+    return "Distant";
+  }, [actorTokenId, selectedTokenId, engagements, tokenByCharacterId, zoneRegionMap, zoneAdjacency]);
+
+  const meleeActionOptions = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) {
+      return [] as Array<{
+        maneuver: "Slash" | "Stab" | "Strike";
+        weaponItemId?: string | null;
+        weaponName: string;
+        weaponBaseDamage: number;
+        gearDice: number;
+      }>;
+    }
+    if (!selectedTokenId || !selectedRange) return [];
+    if (selectedTokenId === actorTokenId) return [];
+
+    const options: Array<{
+      maneuver: "Slash" | "Stab" | "Strike";
+      weaponItemId?: string | null;
+      weaponName: string;
+      weaponBaseDamage: number;
+      gearDice: number;
+    }> = [];
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter || !character || actorCharacter.id !== character.id) return [];
+      const slotIds = new Set<string>();
+      const slots = character.equipment_slots;
+      if (slots?.left) slotIds.add(slots.left);
+      if (slots?.right) slotIds.add(slots.right);
+      const inventory = character.inventory || [];
+
+      if (selectedRange === "Engaged") {
+        options.push({
+          maneuver: "Strike",
+          weaponItemId: null,
+          weaponName: "Strike",
+          weaponBaseDamage: 1,
+          gearDice: 0,
+        });
+      }
+
+      for (const item of inventory) {
+        if (!slotIds.has(item.id)) continue;
+        if (!isImplementedItem(item)) continue;
+        if (item.item_type !== "Melee Weapon") continue;
+        if (!weaponSupportsRange(item.range_band, selectedRange)) continue;
+        if ((item.gearBonus ?? 0) <= 0) continue;
+
+        const properties = (item.properties || []).map((value) => value.toLowerCase());
+        const isSlashWeapon = properties.includes("edged") || properties.includes("blunt");
+        const isStabWeapon = properties.includes("pointed");
+        const baseDamage = Math.max(0, item.damage ?? 0);
+        const gearDice = Math.max(0, item.gearBonus ?? 0);
+
+        if (isSlashWeapon) {
+          options.push({
+            maneuver: "Slash",
+            weaponItemId: item.id,
+            weaponName: item.name,
+            weaponBaseDamage: baseDamage,
+            gearDice,
+          });
+        }
+        if (isStabWeapon) {
+          options.push({
+            maneuver: "Stab",
+            weaponItemId: item.id,
+            weaponName: item.name,
+            weaponBaseDamage: baseDamage,
+            gearDice,
+          });
+        }
+      }
+    } else {
+      const actorMonster = actorTokenId ? monsterByParticipantId.get(actorTokenId) : null;
+      const snapshot = actorMonster?.monster_snapshot;
+      if (!snapshot) return [];
+
+      if (weaponSupportsRange(snapshot.range_band, selectedRange)) {
+        options.push({
+          maneuver: "Strike",
+          weaponItemId: null,
+          weaponName: "Strike",
+          weaponBaseDamage: 1,
+          gearDice: 0,
+        });
+      }
+
+      const meleeWeapons = monsterEquippedMeleeWeapons(snapshot);
+      for (const weapon of meleeWeapons) {
+        if (!weaponSupportsRange(weapon.rangeBand, selectedRange)) continue;
+        if (weapon.gearBonus <= 0) continue;
+        const isSlashWeapon = weapon.properties.includes("edged") || weapon.properties.includes("blunt");
+        const isStabWeapon = weapon.properties.includes("pointed");
+        if (isSlashWeapon) {
+          options.push({
+            maneuver: "Slash",
+            weaponItemId: weapon.id,
+            weaponName: weapon.name,
+            weaponBaseDamage: weapon.damage,
+            gearDice: weapon.gearBonus,
+          });
+        }
+        if (isStabWeapon) {
+          options.push({
+            maneuver: "Stab",
+            weaponItemId: weapon.id,
+            weaponName: weapon.name,
+            weaponBaseDamage: weapon.damage,
+            gearDice: weapon.gearBonus,
+          });
+        }
+      }
+    }
+
+    return options;
+  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId]);
 
   const loadCombatState = useCallback(async () => {
     const supabase = createClient();
@@ -705,7 +1110,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     const supabase = createClient();
     const { data, error: loadError } = await supabase
       .from("characters")
-      .select("id, name, email, icon_url")
+      .select("id, name, email, icon_url, attributes, spirits")
       .order("name", { ascending: true });
 
     if (loadError) {
@@ -1194,10 +1599,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       if (monster.id !== monsterId || !monster.monster_snapshot) return monster;
       return {
         ...monster,
-        monster_snapshot: {
-          ...monster.monster_snapshot,
-          equipment_slots: buildMonsterAutoEquipmentSlots(monster.monster_snapshot.gear || []),
-        },
+        monster_snapshot: cycleMonsterDrawGear(monster.monster_snapshot),
       };
     });
 
@@ -1220,11 +1622,11 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
     );
   };
 
-  const engageTarget = async (actorCharacterId: string, targetCharacterId: string) => {
+  const engageTargetToken = async (actorTokenIdValue: string, targetTokenIdValue: string) => {
     const supabase = createClient();
-    const { error: rpcError } = await supabase.rpc("combat_engage", {
-      p_actor_character_id: actorCharacterId,
-      p_target_character_id: targetCharacterId,
+    const { error: rpcError } = await supabase.rpc("combat_engage_token", {
+      p_actor_token_id: actorTokenIdValue,
+      p_target_token_id: targetTokenIdValue,
     });
     if (rpcError) {
       setError(rpcError.message);
@@ -1241,25 +1643,89 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       return;
     }
 
-    if (!actorCharacter || !selectedTokenCharacter) return;
-    await engageTarget(actorCharacter.id, selectedTokenCharacter.id);
+    await engageTargetToken(actorTokenId, selectedTokenId);
   };
 
-  const consumeAction = async (actionType: "fast" | "slow") => {
-    if (!canPass) return;
+  const consumeAction = async (actionType: "fast" | "slow"): Promise<boolean> => {
+    if (!canPass) return false;
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_use_action", { p_action: actionType });
     if (rpcError) {
       setError(rpcError.message);
+      return false;
+    }
+    return true;
+  };
+
+  const requestMeleeAction = async (option: {
+    maneuver: "Slash" | "Stab" | "Strike";
+    weaponItemId?: string | null;
+    weaponName: string;
+    weaponBaseDamage: number;
+    gearDice: number;
+  }) => {
+    if (!selectedTokenId || !currentEntry?.slow_available || !isMyTurn) return;
+    if (selectedTokenId === actorTokenId) return;
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `melee:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: selectedTokenId,
+        targetName,
+        weaponItemId: option.weaponItemId ?? null,
+        weaponName: option.weaponName,
+        weaponBaseDamage: option.weaponBaseDamage,
+        maneuver: option.maneuver,
+      });
+      setSelectedTokenId(null);
+    } else {
+      const actorMonster = actorTokenId ? monsterByParticipantId.get(actorTokenId) : null;
+      const snapshot = actorMonster?.monster_snapshot;
+      if (!snapshot || !onResolveMeleeAttack) return;
+      const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
+      const skillDice = rollD6Pool(Math.max(0, snapshot.special ?? 0));
+      const gearDice = rollD6Pool(Math.max(0, option.gearDice ?? 0));
+      const successes =
+        attributeDice.filter((d) => d === 6).length +
+        skillDice.filter((d) => d === 6).length +
+        gearDice.filter((d) => d === 6).length;
+
+      setMonsterRollResult({
+        actionLabel: option.maneuver === "Strike" ? "Strike" : `${option.maneuver} (${option.weaponName})`,
+        attributeDice,
+        skillDice,
+        gearDice,
+        successes,
+      });
+
+      await onResolveMeleeAttack({
+        id: `monster-melee:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorTokenId || "monster",
+        targetCharacterId: selectedTokenId,
+        weaponName: option.weaponName,
+        weaponBaseDamage: option.weaponBaseDamage,
+        maneuver: option.maneuver,
+        totalSuccesses: successes,
+      });
     }
   };
 
-  const dropEventToNormalizedPoint = (event: React.DragEvent<HTMLDivElement>): ZonePoint | null => {
+  const requestRun = async () => {
+    if (!selectedZoneTarget) return;
+    await requestRunToPoint(selectedZoneTarget.point, false);
+  };
+
+  const toNormalizedPointFromClient = (clientX: number, clientY: number): ZonePoint | null => {
     const container = mapContainerRef.current;
     if (!container || !imageRect) return null;
     const rect = container.getBoundingClientRect();
-    const xPx = event.clientX - rect.left;
-    const yPx = event.clientY - rect.top;
+    const xPx = clientX - rect.left;
+    const yPx = clientY - rect.top;
 
     if (
       xPx < imageRect.x ||
@@ -1274,6 +1740,42 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       x: (xPx - imageRect.x) / imageRect.w,
       y: (yPx - imageRect.y) / imageRect.h,
     };
+  };
+
+  const dropEventToNormalizedPoint = (event: React.DragEvent<HTMLDivElement>): ZonePoint | null =>
+    toNormalizedPointFromClient(event.clientX, event.clientY);
+
+  const requestRunToPoint = async (point: ZonePoint, silentInvalid = false): Promise<boolean> => {
+    if (!actorTokenId || !combatMode || !isMyTurn) return false;
+    if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
+    if (isActorEnemyEngaged) return false;
+
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    if (!actorToken) return false;
+
+    const fromZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    const toZone = zoneIdAtPoint(zoneRegionMap, point);
+    if (fromZone === null || toZone === null || fromZone === toZone) return false;
+
+    const distance = shortestZoneDistance(fromZone, toZone, zoneAdjacency);
+    if (distance !== 1) return false;
+
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_run_token", {
+      p_actor_token_id: actorTokenId,
+      p_x: point.x,
+      p_y: point.y,
+    });
+    if (rpcError) {
+      if (!silentInvalid) {
+        setError(rpcError.message);
+      }
+      return false;
+    }
+
+    setSelectedZoneTarget(null);
+    setSelectedTokenId(null);
+    return true;
   };
 
   const placePlayerToken = async (characterId: string, point: ZonePoint) => {
@@ -1366,9 +1868,20 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
         if (combatMode && isMyTurn && !isActorEngaged && actorZone !== null && actorZone === targetZone) {
           if (isDmUser) {
             await engageByTokenIds(actorTokenId, dropTarget.character_id);
-          } else if (actorCharacter && dropTarget.type === "player") {
-            await engageTarget(actorCharacter.id, dropTarget.character_id);
+          } else if (actorTokenId) {
+            await engageTargetToken(actorTokenId, dropTarget.character_id);
           }
+          return;
+        }
+      }
+
+      if (combatMode && isMyTurn && actorTokenId && droppedTokenId === actorTokenId) {
+        const actorToken = tokenByCharacterId.get(actorTokenId);
+        const fromZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
+        const toZone = zoneIdAtPoint(zoneRegionMap, point);
+        if (fromZone !== null && toZone !== null && fromZone !== toZone) {
+          const didRun = await requestRunToPoint(point, true);
+          if (!didRun) return;
           return;
         }
       }
@@ -1469,7 +1982,11 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
       <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
         <h3 className="text-xl font-bold text-amber-300 mb-3">Combat Actions</h3>
         <div className="rounded border border-amber-500/20 bg-gray-900/30 p-3 text-sm text-amber-100/90 mb-3">
-          {`Selected: ${selectedTokenCharacter?.name || selectedTokenMonster?.name || "None"}`}
+          {`Selected: ${
+            selectedTokenCharacter?.name ||
+            selectedTokenMonster?.name ||
+            (selectedZoneTarget ? `Zone ${selectedZoneTarget.zoneId}` : "None")
+          }`}
         </div>
         <div className="space-y-2">
           {canUseEngageFromSelection && (
@@ -1488,6 +2005,23 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
           >
             Draw Gear
           </button>
+          )}
+          {meleeActionOptions.map((option) => (
+            <button
+              key={`${option.maneuver}-${option.weaponItemId ?? "none"}`}
+              onClick={() => void requestMeleeAction(option)}
+              className="w-full rounded bg-rose-700 px-3 py-2 text-sm font-semibold text-rose-100 hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {option.maneuver === "Strike" ? "Strike" : `${option.maneuver} (${option.weaponName})`}
+            </button>
+          ))}
+          {canUseRunFromSelection && (
+            <button
+              onClick={() => void requestRun()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Run
+            </button>
           )}
           <button
             onClick={passTurn}
@@ -1511,6 +2045,19 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
             Generic Fast
           </button>
         </div>
+        {isDmUser && monsterRollResult && (
+          <div className="mt-3 rounded-xl border border-amber-600/40 bg-gray-900/70 p-3 text-amber-100">
+            <div className="flex items-center justify-between">
+              <p className="font-bold text-amber-300">Rolling: {monsterRollResult.actionLabel}</p>
+              <p className="font-semibold text-green-300">Successes: {monsterRollResult.successes}</p>
+            </div>
+            <div className="mt-2 space-y-2 text-xs">
+              <p>Attribute Dice: {monsterRollResult.attributeDice.length > 0 ? monsterRollResult.attributeDice.join(", ") : "None"}</p>
+              <p>Skill Dice: {monsterRollResult.skillDice.length > 0 ? monsterRollResult.skillDice.join(", ") : "None"}</p>
+              <p>Gear Dice: {monsterRollResult.gearDice.length > 0 ? monsterRollResult.gearDice.join(", ") : "None"}</p>
+            </div>
+          </div>
+        )}
       </aside>
 
       <div className="lg:col-span-6">
@@ -1537,6 +2084,17 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
           }}
           onDragLeave={() => setIsDragging(false)}
           onDrop={onDrop}
+          onClick={(event) => {
+            const targetNode = event.target as HTMLElement | null;
+            if (targetNode?.closest("[data-combat-token='true']")) return;
+            if (!imageRect) return;
+            const point = toNormalizedPointFromClient(event.clientX, event.clientY);
+            if (!point) return;
+            const zoneId = zoneIdAtPoint(zoneRegionMap, point);
+            if (zoneId === null) return;
+            setSelectedTokenId(null);
+            setSelectedZoneTarget({ zoneId, point });
+          }}
           className={`relative h-full min-h-[520px] overflow-hidden rounded-2xl border transition-all ${
             isDragging ? "border-amber-300 bg-amber-500/10" : "border-amber-500/40 bg-black/20"
           }`}
@@ -1643,6 +2201,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
                 renderedTokens.map((token) => (
                   <div
                     key={token.character_id}
+                    data-combat-token="true"
                     draggable={draggableTokenCharacterIds.has(token.character_id)}
                     onDragStart={(event) => {
                       if (!draggableTokenCharacterIds.has(token.character_id)) return;
@@ -1658,6 +2217,7 @@ export default function Combat({ isDM, userEmail, onRequestDrawGear }: CombatPro
                     }}
                     onClick={() => {
                       if (draggedTokenRef.current === token.character_id) return;
+                      setSelectedZoneTarget(null);
                       setSelectedTokenId((prev) => (prev === token.character_id ? null : token.character_id));
                     }}
                     className={`absolute -translate-x-1/2 -translate-y-1/2 ${

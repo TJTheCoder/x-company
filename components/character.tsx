@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { CharacterType, InventoryItem } from "../app/protected/page";
+import { useEffect, useRef, useState } from "react";
+import { CharacterType, InventoryItem, PendingMeleeAction, ResolvedMeleeAttack } from "../app/protected/page";
 
 type Attributes = {
   STR: number;
@@ -53,6 +53,10 @@ type CharacterProps = {
   character: CharacterType | null;
   updateCharacter: (updates: Partial<CharacterType>) => void;
   saveCharacter: (updates: Partial<CharacterType>) => void;
+  pendingMeleeAction: PendingMeleeAction | null;
+  onConsumePendingMeleeAction: (actionId: string) => void;
+  onResolveMeleeAttack: (attack: ResolvedMeleeAttack) => void | Promise<void>;
+  onMeleeRollCleared: () => void;
 };
 
 const emptyRoll = (): RollState => ({
@@ -65,7 +69,23 @@ const emptyRoll = (): RollState => ({
   requiredSuccesses: 1,
 });
 
-export default function Character({ character, updateCharacter, saveCharacter }: CharacterProps) {
+const ATTRIBUTE_KEYS: (keyof Attributes)[] = ["STR", "AGL", "WIT", "EMP"];
+const PENDING_SPIRIT_STORAGE_KEY = "x-company.pending-spirit-on-clear";
+const PENDING_MELEE_RESOLUTION_STORAGE_KEY = "x-company.pending-melee-resolution-on-clear";
+
+type ActiveMeleeAttack = PendingMeleeAction & {
+  attr: keyof Attributes;
+};
+
+export default function Character({
+  character,
+  updateCharacter,
+  saveCharacter,
+  pendingMeleeAction,
+  onConsumePendingMeleeAction,
+  onResolveMeleeAttack,
+  onMeleeRollCleared,
+}: CharacterProps) {
   const [rollStates, setRollStates] = useState<Record<string, RollState>>({
     STR: emptyRoll(),
     AGL: emptyRoll(),
@@ -76,6 +96,24 @@ export default function Character({ character, updateCharacter, saveCharacter }:
   const [selectedAttribute, setSelectedAttribute] = useState<keyof Attributes | null>(null);
   const [selectedGear, setSelectedGear] = useState<InventoryItem | null>(null);
   const [bonusDice, setBonusDice] = useState<string>("0");
+  const [activeMeleeAttack, setActiveMeleeAttack] = useState<ActiveMeleeAttack | null>(null);
+  const characterRef = useRef<CharacterType | null>(character);
+  const rollStatesRef = useRef<Record<string, RollState>>(rollStates);
+  const isPageUnloadingRef = useRef(false);
+  const activeMeleeAttackRef = useRef<ActiveMeleeAttack | null>(null);
+  const handledPendingMeleeActionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    characterRef.current = character;
+  }, [character]);
+
+  useEffect(() => {
+    rollStatesRef.current = rollStates;
+  }, [rollStates]);
+
+  useEffect(() => {
+    activeMeleeAttackRef.current = activeMeleeAttack;
+  }, [activeMeleeAttack]);
 
   // Returns true if the given attribute's roll slot has any dice in it.
   const hasRollFor = (attr: keyof Attributes) => {
@@ -104,44 +142,88 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     return Math.min(remainingSixes, contributingSixes);
   };
 
-  const applySpiritOnClear = (attr: keyof Attributes) => {
-    if (!character) return;
-    const roll = rollStates[attr];
+  const spiritFromRoll = (roll: RollState): number => {
     const hasAnyDice = roll.attributeDice.length > 0 || roll.skillDice.length > 0 || roll.gearDice.length > 0;
-    if (!hasAnyDice) return;
+    if (!hasAnyDice) return 0;
 
     const attrSixes = roll.attributeDice.filter(d => d === 6).length;
     const skillSixes = roll.skillDice.filter(d => d === 6).length;
     const gearSixes = roll.gearDice.filter(d => d === 6).length;
     const negativeSkillSixes = roll.skillIsNegative ? skillSixes : 0;
-    const extraSpirit = calculateSpiritGain(
+
+    return calculateSpiritGain(
       attrSixes,
       skillSixes,
       gearSixes,
       negativeSkillSixes,
       Math.max(0, roll.requiredSuccesses),
     );
+  };
 
+  const totalSuccessesFromRoll = (roll: RollState): number => {
+    const attrSixes = roll.attributeDice.filter(d => d === 6).length;
+    const skillSixes = roll.skillDice.filter(d => d === 6).length;
+    const gearSixes = roll.gearDice.filter(d => d === 6).length;
+    const negativeSkillSixes = roll.skillIsNegative ? skillSixes : 0;
+    return Math.max(0, attrSixes + skillSixes + gearSixes - negativeSkillSixes);
+  };
+
+  const resolveMeleeAttackForRoll = (attr: keyof Attributes, roll: RollState) => {
+    const pending = activeMeleeAttackRef.current;
+    if (!pending || pending.attr !== attr) return;
+    activeMeleeAttackRef.current = null;
+    setActiveMeleeAttack(null);
+
+    void onResolveMeleeAttack({
+      id: pending.id,
+      attackerCharacterId: pending.attackerCharacterId,
+      targetCharacterId: pending.targetCharacterId,
+      weaponName: pending.weaponName,
+      weaponBaseDamage: pending.weaponBaseDamage,
+      maneuver: pending.maneuver,
+      totalSuccesses: totalSuccessesFromRoll(roll),
+    });
+    onMeleeRollCleared();
+  };
+
+  const applySpiritDelta = (delta: number) => {
+    const currentCharacter = characterRef.current;
+    if (!currentCharacter || delta <= 0) return;
     const updates = {
-      spirits: (character.spirits ?? 0) + extraSpirit,
+      spirits: (currentCharacter.spirits ?? 0) + delta,
     };
     updateCharacter(updates);
     saveCharacter(updates);
   };
 
+  const applySpiritOnClear = (attr: keyof Attributes, rollOverride?: RollState) => {
+    const extraSpirit = spiritFromRoll(rollOverride ?? rollStates[attr]);
+    applySpiritDelta(extraSpirit);
+  };
+
+  const resolveRollClear = (attr: keyof Attributes, roll: RollState) => {
+    applySpiritOnClear(attr, roll);
+    resolveMeleeAttackForRoll(attr, roll);
+  };
+
   const clearRollAndResolveSpirit = (attr: keyof Attributes) => {
-    applySpiritOnClear(attr);
+    resolveRollClear(attr, rollStates[attr]);
     clearEverything(attr);
   };
 
-  // Silently clear the roll on a DIFFERENT attribute without touching selections
+  // Silently clear rolls on DIFFERENT attributes without touching selections.
   // (selections will be overwritten by the caller immediately after).
   const clearPreviousRoll = (incomingAttr: keyof Attributes) => {
-    if (!selectedAttribute || selectedAttribute === incomingAttr) return;
-    if (hasRollFor(selectedAttribute)) {
-      applySpiritOnClear(selectedAttribute);
-      setRollStates(prev => ({ ...prev, [selectedAttribute]: emptyRoll() }));
+    const next = { ...rollStates };
+    for (const attr of ATTRIBUTE_KEYS) {
+      if (attr === incomingAttr) continue;
+      if (rollStates[attr].attributeDice.length === 0 && rollStates[attr].skillDice.length === 0 && rollStates[attr].gearDice.length === 0) {
+        continue;
+      }
+      resolveRollClear(attr, rollStates[attr]);
+      next[attr] = emptyRoll();
     }
+    setRollStates(next);
   };
 
   const handleSkillClick = (skillName: string, skillAttr: keyof Attributes) => {
@@ -298,12 +380,6 @@ export default function Character({ character, updateCharacter, saveCharacter }:
       ? currentRoll.gearDice.map(d => (d === 1 || d === 6 ? d : Math.floor(Math.random() * 6) + 1))
       : currentRoll.gearDice;
 
-    // --- Consequence phase: ALL pools count, regardless of what was pushed ---
-    const attrSixes = newAttributeDice.filter(d => d === 6).length;
-    const skillSixes = newSkillDice.filter(d => d === 6).length;
-    const gearSixes = newGearDice.filter(d => d === 6).length;
-    const negativeSkillSixes = currentRoll.skillIsNegative ? skillSixes : 0;
-
     // All attribute ones deal attribute damage; all gear ones deal gear damage.
     const attrOnes = newAttributeDice.filter(d => d === 1).length;
     const gearOnes = newGearDice.filter(d => d === 1).length;
@@ -403,6 +479,148 @@ export default function Character({ character, updateCharacter, saveCharacter }:
     );
   };
 
+  useEffect(() => {
+    if (!character?.id) return;
+
+    try {
+      const raw = window.localStorage.getItem(PENDING_SPIRIT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { characterId?: string; spirit?: number };
+        if (parsed.characterId === character.id) {
+          const pendingSpirit = Math.max(0, parsed.spirit ?? 0);
+          if (pendingSpirit > 0) {
+            applySpiritDelta(pendingSpirit);
+          }
+          window.localStorage.removeItem(PENDING_SPIRIT_STORAGE_KEY);
+        }
+      }
+    } catch {
+      window.localStorage.removeItem(PENDING_SPIRIT_STORAGE_KEY);
+    }
+
+    try {
+      const rawMelee = window.localStorage.getItem(PENDING_MELEE_RESOLUTION_STORAGE_KEY);
+      if (rawMelee) {
+        const parsed = JSON.parse(rawMelee) as ResolvedMeleeAttack | null;
+        if (parsed && parsed.attackerCharacterId === character.id) {
+          void onResolveMeleeAttack(parsed);
+          window.localStorage.removeItem(PENDING_MELEE_RESOLUTION_STORAGE_KEY);
+        }
+      }
+    } catch {
+      window.localStorage.removeItem(PENDING_MELEE_RESOLUTION_STORAGE_KEY);
+    }
+  }, [character?.id]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      isPageUnloadingRef.current = true;
+      const currentCharacter = characterRef.current;
+      if (!currentCharacter?.id) return;
+
+      const pendingSpirit = ATTRIBUTE_KEYS.reduce((sum, attr) => {
+        const roll = rollStatesRef.current[attr];
+        return sum + spiritFromRoll(roll);
+      }, 0);
+
+      if (pendingSpirit > 0) {
+        try {
+          window.localStorage.setItem(
+            PENDING_SPIRIT_STORAGE_KEY,
+            JSON.stringify({ characterId: currentCharacter.id, spirit: pendingSpirit, savedAt: Date.now() }),
+          );
+        } catch {
+          // Ignore storage errors on unload.
+        }
+      }
+
+      const pendingAttack = activeMeleeAttackRef.current;
+      if (pendingAttack) {
+        const pendingRoll = rollStatesRef.current[pendingAttack.attr];
+        try {
+          window.localStorage.setItem(
+            PENDING_MELEE_RESOLUTION_STORAGE_KEY,
+            JSON.stringify({
+              id: pendingAttack.id,
+              attackerCharacterId: pendingAttack.attackerCharacterId,
+              targetCharacterId: pendingAttack.targetCharacterId,
+              weaponName: pendingAttack.weaponName,
+              weaponBaseDamage: pendingAttack.weaponBaseDamage,
+              maneuver: pendingAttack.maneuver,
+              totalSuccesses: totalSuccessesFromRoll(pendingRoll),
+            } satisfies ResolvedMeleeAttack),
+          );
+        } catch {
+          // Ignore storage errors on unload.
+        }
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (isPageUnloadingRef.current) return;
+      for (const attr of ATTRIBUTE_KEYS) {
+        const roll = rollStatesRef.current[attr];
+        const hasAnyDice = roll.attributeDice.length > 0 || roll.skillDice.length > 0 || roll.gearDice.length > 0;
+        if (!hasAnyDice) continue;
+        resolveRollClear(attr, roll);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!character || !pendingMeleeAction) return;
+    if (pendingMeleeAction.attackerCharacterId !== character.id) return;
+    if (handledPendingMeleeActionIdRef.current === pendingMeleeAction.id) return;
+    const isStrike = pendingMeleeAction.maneuver === "Strike";
+    const weapon = pendingMeleeAction.weaponItemId
+      ? (character.inventory || []).find((item) => item.id === pendingMeleeAction.weaponItemId) || null
+      : null;
+    if (!isStrike && !weapon) {
+      onConsumePendingMeleeAction(pendingMeleeAction.id);
+      handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
+      return;
+    }
+
+    clearPreviousRoll("STR");
+    if (hasRollFor("STR")) {
+      clearRollAndResolveSpirit("STR");
+    }
+
+    setSelectedAttribute("STR");
+    setSelectedSkill("MELEE");
+    setSelectedGear(weapon);
+    setBonusDice("0");
+    setActiveMeleeAttack({ ...pendingMeleeAction, attr: "STR" });
+
+    const attrCount = character.attributes.STR ?? 0;
+    const skillCount = Math.max(0, character.skills.MELEE ?? 0);
+    const gearCount = isStrike ? 0 : Math.max(0, weapon?.gearBonus ?? 0);
+
+    setRollStates((prev) => ({
+      ...prev,
+      STR: {
+        attributeDice: Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1),
+        skillDice: Array.from({ length: skillCount }, () => Math.floor(Math.random() * 6) + 1),
+        skillIsNegative: false,
+        gearDice: Array.from({ length: gearCount }, () => Math.floor(Math.random() * 6) + 1),
+        poolUsed: gearCount > 0 ? "all" : "attribute+skill",
+        hasBeenPushed: false,
+        requiredSuccesses: 1,
+        gearItemId: weapon?.id,
+      },
+    }));
+
+    onConsumePendingMeleeAction(pendingMeleeAction.id);
+    handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
+  }, [character, pendingMeleeAction]);
+
   if (!character) {
     return <p className="text-amber-300 text-center">No character found for your account.</p>;
   }
@@ -413,8 +631,6 @@ export default function Character({ character, updateCharacter, saveCharacter }:
   const canPush = hasRoll && currentRoll && !currentRoll.hasBeenPushed;
   const parsedBonusDice = parseInt(bonusDice, 10);
   const normalizedBonusDice = Number.isNaN(parsedBonusDice) ? 0 : parsedBonusDice;
-  const selectedSkillPoints = selectedSkill ? (character.skills[selectedSkill] ?? 0) : 0;
-  const modifiedSkillDiceCount = selectedSkillPoints + normalizedBonusDice;
   const hasSkillPool = selectedSkill !== null || normalizedBonusDice !== 0;
 
   return (

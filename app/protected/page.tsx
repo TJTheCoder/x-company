@@ -80,6 +80,27 @@ export type InventoryItem = {
   properties?: string[];
 };
 
+export type PendingMeleeAction = {
+  id: string;
+  attackerCharacterId: string;
+  targetCharacterId: string;
+  targetName: string;
+  weaponItemId?: string | null;
+  weaponName: string;
+  weaponBaseDamage: number;
+  maneuver: "Slash" | "Stab" | "Strike";
+};
+
+export type ResolvedMeleeAttack = {
+  id: string;
+  attackerCharacterId: string;
+  targetCharacterId: string;
+  weaponName: string;
+  weaponBaseDamage: number;
+  maneuver: "Slash" | "Stab" | "Strike";
+  totalSuccesses: number;
+};
+
 type WagonData = {
   wagon1: InventoryItem[];
   wagon2: InventoryItem[];
@@ -108,6 +129,8 @@ export default function Dashboard() {
   const [uploadingIcon, setUploadingIcon] = useState(false);
   const [notification, setNotification] = useState<NotificationData | null>(null);
   const [drawGearReturnToCombat, setDrawGearReturnToCombat] = useState(false);
+  const [pendingMeleeAction, setPendingMeleeAction] = useState<PendingMeleeAction | null>(null);
+  const [meleeRollReturnToCombat, setMeleeRollReturnToCombat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -433,6 +456,129 @@ export default function Dashboard() {
     }
   };
 
+  const queueMeleeAction = (action: PendingMeleeAction) => {
+    setPendingMeleeAction(action);
+    setMeleeRollReturnToCombat(true);
+    setActiveTab("character");
+  };
+
+  const clearPendingMeleeAction = (actionId: string) => {
+    setPendingMeleeAction((prev) => (prev?.id === actionId ? null : prev));
+  };
+
+  const onMeleeRollCleared = () => {
+    if (!meleeRollReturnToCombat) return;
+    setActiveTab("combat");
+    setMeleeRollReturnToCombat(false);
+  };
+
+  const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
+    const successes = Math.max(0, attack.totalSuccesses);
+    if (successes <= 0) return;
+
+    const damage = Math.max(0, attack.weaponBaseDamage) + Math.max(0, successes - 1);
+    if (damage <= 0) return;
+
+    const supabase = createClient();
+    if (attack.targetCharacterId.startsWith("monster:")) {
+      const { data: combatState, error: combatError } = await supabase
+        .from("combat_state")
+        .select("initiative_monsters, initiative_entries")
+        .eq("id", 1)
+        .maybeSingle<{
+          initiative_monsters: Array<{
+            id: string;
+            monster_snapshot?: {
+              str?: number;
+            } | null;
+          }> | null;
+          initiative_entries: Array<{
+            participant_id: string;
+            monster_snapshot?: {
+              str?: number;
+            } | null;
+          }> | null;
+        }>();
+
+      if (combatError || !combatState) {
+        if (combatError) console.error("Failed to load combat state for monster damage:", combatError);
+        return;
+      }
+
+      const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+      const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+
+      const nextMonsters = monsters.map((monster) => {
+        if (monster.id !== attack.targetCharacterId || !monster.monster_snapshot) return monster;
+        return {
+          ...monster,
+          monster_snapshot: {
+            ...monster.monster_snapshot,
+            str: Math.max(0, (monster.monster_snapshot.str ?? 0) - damage),
+          },
+        };
+      });
+
+      const nextEntries = entries.map((entry) => {
+        if (entry.participant_id !== attack.targetCharacterId || !entry.monster_snapshot) return entry;
+        return {
+          ...entry,
+          monster_snapshot: {
+            ...entry.monster_snapshot,
+            str: Math.max(0, (entry.monster_snapshot.str ?? 0) - damage),
+          },
+        };
+      });
+
+      const { error: updateCombatError } = await supabase
+        .from("combat_state")
+        .update({
+          initiative_monsters: nextMonsters,
+          initiative_entries: nextEntries,
+        })
+        .eq("id", 1);
+      if (updateCombatError) {
+        console.error("Failed to apply monster melee damage:", updateCombatError);
+      }
+      return;
+    }
+
+    const { data: target, error: targetError } = await supabase
+      .from("characters")
+      .select("id, attributes")
+      .eq("id", attack.targetCharacterId)
+      .maybeSingle<{ id: string; attributes: Attributes }>();
+
+    if (targetError) {
+      console.error("Failed to load attack target:", targetError);
+      return;
+    }
+
+    if (!target) return;
+
+    const nextAttributes: Attributes = {
+      ...target.attributes,
+      STR: Math.max(0, (target.attributes.STR ?? 0) - damage),
+    };
+    const shouldZeroSpirit = Object.values(nextAttributes).some((value) => value <= 0);
+    const updates: Partial<CharacterType> = shouldZeroSpirit
+      ? { attributes: nextAttributes, spirits: 0 }
+      : { attributes: nextAttributes };
+
+    const { error: updateError } = await supabase
+      .from("characters")
+      .update(updates)
+      .eq("id", attack.targetCharacterId);
+    if (updateError) {
+      console.error("Failed to apply melee damage:", updateError);
+      return;
+    }
+
+    if (character?.id === attack.targetCharacterId) {
+      updateCharacter(updates);
+    }
+  };
+
   if (showCharacterSelect) {
     return (
       <main className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-950 text-amber-50 font-serif p-8">
@@ -678,6 +824,10 @@ export default function Dashboard() {
               character={character}
               updateCharacter={updateCharacter}
               saveCharacter={saveCharacter}
+              pendingMeleeAction={pendingMeleeAction}
+              onConsumePendingMeleeAction={clearPendingMeleeAction}
+              onResolveMeleeAttack={resolveMeleeAttack}
+              onMeleeRollCleared={onMeleeRollCleared}
             />
           )}
           {activeTab === "inventory" && (
@@ -719,6 +869,9 @@ export default function Dashboard() {
               isDM={effectiveIsAdmin}
               userEmail={effectiveUserEmail}
               onRequestDrawGear={startDrawGearFromCombat}
+              character={character}
+              onQueueMeleeAction={queueMeleeAction}
+              onResolveMeleeAttack={resolveMeleeAttack}
             />
           )}
           {activeTab === "monsters" && (

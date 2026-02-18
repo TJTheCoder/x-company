@@ -30,6 +30,7 @@ export type CharacterType = {
   max_attributes: Attributes;
   skills: Record<string, number>;
   spirits: number;
+  dead?: boolean;
   inventory?: InventoryItem[];
   equipment_slots?: EquipmentSlots;
   known_art_ids?: string[];
@@ -98,7 +99,10 @@ export type PendingMeleeAction = {
     | "Disarm"
     | "Grapple"
     | "Cling"
-    | "Break Free";
+    | "Break Free"
+    | "Feint"
+    | "Coup de Grace"
+    | "Crawl";
   rollAttribute?: keyof Attributes;
   rollSkill?: string;
   requiredSuccesses?: number;
@@ -107,6 +111,8 @@ export type PendingMeleeAction = {
   disarmTargetItemId?: string | null;
   disarmTargetItemName?: string | null;
   disarmZoneId?: number | null;
+  destinationX?: number;
+  destinationY?: number;
 };
 
 export type ResolvedMeleeAttack = {
@@ -125,12 +131,17 @@ export type ResolvedMeleeAttack = {
     | "Disarm"
     | "Grapple"
     | "Cling"
-    | "Break Free";
+    | "Break Free"
+    | "Feint"
+    | "Coup de Grace"
+    | "Crawl";
   totalSuccesses: number;
   requiredSuccesses?: number;
   swingBonusDamage?: number;
   disarmTargetItemId?: string | null;
   disarmZoneId?: number | null;
+  destinationX?: number;
+  destinationY?: number;
 };
 
 type WagonData = {
@@ -508,9 +519,207 @@ export default function Dashboard() {
     const successes = Math.max(0, attack.totalSuccesses);
     const requiredSuccesses = Math.max(0, attack.requiredSuccesses ?? 1);
     const supabase = createClient();
+    const didSucceed = successes >= requiredSuccesses;
+    const pruneBrokenOnlyEngagements = async () => {
+      const { error: pruneError } = await supabase.rpc("combat_prune_fully_broken_engagements");
+      if (pruneError) {
+        console.error("Failed to prune broken/dead-only engagements:", pruneError);
+      }
+    };
+
+    const markTargetDead = async (targetTokenId: string) => {
+      if (targetTokenId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: Record<string, unknown> | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              kind?: "player" | "monster";
+              monster_snapshot?: Record<string, unknown> | null;
+              dead?: boolean | null;
+              prone?: boolean | null;
+            }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) console.error("Failed to load combat state for death update:", combatError);
+          return;
+        }
+
+        const nextMonsters = (combatState.initiative_monsters || []).map((monster) => {
+          if (monster.id !== targetTokenId || !monster.monster_snapshot) return monster;
+          return {
+            ...monster,
+            monster_snapshot: {
+              ...monster.monster_snapshot,
+              dead: true,
+            },
+          };
+        });
+
+        const nextEntries = (combatState.initiative_entries || []).map((entry) => {
+          if (entry.participant_id !== targetTokenId) return entry;
+          return {
+            ...entry,
+            dead: true,
+            prone: true,
+            monster_snapshot: entry.monster_snapshot
+              ? {
+                  ...entry.monster_snapshot,
+                  dead: true,
+                }
+              : entry.monster_snapshot,
+          };
+        });
+
+        const { error: updateError } = await supabase
+          .from("combat_state")
+          .update({
+            initiative_monsters: nextMonsters,
+            initiative_entries: nextEntries,
+          })
+          .eq("id", 1);
+        if (updateError) {
+          console.error("Failed to mark monster dead:", updateError);
+        }
+        return;
+      }
+
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ dead: true })
+        .eq("id", targetTokenId);
+      if (updateError) {
+        console.error("Failed to mark character dead:", updateError);
+      }
+      if (character?.id === targetTokenId) {
+        updateCharacter({ dead: true });
+      }
+      const { data: combatState } = await supabase
+        .from("combat_state")
+        .select("initiative_entries")
+        .eq("id", 1)
+        .maybeSingle<{ initiative_entries: Array<Record<string, unknown>> | null }>();
+      const entries = Array.isArray(combatState?.initiative_entries) ? combatState.initiative_entries : [];
+      if (entries.length > 0) {
+        const nextEntries = entries.map((entry) => {
+          const participantId = String(entry.participant_id ?? "");
+          if (participantId !== targetTokenId && participantId !== `player:${targetTokenId}`) {
+            return entry;
+          }
+          return {
+            ...entry,
+            dead: true,
+            prone: true,
+          };
+        });
+        await supabase
+          .from("combat_state")
+          .update({ initiative_entries: nextEntries })
+          .eq("id", 1);
+      }
+    };
+
+    const applyCoupActorCost = async (actorTokenId: string) => {
+      if (actorTokenId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: Record<string, unknown> | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              monster_snapshot?: Record<string, unknown> | null;
+            }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) console.error("Failed to load combat state for coup cost:", combatError);
+          return;
+        }
+
+        const nextMonsters = (combatState.initiative_monsters || []).map((monster) => {
+          if (monster.id !== actorTokenId || !monster.monster_snapshot) return monster;
+          const currEmp = Number(monster.monster_snapshot.emp ?? 0);
+          const currSpirits = Number(
+            monster.monster_snapshot.spirits_current ?? monster.monster_snapshot.starting_spirits ?? 0
+          );
+          return {
+            ...monster,
+            monster_snapshot: {
+              ...monster.monster_snapshot,
+              emp: Math.max(0, currEmp - 1),
+              spirits_current: Math.max(0, currSpirits - 1),
+            },
+          };
+        });
+
+        const nextEntries = (combatState.initiative_entries || []).map((entry) => {
+          if (entry.participant_id !== actorTokenId || !entry.monster_snapshot) return entry;
+          const currEmp = Number(entry.monster_snapshot.emp ?? 0);
+          const currSpirits = Number(
+            entry.monster_snapshot.spirits_current ?? entry.monster_snapshot.starting_spirits ?? 0
+          );
+          return {
+            ...entry,
+            monster_snapshot: {
+              ...entry.monster_snapshot,
+              emp: Math.max(0, currEmp - 1),
+              spirits_current: Math.max(0, currSpirits - 1),
+            },
+          };
+        });
+
+        const { error: updateError } = await supabase
+          .from("combat_state")
+          .update({
+            initiative_monsters: nextMonsters,
+            initiative_entries: nextEntries,
+          })
+          .eq("id", 1);
+        if (updateError) {
+          console.error("Failed to apply coup cost to monster:", updateError);
+        }
+        return;
+      }
+
+      const { data: actor, error: actorError } = await supabase
+        .from("characters")
+        .select("id, attributes, spirits")
+        .eq("id", actorTokenId)
+        .maybeSingle<{ id: string; attributes: Attributes; spirits: number }>();
+      if (actorError || !actor) {
+        if (actorError) console.error("Failed to load coup actor:", actorError);
+        return;
+      }
+      const nextAttributes: Attributes = {
+        ...actor.attributes,
+        EMP: Math.max(0, (actor.attributes.EMP ?? 0) - 1),
+      };
+      const nextSpirits = Math.max(0, (actor.spirits ?? 0) - 1);
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ attributes: nextAttributes, spirits: nextSpirits })
+        .eq("id", actorTokenId);
+      if (updateError) {
+        console.error("Failed to apply coup cost to character:", updateError);
+        return;
+      }
+      if (character?.id === actorTokenId) {
+        updateCharacter({ attributes: nextAttributes, spirits: nextSpirits });
+      }
+    };
 
     if (attack.maneuver === "Retreat") {
-      if (successes < requiredSuccesses) return;
+      if (!didSucceed) return;
       const { error: retreatError } = await supabase.rpc("combat_break_engagement_token", {
         p_actor_token_id: attack.attackerCharacterId,
       });
@@ -524,7 +733,7 @@ export default function Dashboard() {
       const { error: shoveError } = await supabase.rpc("combat_resolve_shove", {
         p_actor_token_id: attack.attackerCharacterId,
         p_target_token_id: attack.targetCharacterId,
-        p_success: successes >= requiredSuccesses,
+        p_success: didSucceed,
       });
       if (shoveError) {
         console.error("Failed to resolve shove:", shoveError);
@@ -541,7 +750,7 @@ export default function Dashboard() {
         p_target_token_id: attack.targetCharacterId,
         p_target_item_id: attack.disarmTargetItemId,
         p_zone_id: attack.disarmZoneId,
-        p_success: successes >= requiredSuccesses,
+        p_success: didSucceed,
       });
       if (disarmError) {
         console.error(
@@ -558,7 +767,7 @@ export default function Dashboard() {
         p_actor_token_id: attack.attackerCharacterId,
         p_target_token_id: attack.targetCharacterId,
         p_mode: attack.maneuver === "Grapple" ? "grapple" : "cling",
-        p_success: successes >= requiredSuccesses,
+        p_success: didSucceed,
         p_zone_id: zoneId,
       });
       if (grappleError) {
@@ -571,11 +780,54 @@ export default function Dashboard() {
       const { error: breakFreeError } = await supabase.rpc("combat_break_free", {
         p_actor_token_id: attack.attackerCharacterId,
         p_other_token_id: attack.targetCharacterId,
-        p_success: successes >= requiredSuccesses,
+        p_success: didSucceed,
       });
       if (breakFreeError) {
         console.error("Failed to resolve break free:", breakFreeError);
       }
+      return;
+    }
+
+    if (attack.maneuver === "Feint") {
+      const { error: feintError } = await supabase.rpc("combat_apply_feint", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_target_token_id: attack.targetCharacterId,
+      });
+      if (feintError) {
+        console.error("Failed to apply feint:", feintError);
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Crawl") {
+      if (!didSucceed) return;
+      if (
+        typeof attack.destinationX !== "number" ||
+        typeof attack.destinationY !== "number" ||
+        attack.destinationX < 0 ||
+        attack.destinationX > 1 ||
+        attack.destinationY < 0 ||
+        attack.destinationY > 1
+      ) {
+        return;
+      }
+      const { error: crawlError } = await supabase.rpc("combat_crawl_token", {
+        p_actor_token_id: attack.attackerCharacterId,
+        p_x: attack.destinationX,
+        p_y: attack.destinationY,
+      });
+      if (crawlError) {
+        console.error("Failed to resolve crawl:", crawlError);
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Coup de Grace") {
+      await applyCoupActorCost(attack.attackerCharacterId);
+      if (didSucceed) {
+        await markTargetDead(attack.targetCharacterId);
+      }
+      await pruneBrokenOnlyEngagements();
       return;
     }
 
@@ -603,7 +855,9 @@ export default function Dashboard() {
             participant_id: string;
             monster_snapshot?: {
               str?: number;
+              agl?: number;
             } | null;
+            prone?: boolean | null;
           }> | null;
         }>();
 
@@ -628,11 +882,15 @@ export default function Dashboard() {
 
       const nextEntries = entries.map((entry) => {
         if (entry.participant_id !== attack.targetCharacterId || !entry.monster_snapshot) return entry;
+        const nextStr = Math.max(0, (entry.monster_snapshot.str ?? 0) - damage);
+        const nextAgl = Math.max(0, entry.monster_snapshot.agl ?? 0);
+        const isPhysBroken = nextStr <= 0 || nextAgl <= 0;
         return {
           ...entry,
+          prone: isPhysBroken ? true : entry.prone,
           monster_snapshot: {
             ...entry.monster_snapshot,
-            str: Math.max(0, (entry.monster_snapshot.str ?? 0) - damage),
+            str: nextStr,
           },
         };
       });
@@ -647,14 +905,15 @@ export default function Dashboard() {
       if (updateCombatError) {
         console.error("Failed to apply monster melee damage:", updateCombatError);
       }
+      await pruneBrokenOnlyEngagements();
       return;
     }
 
     const { data: target, error: targetError } = await supabase
       .from("characters")
-      .select("id, attributes")
+      .select("id, attributes, spirits")
       .eq("id", attack.targetCharacterId)
-      .maybeSingle<{ id: string; attributes: Attributes }>();
+      .maybeSingle<{ id: string; attributes: Attributes; spirits: number }>();
 
     if (targetError) {
       console.error("Failed to load attack target:", targetError);
@@ -684,6 +943,37 @@ export default function Dashboard() {
     if (character?.id === attack.targetCharacterId) {
       updateCharacter(updates);
     }
+
+    if ((nextAttributes.STR ?? 0) <= 0 || (nextAttributes.AGL ?? 0) <= 0) {
+      const { data: combatState } = await supabase
+        .from("combat_state")
+        .select("initiative_entries")
+        .eq("id", 1)
+        .maybeSingle<{
+          initiative_entries: Array<Record<string, unknown>> | null;
+        }>();
+      const entries = Array.isArray(combatState?.initiative_entries) ? combatState.initiative_entries : [];
+      if (entries.length > 0) {
+        const nextEntries = entries.map((entry) => {
+          const participantId = String(entry.participant_id ?? "");
+          if (
+            participantId !== attack.targetCharacterId &&
+            participantId !== `player:${attack.targetCharacterId}`
+          ) {
+            return entry;
+          }
+          return {
+            ...entry,
+            prone: true,
+          };
+        });
+        await supabase
+          .from("combat_state")
+          .update({ initiative_entries: nextEntries })
+          .eq("id", 1);
+      }
+    }
+    await pruneBrokenOnlyEngagements();
   };
 
   if (showCharacterSelect) {

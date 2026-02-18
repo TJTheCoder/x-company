@@ -186,6 +186,8 @@ export default function Character({
       swingBonusDamage: pending.swingBonusDamage,
       disarmTargetItemId: pending.disarmTargetItemId,
       disarmZoneId: pending.disarmZoneId,
+      destinationX: pending.destinationX,
+      destinationY: pending.destinationY,
     });
     onMeleeRollCleared();
   };

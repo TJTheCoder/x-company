@@ -33,6 +33,8 @@ export type MonsterSnapshot = {
   wit: number;
   emp: number;
   starting_spirits: number;
+  spirits_current?: number;
+  dead?: boolean;
   gear: InventoryItem[];
   arts: Art[];
   equipment_slots: MonsterEquipmentSlots;
@@ -137,6 +139,8 @@ export function buildMonsterSnapshot(monster: MonsterTemplate): MonsterSnapshot 
     wit: monster.mental * 2,
     emp: monster.mental * 2,
     starting_spirits: monster.special * 2,
+    spirits_current: monster.special * 2,
+    dead: false,
     gear,
     arts: monster.arts || [],
     equipment_slots: buildMonsterAutoEquipmentSlots(gear),

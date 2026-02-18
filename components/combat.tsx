@@ -68,6 +68,9 @@ type InitiativeEntry = {
   clung_onto_by_name?: string | null;
   clung_onto_by_ids?: string[] | null;
   clung_onto_by_names?: string[] | null;
+  feint_pending_roll?: number | null;
+  feint_pending_name?: string | null;
+  dead?: boolean;
 };
 
 type CharacterLite = {
@@ -82,6 +85,7 @@ type CharacterLite = {
     EMP: number;
   } | null;
   spirits: number | null;
+  dead?: boolean;
   inventory?: CharacterType["inventory"];
   equipment_slots?: CharacterType["equipment_slots"];
   max_attributes?: CharacterType["max_attributes"];
@@ -120,6 +124,9 @@ type RenderedToken = TokenPosition & {
   email: string | null;
   icon_url: string | null;
   tooltip: string;
+  dead?: boolean;
+  physicallyBroken?: boolean;
+  mentallyBroken?: boolean;
 };
 
 type EngagementEdge = {
@@ -397,6 +404,9 @@ function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undefined): 
         clung_onto_by_names: Array.isArray(e.clung_onto_by_names)
           ? e.clung_onto_by_names.filter((v): v is string => typeof v === "string")
           : null,
+        feint_pending_roll: typeof e.feint_pending_roll === "number" ? e.feint_pending_roll : null,
+        feint_pending_name: typeof e.feint_pending_name === "string" ? e.feint_pending_name : null,
+        dead: Boolean(e.dead),
       };
     })
     .filter(Boolean) as InitiativeEntry[];
@@ -639,6 +649,28 @@ function weaponSupportsRange(rangeBand: string | undefined, range: CombatRange):
 
 function tokenSideOf(tokenId: string): TokenSide {
   return tokenId.startsWith("monster:") ? "monster" : "player";
+}
+
+function getPhysicalBrokenAttributes(attributes: {
+  STR?: number | null;
+  AGL?: number | null;
+} | null | undefined): string[] {
+  if (!attributes) return [];
+  const broken: string[] = [];
+  if ((attributes.STR ?? 0) <= 0) broken.push("STR");
+  if ((attributes.AGL ?? 0) <= 0) broken.push("AGL");
+  return broken;
+}
+
+function getMentalBrokenAttributes(attributes: {
+  WIT?: number | null;
+  EMP?: number | null;
+} | null | undefined): string[] {
+  if (!attributes) return [];
+  const broken: string[] = [];
+  if ((attributes.WIT ?? 0) <= 0) broken.push("WIT");
+  if ((attributes.EMP ?? 0) <= 0) broken.push("EMP");
+  return broken;
 }
 
 function rollD6Pool(count: number): number[] {
@@ -917,6 +949,11 @@ export default function Combat({
     }
     return map;
   }, [tokenPositions]);
+  const characterById = useMemo(() => {
+    const map = new Map<string, CharacterLite>();
+    for (const c of characters) map.set(c.id, c);
+    return map;
+  }, [characters]);
   const clingersByTarget = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const entry of initiativeEntries) {
@@ -937,6 +974,67 @@ export default function Combat({
     return actorCharacter?.id ?? null;
   }, [currentEntry, actorCharacter]);
   const actorTokenCharacter = actorTokenId ? characters.find((char) => char.id === actorTokenId) || null : null;
+  const tokenStateById = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        dead: boolean;
+        physicalBroken: boolean;
+        mentalBroken: boolean;
+        physicalBrokenAttrs: string[];
+        mentalBrokenAttrs: string[];
+      }
+    >();
+    for (const entry of initiativeEntries) {
+      const tokenId =
+        entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (!tokenId) continue;
+      if (entry.kind === "player") {
+        const c = characterById.get(tokenId);
+        const p = getPhysicalBrokenAttributes(c?.attributes);
+        const m = getMentalBrokenAttributes(c?.attributes);
+        map.set(tokenId, {
+          dead: Boolean(c?.dead || entry.dead),
+          physicalBroken: p.length > 0,
+          mentalBroken: m.length > 0,
+          physicalBrokenAttrs: p,
+          mentalBrokenAttrs: m,
+        });
+      } else {
+        const snap = entry.monster_snapshot || monsterByParticipantId.get(tokenId)?.monster_snapshot || null;
+        const p = getPhysicalBrokenAttributes({ STR: snap?.str, AGL: snap?.agl });
+        const m = getMentalBrokenAttributes({ WIT: snap?.wit, EMP: snap?.emp });
+        map.set(tokenId, {
+          dead: Boolean(entry.dead || snap?.dead),
+          physicalBroken: p.length > 0,
+          mentalBroken: m.length > 0,
+          physicalBrokenAttrs: p,
+          mentalBrokenAttrs: m,
+        });
+      }
+    }
+    return map;
+  }, [initiativeEntries, characterById, monsterByParticipantId]);
+  const actorState = actorTokenId
+    ? tokenStateById.get(actorTokenId) || {
+        dead: false,
+        physicalBroken: false,
+        mentalBroken: false,
+        physicalBrokenAttrs: [] as string[],
+        mentalBrokenAttrs: [] as string[],
+      }
+    : {
+        dead: false,
+        physicalBroken: false,
+        mentalBroken: false,
+        physicalBrokenAttrs: [] as string[],
+        mentalBrokenAttrs: [] as string[],
+      };
+  const actorDead = actorState.dead;
+  const actorPhysicalBroken = actorState.physicalBroken;
+  const actorMentalBroken = actorState.mentalBroken;
+  const actorRestrictedToCrawl = actorPhysicalBroken;
+  const actorRestrictedToRun = !actorRestrictedToCrawl && actorMentalBroken;
   const isActorEngaged = useMemo(() => {
     if (!actorTokenId) return false;
     return engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId);
@@ -962,7 +1060,6 @@ export default function Combat({
     if (currentEntry?.clung_onto_by_id) ids.add(currentEntry.clung_onto_by_id);
     return Array.from(ids);
   }, [currentEntry]);
-  const actorClungOntoById = actorClungOntoByIds[0] ?? null;
   const isActorGrappling = Boolean(actorGrapplingTargetId);
   const isActorGrappled = Boolean(actorGrappledById);
   const isActorClinging = Boolean(actorClingingTargetId);
@@ -1004,6 +1101,21 @@ export default function Combat({
       ) || null
     );
   }, [selectedTokenId, initiativeEntries]);
+  const selectedTargetState = selectedTokenId ? tokenStateById.get(selectedTokenId) || null : null;
+  const selectedTargetDead = Boolean(selectedTargetState?.dead);
+  const selectedTargetPhysicalBroken = Boolean(selectedTargetState?.physicalBroken);
+  const actorSpirit = useMemo(() => {
+    if (!currentEntry) return 0;
+    if (currentEntry.kind === "player") {
+      return Math.max(0, actorTokenCharacter?.spirits ?? 0);
+    }
+    return Math.max(
+      0,
+      currentEntry.monster_snapshot?.spirits_current ??
+        currentEntry.monster_snapshot?.starting_spirits ??
+        0
+    );
+  }, [currentEntry, actorTokenCharacter]);
 
   const zoneTintUrl = useMemo(() => {
     if (!isDmUser || !showZoneTint) return null;
@@ -1029,8 +1141,33 @@ export default function Combat({
             (e) => e.participant_id === pos.character_id || e.participant_id === `player:${pos.character_id}`
           );
           const flags: string[] = [];
+          const tokenState = tokenStateById.get(pos.character_id);
+          if (tokenState?.dead) {
+            flags.push("Dead");
+          }
+          if (tokenState?.physicalBroken && tokenState.physicalBrokenAttrs.length > 0) {
+            for (const attr of tokenState.physicalBrokenAttrs) {
+              flags.push(`Broken (${attr})`);
+            }
+          }
+          if (tokenState?.mentalBroken && tokenState.mentalBrokenAttrs.length > 0) {
+            for (const attr of tokenState.mentalBrokenAttrs) {
+              flags.push(`Broken (${attr})`);
+            }
+          }
           if (entry?.prone) {
             flags.push("Prone");
+          }
+          if (
+            (entry?.feint_pending_roll !== null && entry?.feint_pending_roll !== undefined) ||
+            (entry?.feint_pending_name && entry.feint_pending_name.trim() !== "")
+          ) {
+            const target = entry.feint_pending_name || "Unknown";
+            const initiativeLabel =
+              entry.feint_pending_roll !== null && entry.feint_pending_roll !== undefined
+                ? `${entry.feint_pending_roll}`
+                : "?";
+            flags.push(`Feint (${target}: ${initiativeLabel})`);
           }
           if (entry?.swing_weapon_name) {
             flags.push(`Swinging (${entry.swing_weapon_name})`);
@@ -1061,6 +1198,9 @@ export default function Combat({
               email: character.email,
               icon_url: character.icon_url,
               tooltip: formatCharacterTooltip(character, flags),
+              dead: tokenState?.dead,
+              physicallyBroken: tokenState?.physicalBroken,
+              mentallyBroken: tokenState?.mentalBroken,
             };
           }
 
@@ -1077,12 +1217,15 @@ export default function Combat({
               email: null,
               icon_url: monster.icon_url,
               tooltip,
+              dead: tokenState?.dead,
+              physicallyBroken: tokenState?.physicalBroken,
+              mentallyBroken: tokenState?.mentalBroken,
             };
           }
           return null;
         })
         .filter((value): value is RenderedToken => value !== null),
-    [tokenPositions, characters, isDmUser, monsterByParticipantId, initiativeEntries]
+    [tokenPositions, characters, isDmUser, monsterByParticipantId, initiativeEntries, tokenStateById]
   );
   const draggableTokenCharacterIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1116,6 +1259,7 @@ export default function Combat({
     if (!combatMode || !selectedTokenId || !currentEntry) return false;
     if (!actorTokenId || selectedTokenId !== actorTokenId) return false;
     if (!isMyTurn) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
     if (currentEntry.kind === "monster" && !isDmUser) return false;
     if (
@@ -1126,7 +1270,7 @@ export default function Combat({
       return false;
     }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail, isActorProne, actorHardLockedByHold]);
+  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
   const isSelectedSelf = useMemo(() => {
     if (!selectedTokenId || !actorTokenId) return false;
     return selectedTokenId === actorTokenId;
@@ -1145,6 +1289,7 @@ export default function Combat({
     if (!combatMode || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
     if (!isMyTurn) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
     if (isActorEngaged) return false;
 
@@ -1155,11 +1300,12 @@ export default function Combat({
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorHardLockedByHold]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
   const canUseRunFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
+    if (actorDead || actorRestrictedToCrawl) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (isActorProne || actorHardLockedByHold) return false;
+    if (!actorRestrictedToRun && (isActorProne || actorHardLockedByHold)) return false;
     if (isActorEnemyEngaged) return false;
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
@@ -1168,26 +1314,63 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorHardLockedByHold]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
+  const canUseCrawlFromSelection = useMemo(() => {
+    if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
+    if (actorDead || !actorRestrictedToCrawl) return false;
+    if (!currentEntry?.slow_available) return false;
+    if (!isActorProne) return false;
+    if (isActorEnemyEngaged) return false;
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    if (!actorToken) return false;
+    const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    if (actorZone === null) return false;
+    if (actorZone === selectedZoneTarget.zoneId) return false;
+    const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
+    return distance === 1;
+  }, [combatMode, actorTokenId, selectedZoneTarget, isMyTurn, actorDead, actorRestrictedToCrawl, currentEntry, isActorProne, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency]);
   const canUseRetreatFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
     if (!isActorEnemyEngaged) return false;
     if (selectedTokenId === actorTokenId) return true;
     return areTokensEngaged(actorTokenId, selectedTokenId, engagements);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEnemyEngaged, engagements, isActorProne, actorHardLockedByHold]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEnemyEngaged, engagements, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
   const canUseGetUpFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!isActorProne) return false;
     if (isActorGrappling || isActorClinging || isActorGrappled) return false;
     if (selectedTokenId !== actorTokenId) return false;
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
+  const canUseFeintFromSelection = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
+    if (selectedTokenId === actorTokenId) return false;
+    if (!currentEntry.fast_available) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
+    if (selectedTargetDead) return false;
+    return areTokensEngaged(actorTokenId, selectedTokenId, engagements);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, selectedTokenId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, selectedTargetDead, engagements]);
+  const canUseCoupFromSelection = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
+    if (selectedTokenId === actorTokenId) return false;
+    if (!currentEntry.slow_available) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
+    if (actorSpirit < 1) return false;
+    if (selectedTargetDead) return false;
+    if (!selectedTargetPhysicalBroken) return false;
+    return areTokensEngaged(actorTokenId, selectedTokenId, engagements);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, selectedTokenId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, actorSpirit, selectedTargetDead, selectedTargetPhysicalBroken, engagements]);
 
   const swingWeaponOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return [] as Array<{ id: string; name: string }>;
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
     if (isActorProne || actorHardLockedByHold) return [];
 
     if (currentEntry.kind === "player") {
@@ -1207,7 +1390,7 @@ export default function Combat({
     return monsterEquippedMeleeWeapons(actorMonster.monster_snapshot)
       .filter((weapon) => weapon.wield === "2H")
       .map((weapon) => ({ id: weapon.id, name: weapon.name }));
-  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold]);
+  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
 
   useEffect(() => {
     setMonsterRollResult(null);
@@ -1252,6 +1435,7 @@ export default function Combat({
 
   const canUseGrappleFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
     if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
     if (actorHasOccupiedHands) return false;
@@ -1284,10 +1468,14 @@ export default function Combat({
     selectedTargetEntry,
     selectedTargetSize,
     actorSize,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
   ]);
 
   const canUseClingFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
     if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
     if (actorHasOccupiedHands) return false;
@@ -1311,23 +1499,29 @@ export default function Combat({
     selectedTargetEntry,
     selectedTargetSize,
     actorSize,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
   ]);
 
   const canUseRelease = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
+    if (actorDead || actorRestrictedToRun) return false;
+    if (actorRestrictedToCrawl) return false;
     if (!(isActorGrappling || isActorClinging)) return false;
     return selectedIsActorOrHoldCounterpart;
-  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappling, isActorClinging, selectedIsActorOrHoldCounterpart]);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappling, isActorClinging, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
 
   const canUseBreakFree = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
     if (!(isActorGrappled || isActorClungOnto)) return false;
     return selectedIsActorOrHoldCounterpart;
-  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart]);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
 
   const meleeActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || (isActorProne && !actorHardLockedByHold)) {
+    if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || (isActorProne && !actorHardLockedByHold)) {
       return [] as Array<{
         maneuver: "Slash" | "Stab" | "Strike" | "Grapple Attack";
         weaponItemId?: string | null;
@@ -1457,10 +1651,10 @@ export default function Combat({
     }
 
     return options;
-  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorGrapplingTargetId, actorClingingTargetId]);
+  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorGrapplingTargetId, actorClingingTargetId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
 
   const shoveActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) {
+    if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) {
       return [] as Array<{ weaponItemId?: string | null; weaponName: string; gearDice: number; bonusDice: number }>;
     }
     if (!selectedTokenId || !selectedRange || selectedRange !== "Engaged") return [];
@@ -1544,10 +1738,13 @@ export default function Combat({
     actorCharacter,
     character,
     monsterByParticipantId,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
   ]);
 
   const disarmActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) {
+    if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) {
       return [] as Array<{
         actorWeaponItemId: string;
         actorWeaponName: string;
@@ -1631,10 +1828,13 @@ export default function Combat({
     actorTokenCharacter,
     selectedTokenCharacter,
     monsterByParticipantId,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
   ]);
 
   const pickUpActionOptions = useMemo(() => {
-    if (!combatMode || !currentEntry || !isMyTurn || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
+    if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
     if (!selectedZoneTarget || !actorTokenId) return [];
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -1670,6 +1870,9 @@ export default function Combat({
     zoneRegionMap,
     zoneLoot,
     actorTokenCharacter,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
   ]);
 
   const loadCombatState = useCallback(async () => {
@@ -1752,7 +1955,7 @@ export default function Combat({
     const supabase = createClient();
     const { data, error: loadError } = await supabase
       .from("characters")
-      .select("id, name, email, icon_url, attributes, max_attributes, skills, inventory, equipment_slots, spirits")
+      .select("id, name, email, icon_url, attributes, max_attributes, skills, inventory, equipment_slots, spirits, dead")
       .order("name", { ascending: true });
 
     if (loadError) {
@@ -2332,6 +2535,28 @@ export default function Combat({
           changed = true;
         }
       }
+      for (const entry of initiativeEntries) {
+        const entryTokenId =
+          entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+        if (!entryTokenId) continue;
+        const linkedIds = new Set<string>();
+        if (entry.grappling_target_id) linkedIds.add(entry.grappling_target_id);
+        if (entry.grappled_by_id) linkedIds.add(entry.grappled_by_id);
+        if (entry.clinging_target_id) linkedIds.add(entry.clinging_target_id);
+        if (entry.clung_onto_by_id) linkedIds.add(entry.clung_onto_by_id);
+        for (const id of entry.clung_onto_by_ids || []) {
+          if (id) linkedIds.add(id);
+        }
+        for (const linkedId of linkedIds) {
+          if (component.has(entryTokenId) && !component.has(linkedId)) {
+            component.add(linkedId);
+            changed = true;
+          } else if (component.has(linkedId) && !component.has(entryTokenId)) {
+            component.add(entryTokenId);
+            changed = true;
+          }
+        }
+      }
     }
 
     const nextEdges = [...engagements];
@@ -2576,6 +2801,7 @@ export default function Combat({
       !!option.weaponItemId &&
       option.weaponItemId === currentSwing.weaponItemId;
     const swingBonusDamage = swingMatch ? 1 : 0;
+    const proneBonusDice = selectedTargetEntry?.prone ? 2 : 0;
     const swingCleared = await clearSwingForParticipant(actingParticipantId);
     if (!swingCleared) return;
 
@@ -2594,6 +2820,7 @@ export default function Combat({
         rollSkill: "MELEE",
         requiredSuccesses: 1,
         swingBonusDamage,
+        bonusDice: proneBonusDice,
       });
       setSelectedTokenId(null);
     } else {
@@ -2601,7 +2828,7 @@ export default function Combat({
       const snapshot = actorMonster?.monster_snapshot;
       if (!snapshot || !onResolveMeleeAttack) return;
       const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
-      const skillDice = rollD6Pool(Math.max(0, snapshot.special ?? 0));
+      const skillDice = rollD6Pool(Math.max(0, (snapshot.special ?? 0) + proneBonusDice));
       const gearDice = rollD6Pool(Math.max(0, option.gearDice ?? 0));
       const successes =
         attributeDice.filter((d) => d === 6).length +
@@ -2854,6 +3081,74 @@ export default function Combat({
       requiredSuccesses: 1,
     });
   };
+  const requestFeint = async () => {
+    if (!canUseFeintFromSelection || !currentEntry || !selectedTokenId || !actorTokenId) return;
+    const didConsume = await consumeAction("fast");
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_apply_feint", {
+      p_actor_token_id: actorTokenId,
+      p_target_token_id: selectedTokenId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    setSelectedTokenId(null);
+  };
+  const requestCoupDeGrace = async () => {
+    if (!canUseCoupFromSelection || !currentEntry || !selectedTokenId || !actorTokenId) return;
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+      onQueueMeleeAction?.({
+        id: `coup-de-grace:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: selectedTokenId,
+        targetName,
+        weaponItemId: null,
+        weaponName: "Coup de Grace",
+        weaponBaseDamage: 0,
+        maneuver: "Coup de Grace",
+        rollAttribute: "EMP",
+        rollSkill: "PERFORMANCE",
+        requiredSuccesses: 1,
+      });
+      setSelectedTokenId(null);
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.emp ?? 0));
+    const skillDice = rollD6Pool(Math.max(0, snapshot.special ?? 0));
+    const gearDice: number[] = [];
+    const successes = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    setMonsterRollResult({
+      actionLabel: "Coup de Grace",
+      attributeDice,
+      skillDice,
+      gearDice,
+      successes,
+    });
+    await onResolveMeleeAttack({
+      id: `monster-coup-de-grace:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: selectedTokenId,
+      weaponName: "Coup de Grace",
+      weaponBaseDamage: 0,
+      maneuver: "Coup de Grace",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+    });
+  };
 
   const requestSwingWeapon = async (weapon: { id: string; name: string }) => {
     if (!isSelectedSelf || !isMyTurn || !currentEntry || isActorProne) return;
@@ -3029,10 +3324,15 @@ export default function Combat({
 
   const requestRun = async () => {
     if (!selectedZoneTarget) return;
+    if (actorRestrictedToCrawl) {
+      await requestCrawlToPoint(selectedZoneTarget.point);
+      return;
+    }
     await requestRunToPoint(selectedZoneTarget.point, false);
   };
 
   const requestGenericSlow = async () => {
+    if (actorDead || actorRestrictedToRun || actorRestrictedToCrawl) return;
     const actingParticipantId = currentEntry?.participant_id ?? null;
     const didConsume = await consumeAction("slow");
     if (!didConsume) return;
@@ -3040,10 +3340,50 @@ export default function Combat({
   };
 
   const requestGenericFast = async () => {
+    if (actorDead || actorRestrictedToRun || actorRestrictedToCrawl) return;
     const actingParticipantId = currentEntry?.participant_id ?? null;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     await clearSwingForParticipant(actingParticipantId);
+  };
+  const canDmResurrectSelected = isDmUser && !!selectedTokenId && selectedTargetDead;
+  const canDmRestorePhysicalSelected = isDmUser && !!selectedTokenId && selectedTargetPhysicalBroken;
+  const canDmRestoreMentalSelected = isDmUser && !!selectedTokenId && Boolean(selectedTargetState?.mentalBroken);
+  const requestDmResurrect = async () => {
+    if (!selectedTokenId || !canDmResurrectSelected) return;
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_resurrect_token", {
+      p_target_token_id: selectedTokenId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    await loadCharacters();
+  };
+  const requestDmRestorePhysical = async () => {
+    if (!selectedTokenId || !canDmRestorePhysicalSelected) return;
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_restore_physical_token", {
+      p_target_token_id: selectedTokenId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    await loadCharacters();
+  };
+  const requestDmRestoreMental = async () => {
+    if (!selectedTokenId || !canDmRestoreMentalSelected) return;
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("combat_restore_mental_token", {
+      p_target_token_id: selectedTokenId,
+    });
+    if (rpcError) {
+      setError(rpcError.message);
+      return;
+    }
+    await loadCharacters();
   };
 
   const toNormalizedPointFromClient = (clientX: number, clientY: number): ZonePoint | null => {
@@ -3073,7 +3413,8 @@ export default function Combat({
 
   const requestRunToPoint = async (point: ZonePoint, silentInvalid = false): Promise<boolean> => {
     if (!actorTokenId || !combatMode || !isMyTurn) return false;
-    if (actorHardLockedByHold) return false;
+    if (actorDead || actorRestrictedToCrawl) return false;
+    if (!actorRestrictedToRun && actorHardLockedByHold) return false;
     const actingParticipantId = currentEntry?.participant_id ?? null;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
     if (isActorEnemyEngaged) return false;
@@ -3103,6 +3444,78 @@ export default function Combat({
 
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return false;
+    setSelectedZoneTarget(null);
+    setSelectedTokenId(null);
+    return true;
+  };
+  const requestCrawlToPoint = async (point: ZonePoint): Promise<boolean> => {
+    if (!actorTokenId || !combatMode || !isMyTurn) return false;
+    if (!actorRestrictedToCrawl || actorDead) return false;
+    if (!currentEntry?.slow_available) return false;
+    if (!isActorProne) return false;
+    if (isActorEnemyEngaged) return false;
+
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    if (!actorToken) return false;
+    const fromZone = zoneIdAtPoint(zoneRegionMap, actorToken);
+    const toZone = zoneIdAtPoint(zoneRegionMap, point);
+    if (fromZone === null || toZone === null || fromZone === toZone) return false;
+    const distance = shortestZoneDistance(fromZone, toZone, zoneAdjacency);
+    if (distance !== 1) return false;
+
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return false;
+    const actingParticipantId = currentEntry?.participant_id ?? null;
+    const cleared = await clearSwingForParticipant(actingParticipantId);
+    if (!cleared) return false;
+
+    if (currentEntry?.kind === "player") {
+      if (!actorCharacter) return false;
+      onQueueMeleeAction?.({
+        id: `crawl:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: actorCharacter.id,
+        targetName: actorCharacter.name,
+        weaponItemId: null,
+        weaponName: "Crawl",
+        weaponBaseDamage: 0,
+        maneuver: "Crawl",
+        rollAttribute: "AGL",
+        rollSkill: "MOVE",
+        requiredSuccesses: 1,
+        destinationX: point.x,
+        destinationY: point.y,
+      });
+      setSelectedZoneTarget(null);
+      setSelectedTokenId(null);
+      return true;
+    }
+
+    const snapshot = currentEntry?.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return false;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
+    const skillDice = rollD6Pool(Math.max(0, snapshot.special ?? 0));
+    const gearDice: number[] = [];
+    const successes = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    setMonsterRollResult({
+      actionLabel: "Crawl",
+      attributeDice,
+      skillDice,
+      gearDice,
+      successes,
+    });
+    await onResolveMeleeAttack({
+      id: `monster-crawl:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: actorTokenId,
+      weaponName: "Crawl",
+      weaponBaseDamage: 0,
+      maneuver: "Crawl",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+      destinationX: point.x,
+      destinationY: point.y,
+    });
     setSelectedZoneTarget(null);
     setSelectedTokenId(null);
     return true;
@@ -3243,8 +3656,10 @@ export default function Combat({
         const fromZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
         const toZone = zoneIdAtPoint(zoneRegionMap, point);
         if (fromZone !== null && toZone !== null && fromZone !== toZone) {
-          const didRun = await requestRunToPoint(point, true);
-          if (!didRun) return;
+          const didMove = actorRestrictedToCrawl
+            ? await requestCrawlToPoint(point)
+            : await requestRunToPoint(point, true);
+          if (!didMove) return;
           return;
         }
       }
@@ -3407,6 +3822,14 @@ export default function Combat({
             Retreat
           </button>
           )}
+          {canUseFeintFromSelection && (
+            <button
+              onClick={() => void requestFeint()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Feint
+            </button>
+          )}
           {canUseDrawGearFromToken && (
           <button
             onClick={requestDrawGear}
@@ -3455,6 +3878,14 @@ export default function Combat({
               {`Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`}
             </button>
           ))}
+          {canUseCoupFromSelection && (
+            <button
+              onClick={() => void requestCoupDeGrace()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Coup de Grace
+            </button>
+          )}
           {pickUpActionOptions.map((item) => (
             <button
               key={`pickup-${selectedZoneTarget?.zoneId ?? "zone"}-${item.id}`}
@@ -3472,6 +3903,14 @@ export default function Combat({
               Get Up
             </button>
           )}
+          {canUseCrawlFromSelection && (
+            <button
+              onClick={() => void requestRun()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Crawl
+            </button>
+          )}
           {canUseRunFromSelection && (
             <button
               onClick={() => void requestRun()}
@@ -3486,6 +3925,30 @@ export default function Combat({
               className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
             >
               Pass
+            </button>
+          )}
+          {canDmResurrectSelected && (
+            <button
+              onClick={() => void requestDmResurrect()}
+              className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
+            >
+              Resurrect
+            </button>
+          )}
+          {canDmRestorePhysicalSelected && (
+            <button
+              onClick={() => void requestDmRestorePhysical()}
+              className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
+            >
+              Restore (Physical)
+            </button>
+          )}
+          {canDmRestoreMentalSelected && (
+            <button
+              onClick={() => void requestDmRestoreMental()}
+              className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
+            >
+              Restore (Mental)
             </button>
           )}
           {canPass && currentEntry?.slow_available && (
@@ -3783,6 +4246,32 @@ export default function Combat({
                       >
                         {token.name.slice(0, 2).toUpperCase()}
                       </div>
+                    )}
+                    {(token.dead || token.physicallyBroken || token.mentallyBroken) && (
+                      <svg
+                        viewBox="0 0 100 100"
+                        className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+                        style={tokenSizeStyle}
+                      >
+                        <line
+                          x1="18"
+                          y1="18"
+                          x2="82"
+                          y2="82"
+                          stroke={token.dead ? "#111111" : token.physicallyBroken ? "#dc2626" : "#2563eb"}
+                          strokeWidth="10"
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1="82"
+                          y1="18"
+                          x2="18"
+                          y2="82"
+                          stroke={token.dead ? "#111111" : token.physicallyBroken ? "#dc2626" : "#2563eb"}
+                          strokeWidth="10"
+                          strokeLinecap="round"
+                        />
+                      </svg>
                     )}
                   </div>
                   );

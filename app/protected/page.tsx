@@ -93,6 +93,7 @@ export type PendingMeleeAction = {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Shoot"
     | "Grapple Attack"
     | "Retreat"
     | "Shove"
@@ -113,6 +114,8 @@ export type PendingMeleeAction = {
   disarmZoneId?: number | null;
   destinationX?: number;
   destinationY?: number;
+  shootTargetZoneId?: number | null;
+  shootAmmoItem?: InventoryItem | null;
 };
 
 export type ResolvedMeleeAttack = {
@@ -125,6 +128,7 @@ export type ResolvedMeleeAttack = {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Shoot"
     | "Grapple Attack"
     | "Retreat"
     | "Shove"
@@ -142,6 +146,8 @@ export type ResolvedMeleeAttack = {
   disarmZoneId?: number | null;
   destinationX?: number;
   destinationY?: number;
+  shootTargetZoneId?: number | null;
+  shootAmmoItem?: InventoryItem | null;
 };
 
 type WagonData = {
@@ -828,6 +834,30 @@ export default function Dashboard() {
         await markTargetDead(attack.targetCharacterId);
       }
       await pruneBrokenOnlyEngagements();
+      return;
+    }
+
+    if (attack.maneuver === "Shoot" && !didSucceed) {
+      if (
+        attack.shootAmmoItem &&
+        attack.shootTargetZoneId !== null &&
+        attack.shootTargetZoneId !== undefined &&
+        attack.shootTargetZoneId > 0
+      ) {
+        const { data: combatState } = await supabase
+          .from("combat_state")
+          .select("zone_loot")
+          .eq("id", 1)
+          .maybeSingle<{ zone_loot: Array<{ zone_id: number; item: InventoryItem }> | null }>();
+        const nextZoneLoot = [
+          ...(((combatState?.zone_loot || []) as Array<{ zone_id: number; item: InventoryItem }>)),
+          { zone_id: attack.shootTargetZoneId, item: attack.shootAmmoItem },
+        ];
+        await supabase
+          .from("combat_state")
+          .update({ zone_loot: nextZoneLoot })
+          .eq("id", 1);
+      }
       return;
     }
 

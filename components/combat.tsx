@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { CharacterType, InventoryItem, PendingMeleeAction, ResolvedMeleeAttack } from "@/app/protected/page";
-import { isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
+import { addItemToInventory, isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
 import {
   buildMonsterSnapshot,
   formatMonsterTooltip,
@@ -58,6 +58,14 @@ type InitiativeEntry = {
   prone?: boolean;
   swing_weapon_item_id?: string | null;
   swing_weapon_name?: string | null;
+  readied_weapon_item_id?: string | null;
+  readied_weapon_name?: string | null;
+  readied_weapon_hand?: "left" | "right" | "both" | null;
+  readied_ammo_item?: InventoryItem | null;
+  aim_target_id?: string | null;
+  aim_target_name?: string | null;
+  aim_weapon_item_id?: string | null;
+  aim_weapon_name?: string | null;
   grappling_target_id?: string | null;
   grappling_target_name?: string | null;
   grappled_by_id?: string | null;
@@ -110,6 +118,14 @@ type CombatStateRow = {
   zone_loot: ZoneLootDrop[] | null;
   updated_by_email: string | null;
   updated_at: string;
+};
+
+type CombatStateMutationRow = {
+  initiative_entries: InitiativeEntry[] | null;
+  initiative_monsters: InitiativeMonster[] | null;
+  initiative_current_index: number | null;
+  engagements: EngagementEdge[] | null;
+  zone_loot: ZoneLootDrop[] | null;
 };
 
 type TokenPosition = {
@@ -385,6 +401,24 @@ function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undefined): 
         swing_weapon_item_id:
           typeof e.swing_weapon_item_id === "string" ? e.swing_weapon_item_id : null,
         swing_weapon_name: typeof e.swing_weapon_name === "string" ? e.swing_weapon_name : null,
+        readied_weapon_item_id:
+          typeof e.readied_weapon_item_id === "string" ? e.readied_weapon_item_id : null,
+        readied_weapon_name:
+          typeof e.readied_weapon_name === "string" ? e.readied_weapon_name : null,
+        readied_weapon_hand:
+          e.readied_weapon_hand === "left" || e.readied_weapon_hand === "right" || e.readied_weapon_hand === "both"
+            ? e.readied_weapon_hand
+            : null,
+        readied_ammo_item:
+          e.readied_ammo_item && typeof e.readied_ammo_item === "object"
+            ? (e.readied_ammo_item as InventoryItem)
+            : null,
+        aim_target_id: typeof e.aim_target_id === "string" ? e.aim_target_id : null,
+        aim_target_name: typeof e.aim_target_name === "string" ? e.aim_target_name : null,
+        aim_weapon_item_id:
+          typeof e.aim_weapon_item_id === "string" ? e.aim_weapon_item_id : null,
+        aim_weapon_name:
+          typeof e.aim_weapon_name === "string" ? e.aim_weapon_name : null,
         grappling_target_id:
           typeof e.grappling_target_id === "string" ? e.grappling_target_id : null,
         grappling_target_name:
@@ -644,6 +678,15 @@ function weaponSupportsRange(rangeBand: string | undefined, range: CombatRange):
   if (normalized === "long") {
     return range === "Engaged" || range === "Near" || range === "Close" || range === "Long";
   }
+  if (normalized === "distant") {
+    return (
+      range === "Engaged" ||
+      range === "Near" ||
+      range === "Close" ||
+      range === "Long" ||
+      range === "Distant"
+    );
+  }
   return false;
 }
 
@@ -792,6 +835,65 @@ function playerEquippedMeleeWeapons(character: CharacterLite | CharacterType | n
     }));
 }
 
+function playerEquippedRangedWeapons(character: CharacterLite | CharacterType | null | undefined): InventoryItem[] {
+  return playerHeldItems(character).filter((item) => item.item_type === "Ranged Weapon");
+}
+
+function monsterEquippedRangedWeapons(snapshot: MonsterSnapshot): InventoryItem[] {
+  const slots = snapshot.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+  const gear = snapshot.gear || [];
+  return gear.filter(
+    (item) =>
+      item.item_type === "Ranged Weapon" &&
+      (slotMatchesItem(slots.left, item) || slotMatchesItem(slots.right, item))
+  );
+}
+
+function isAmmunition(item: InventoryItem): boolean {
+  return (item.item_type || "").toLowerCase() === "ammunition";
+}
+
+function readiedHandForWeapon(
+  slots: { left?: string | null; right?: string | null } | null | undefined,
+  weapon: { id: string; name: string }
+): "left" | "right" | "both" | null {
+  const left = slots?.left || null;
+  const right = slots?.right || null;
+  const inLeft = left === weapon.id || left === weapon.name;
+  const inRight = right === weapon.id || right === weapon.name;
+  if (inLeft && inRight) return "both";
+  if (inLeft) return "left";
+  if (inRight) return "right";
+  return null;
+}
+
+function cloneAmmoUnit(item: InventoryItem): InventoryItem {
+  return {
+    ...item,
+    id: `ammo:${crypto.randomUUID()}`,
+    quantity: 1,
+  };
+}
+
+function consumeFirstAmmo(items: InventoryItem[]): { nextItems: InventoryItem[]; ammo: InventoryItem | null } {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!isAmmunition(item)) continue;
+    const qty = Math.max(1, item.quantity || 1);
+    const ammo = cloneAmmoUnit(item);
+    if (qty <= 1) {
+      return {
+        nextItems: [...items.slice(0, i), ...items.slice(i + 1)],
+        ammo,
+      };
+    }
+    const nextItems = [...items];
+    nextItems[i] = { ...item, quantity: qty - 1 };
+    return { nextItems, ammo };
+  }
+  return { nextItems: items, ammo: null };
+}
+
 function cycleMonsterDrawGear(snapshot: MonsterSnapshot): MonsterSnapshot {
   const slots = snapshot.equipment_slots || { armor: null, helmet: null, left: null, right: null };
   const equipable = (snapshot.gear || []).filter((item) =>
@@ -871,6 +973,7 @@ export default function Combat({
   const [imageNatural, setImageNatural] = useState<{ w: number; h: number } | null>(null);
   const [imageRect, setImageRect] = useState<ImageRect | null>(null);
   const isSyncingRef = useRef(false);
+  const handledInvalidReadiedRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const draggedTokenRef = useRef<string | null>(null);
@@ -1048,6 +1151,58 @@ export default function Combat({
       return tokenSideOf(otherTokenId) !== actorSide;
     });
   }, [engagements, actorTokenId]);
+  const isActorSoleUnbrokenInEngagement = useMemo(() => {
+    if (!actorTokenId) return false;
+    if (!engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId)) return false;
+
+    const component = new Set<string>([actorTokenId]);
+    const queue: string[] = [actorTokenId];
+    while (queue.length > 0) {
+      const tokenId = queue.shift()!;
+      for (const edge of engagements) {
+        const neighbor = edge.a === tokenId ? edge.b : edge.b === tokenId ? edge.a : null;
+        if (!neighbor || component.has(neighbor)) continue;
+        component.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+
+    let actorUnbroken = false;
+    let unbrokenCount = 0;
+    for (const tokenId of component) {
+      const state = tokenStateById.get(tokenId);
+      const broken = !state ? false : state.dead || state.physicalBroken || state.mentalBroken;
+      if (!broken) {
+        unbrokenCount += 1;
+        if (tokenId === actorTokenId) actorUnbroken = true;
+      }
+    }
+
+    return actorUnbroken && unbrokenCount === 1;
+  }, [actorTokenId, engagements, tokenStateById]);
+  const isActorAlliedOnlyEngagement = useMemo(() => {
+    if (!actorTokenId) return false;
+    if (!engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId)) return false;
+    const actorSide = tokenSideOf(actorTokenId);
+
+    const component = new Set<string>([actorTokenId]);
+    const queue: string[] = [actorTokenId];
+    while (queue.length > 0) {
+      const tokenId = queue.shift()!;
+      for (const edge of engagements) {
+        const neighbor = edge.a === tokenId ? edge.b : edge.b === tokenId ? edge.a : null;
+        if (!neighbor || component.has(neighbor)) continue;
+        component.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+
+    for (const tokenId of component) {
+      if (tokenSideOf(tokenId) !== actorSide) return false;
+    }
+    return true;
+  }, [actorTokenId, engagements]);
+  const isFreeRetreatAvailable = isActorSoleUnbrokenInEngagement || isActorAlliedOnlyEngagement;
   const isActorProne = Boolean(currentEntry?.prone);
   const actorGrapplingTargetId = currentEntry?.grappling_target_id ?? null;
   const actorGrappledById = currentEntry?.grappled_by_id ?? null;
@@ -1172,6 +1327,12 @@ export default function Combat({
           if (entry?.swing_weapon_name) {
             flags.push(`Swinging (${entry.swing_weapon_name})`);
           }
+          if (entry?.readied_weapon_name && entry?.readied_ammo_item?.name) {
+            flags.push(`Readied (${entry.readied_weapon_name} w/ ${entry.readied_ammo_item.name})`);
+          }
+          if (entry?.aim_target_name && entry?.aim_weapon_name) {
+            flags.push(`Aiming (${entry.aim_target_name} w/ ${entry.aim_weapon_name})`);
+          }
           if (entry?.grappling_target_name) {
             flags.push(`Grappling (${entry.grappling_target_name})`);
           }
@@ -1285,6 +1446,30 @@ export default function Combat({
         : null,
     [currentEntry]
   );
+  const currentReadied = useMemo(
+    () =>
+      currentEntry?.readied_weapon_item_id && currentEntry?.readied_ammo_item
+        ? {
+            weaponItemId: currentEntry.readied_weapon_item_id,
+            weaponName: currentEntry.readied_weapon_name ?? "Weapon",
+            weaponHand: currentEntry.readied_weapon_hand ?? null,
+            ammoItem: currentEntry.readied_ammo_item,
+          }
+        : null,
+    [currentEntry]
+  );
+  const currentAim = useMemo(
+    () =>
+      currentEntry?.aim_target_id && currentEntry?.aim_weapon_item_id
+        ? {
+            targetId: currentEntry.aim_target_id,
+            targetName: currentEntry.aim_target_name ?? "Target",
+            weaponItemId: currentEntry.aim_weapon_item_id,
+            weaponName: currentEntry.aim_weapon_name ?? "Weapon",
+          }
+        : null,
+    [currentEntry]
+  );
   const canUseEngageFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
@@ -1333,11 +1518,11 @@ export default function Combat({
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
-    if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (!isActorEnemyEngaged) return false;
+    if (!isFreeRetreatAvailable && !(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
+    if (!isActorEngaged) return false;
     if (selectedTokenId === actorTokenId) return true;
     return areTokensEngaged(actorTokenId, selectedTokenId, engagements);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEnemyEngaged, engagements, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEngaged, isFreeRetreatAvailable, engagements, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun]);
   const canUseGetUpFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
@@ -1833,6 +2018,196 @@ export default function Combat({
     actorRestrictedToRun,
   ]);
 
+  const readyOrLoadOptions = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return [] as Array<{
+      weaponItemId: string;
+      weaponName: string;
+      isLoading: boolean;
+      hand: "left" | "right" | "both";
+    }>;
+    if (currentReadied) return [];
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
+    if (isActorProne || actorHardLockedByHold) return [];
+
+    const options: Array<{ weaponItemId: string; weaponName: string; isLoading: boolean; hand: "left" | "right" | "both" }> = [];
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter || !character || actorCharacter.id !== character.id) return [];
+      const ammoExists = (character.inventory || []).some(isAmmunition);
+      if (!ammoExists) return [];
+      for (const weapon of playerEquippedRangedWeapons(character)) {
+        const hand = readiedHandForWeapon(character.equipment_slots, weapon);
+        if (!hand) continue;
+        const props = (weapon.properties || []).map((p) => p.toLowerCase());
+        const isLoading = props.includes("loading");
+        if (isLoading ? !currentEntry.slow_available : !currentEntry.fast_available) continue;
+        options.push({
+          weaponItemId: weapon.id,
+          weaponName: weapon.name,
+          isLoading,
+          hand,
+        });
+      }
+    } else {
+      const snapshot = currentEntry.monster_snapshot;
+      if (!snapshot) return [];
+      const ammoExists = (snapshot.gear || []).some(isAmmunition);
+      if (!ammoExists) return [];
+      for (const weapon of monsterEquippedRangedWeapons(snapshot)) {
+        const hand = readiedHandForWeapon(snapshot.equipment_slots, weapon);
+        if (!hand) continue;
+        const props = (weapon.properties || []).map((p) => p.toLowerCase());
+        const isLoading = props.includes("loading");
+        if (isLoading ? !currentEntry.slow_available : !currentEntry.fast_available) continue;
+        options.push({
+          weaponItemId: weapon.id,
+          weaponName: weapon.name,
+          isLoading,
+          hand,
+        });
+      }
+    }
+    return options;
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    isSelectedSelf,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    actorCharacter,
+    character,
+    currentReadied,
+  ]);
+
+  const canUseUnready = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return false;
+    if (!currentReadied) return false;
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter || !character || actorCharacter.id !== character.id) return false;
+      const heldHand = readiedHandForWeapon(character.equipment_slots, {
+        id: currentReadied.weaponItemId,
+        name: currentReadied.weaponName,
+      });
+      return heldHand !== null;
+    }
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot) return false;
+    const heldHand = readiedHandForWeapon(snapshot.equipment_slots, {
+      id: currentReadied.weaponItemId,
+      name: currentReadied.weaponName,
+    });
+    return heldHand !== null;
+  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, currentReadied, actorCharacter, character]);
+
+  const aimActionOptions = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !selectedTokenId || !selectedRange) return [] as Array<{
+      weaponItemId: string;
+      weaponName: string;
+    }>;
+    if (!actorTokenId || selectedTokenId === actorTokenId) return [];
+    if (!currentEntry.fast_available) return [];
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
+    if (isActorProne || actorHardLockedByHold) return [];
+    if (selectedRange === "Engaged" || selectedRange === "Near") return [];
+    const options: Array<{ weaponItemId: string; weaponName: string }> = [];
+    const sourceWeapons =
+      currentEntry.kind === "player"
+        ? actorCharacter && character && actorCharacter.id === character.id
+          ? playerEquippedRangedWeapons(character)
+          : []
+        : currentEntry.monster_snapshot
+          ? monsterEquippedRangedWeapons(currentEntry.monster_snapshot)
+          : [];
+    for (const weapon of sourceWeapons) {
+      if (!weaponSupportsRange(weapon.range_band, selectedRange)) continue;
+      options.push({ weaponItemId: weapon.id, weaponName: weapon.name });
+    }
+    return options;
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    selectedTokenId,
+    selectedRange,
+    actorTokenId,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    actorCharacter,
+    character,
+  ]);
+
+  const shootActionOptions = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !selectedTokenId || !selectedRange || !currentReadied) return [] as Array<{
+      weaponItemId: string;
+      weaponName: string;
+      rangePenalty: number;
+      aimBonusDice: number;
+      targetZoneId: number | null;
+    }>;
+    if (!currentEntry.slow_available) return [];
+    if (!actorTokenId || selectedTokenId === actorTokenId) return [];
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
+    if (isActorProne || actorHardLockedByHold) return [];
+    if (isActorEngaged) return [];
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    const targetToken = tokenByCharacterId.get(selectedTokenId);
+    const targetZoneId = targetToken ? zoneIdAtPoint(zoneRegionMap, targetToken) : null;
+    const sourceWeapons =
+      currentEntry.kind === "player"
+        ? actorCharacter && character && actorCharacter.id === character.id
+          ? playerEquippedRangedWeapons(character)
+          : []
+        : currentEntry.monster_snapshot
+          ? monsterEquippedRangedWeapons(currentEntry.monster_snapshot)
+          : [];
+    const weapon = sourceWeapons.find((w) => w.id === currentReadied.weaponItemId);
+    if (!weapon) return [];
+    if (!weaponSupportsRange(weapon.range_band, selectedRange)) return [];
+    const rangePenalty =
+      selectedRange === "Close" ? -1 : selectedRange === "Long" ? -2 : selectedRange === "Distant" ? -3 : 0;
+    const aimBonusDice =
+      currentAim &&
+      currentAim.targetId === selectedTokenId &&
+      currentAim.weaponItemId === currentReadied.weaponItemId
+        ? 1
+        : 0;
+    if (!actorToken) return [];
+    return [
+      {
+        weaponItemId: weapon.id,
+        weaponName: weapon.name,
+        rangePenalty,
+        aimBonusDice,
+        targetZoneId,
+      },
+    ];
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    selectedTokenId,
+    selectedRange,
+    currentReadied,
+    actorTokenId,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    isActorEngaged,
+    tokenByCharacterId,
+    zoneRegionMap,
+    actorCharacter,
+    character,
+    currentAim,
+  ]);
+
   const pickUpActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
@@ -2179,12 +2554,68 @@ export default function Combat({
     [initiativeMonsters, engagements, zoneLoot, isDmUser, userEmail]
   );
 
+  const fetchLatestInitiativeState = useCallback(async () => {
+    const supabase = createClient();
+    const { data, error: loadError } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_monsters, initiative_current_index, engagements, zone_loot")
+      .eq("id", 1)
+      .maybeSingle<CombatStateMutationRow>();
+    if (loadError) {
+      setError(loadError.message);
+      return null;
+    }
+    const freshEntries = normalizeInitiativeEntries(data?.initiative_entries);
+    const freshMonsters = Array.isArray(data?.initiative_monsters)
+      ? (data!.initiative_monsters
+          .map((monster) => {
+            if (!monster || typeof monster !== "object") return null;
+            const m = monster as Partial<InitiativeMonster>;
+            if (typeof m.id !== "string" || typeof m.name !== "string") return null;
+            return {
+              id: m.id,
+              name: m.name,
+              template_id: typeof m.template_id === "string" ? m.template_id : null,
+              icon_url: typeof m.icon_url === "string" ? m.icon_url : null,
+              monster_snapshot:
+                m.monster_snapshot && typeof m.monster_snapshot === "object"
+                  ? (m.monster_snapshot as MonsterSnapshot)
+                  : null,
+            } as InitiativeMonster;
+          })
+          .filter((monster): monster is InitiativeMonster => !!monster))
+      : [];
+    const freshCurrentIndex = data?.initiative_current_index ?? null;
+    const freshEngagements = normalizeEngagements(data?.engagements);
+    const freshLoot = normalizeZoneLoot(data?.zone_loot);
+    return { freshEntries, freshMonsters, freshCurrentIndex, freshEngagements, freshLoot };
+  }, []);
+
   const rollInitiative = async () => {
     if (!isDmUser) return;
     const used = new Set<string>();
-
-    const entries: InitiativeEntry[] = [
-      ...characters.map((player) => ({
+    const supabase = createClient();
+    const updatedPlayers: Array<{ id: string; inventory: InventoryItem[] }> = [];
+    const playerEntries = characters.map((player) => {
+      const heldRanged = playerEquippedRangedWeapons(player);
+      let readiedWeapon: InventoryItem | null = null;
+      let readiedHand: "left" | "right" | "both" | null = null;
+      for (const weapon of heldRanged) {
+        const hand = readiedHandForWeapon(player.equipment_slots, weapon);
+        if (!hand) continue;
+        readiedWeapon = weapon;
+        readiedHand = hand;
+        break;
+      }
+      let readiedAmmo: InventoryItem | null = null;
+      if (readiedWeapon) {
+        const consumed = consumeFirstAmmo(player.inventory || []);
+        if (consumed.ammo) {
+          readiedAmmo = consumed.ammo;
+          updatedPlayers.push({ id: player.id, inventory: consumed.nextItems });
+        }
+      }
+      return {
         participant_id: `player:${player.id}`,
         kind: "player" as const,
         name: player.name,
@@ -2196,29 +2627,90 @@ export default function Combat({
         prone: false,
         swing_weapon_item_id: null,
         swing_weapon_name: null,
-      })),
-      ...initiativeMonsters.map((monster) => ({
+        readied_weapon_item_id: readiedWeapon && readiedAmmo ? readiedWeapon.id : null,
+        readied_weapon_name: readiedWeapon && readiedAmmo ? readiedWeapon.name : null,
+        readied_weapon_hand: readiedWeapon && readiedAmmo ? readiedHand : null,
+        readied_ammo_item: readiedAmmo,
+      };
+    });
+
+    const monsterReadiedById = new Map<
+      string,
+      { weapon: InventoryItem; hand: "left" | "right" | "both"; ammo: InventoryItem }
+    >();
+    const nextMonsters = initiativeMonsters.map((monster) => {
+      const snapshot = monster.monster_snapshot;
+      if (!snapshot) return monster;
+      const ranged = monsterEquippedRangedWeapons(snapshot);
+      let readiedWeapon: InventoryItem | null = null;
+      let readiedHand: "left" | "right" | "both" | null = null;
+      for (const weapon of ranged) {
+        const hand = readiedHandForWeapon(snapshot.equipment_slots, weapon);
+        if (!hand) continue;
+        readiedWeapon = weapon;
+        readiedHand = hand;
+        break;
+      }
+      if (!readiedWeapon) return monster;
+      const consumed = consumeFirstAmmo(snapshot.gear || []);
+      if (!consumed.ammo) return monster;
+      monsterReadiedById.set(monster.id, {
+        weapon: readiedWeapon,
+        hand: readiedHand!,
+        ammo: consumed.ammo,
+      });
+      return {
+        ...monster,
+        monster_snapshot: {
+          ...snapshot,
+          gear: consumed.nextItems,
+        },
+      };
+    });
+
+    const monsterEntries = nextMonsters.map((monster) => {
+      const snapshot = monster.monster_snapshot;
+      const readied = monsterReadiedById.get(monster.id) || null;
+      return {
         participant_id: monster.id,
         kind: "monster" as const,
         name: monster.name,
         user_email: null,
         icon_url: monster.icon_url,
         monster_template_id: monster.template_id,
-        monster_snapshot: monster.monster_snapshot,
+        monster_snapshot: snapshot
+          ? {
+              ...snapshot,
+              gear: snapshot.gear || [],
+            }
+          : snapshot,
         roll: rollUnique(used),
         slow_available: true,
         fast_available: true,
         prone: false,
         swing_weapon_item_id: null,
         swing_weapon_name: null,
-      })),
-    ].sort((a, b) => rollSortValue(b.roll) - rollSortValue(a.roll));
+        readied_weapon_item_id: readied?.weapon.id ?? null,
+        readied_weapon_name: readied?.weapon.name ?? null,
+        readied_weapon_hand: readied?.hand ?? null,
+        readied_ammo_item: readied?.ammo ?? null,
+      };
+    });
+
+    const entries: InitiativeEntry[] = [...playerEntries, ...monsterEntries].sort(
+      (a, b) => rollSortValue(b.roll) - rollSortValue(a.roll)
+    );
 
     const currentIndex = entries.length > 0 ? 0 : null;
+    for (const p of updatedPlayers) {
+      await supabase.from("characters").update({ inventory: p.inventory }).eq("id", p.id);
+    }
+    setInitiativeMonsters(nextMonsters);
     setCombatMode(true);
     setInitiativeEntries(entries);
     setInitiativeCurrentIndex(currentIndex);
-    await saveInitiativeState(entries, currentIndex, true);
+    await saveInitiativeState(entries, currentIndex, true, nextMonsters);
+    await loadCharacters();
   };
 
   const resetInitiative = async () => {
@@ -2251,12 +2743,16 @@ export default function Combat({
       for (const drop of drops) {
         const w = itemWeight(drop.item);
         if (wagon1Weight + w <= maxWagonWeight) {
-          wagon1.push(drop.item);
+          const merged = addItemToInventory(wagon1, drop.item);
+          wagon1.length = 0;
+          wagon1.push(...merged);
           wagon1Weight += w;
           continue;
         }
         if (wagon2Weight + w <= maxWagonWeight) {
-          wagon2.push(drop.item);
+          const merged = addItemToInventory(wagon2, drop.item);
+          wagon2.length = 0;
+          wagon2.push(...merged);
           wagon2Weight += w;
           continue;
         }
@@ -2578,6 +3074,8 @@ export default function Combat({
   const requestDrawGear = async () => {
     if (!canUseDrawGearFromToken || !currentEntry) return;
     const actingParticipantId = currentEntry.participant_id;
+    const didConsume = await consumeFastOrSlow();
+    if (!didConsume) return;
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
     if (currentEntry.kind === "player") {
@@ -2591,11 +3089,6 @@ export default function Combat({
     if (!currentMonster?.monster_snapshot) return;
 
     const supabase = createClient();
-    const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
-    if (rpcError) {
-      setError(rpcError.message);
-      return;
-    }
 
     const { data: latest, error: latestError } = await supabase
       .from("combat_state")
@@ -2710,18 +3203,10 @@ export default function Combat({
     return true;
   };
 
-  const clearSwingForParticipant = async (participantId: string | null): Promise<boolean> => {
-    if (!participantId) return true;
-    const participantEntry = initiativeEntries.find((entry) => entry.participant_id === participantId) || null;
-    if (!participantEntry?.swing_weapon_item_id) return true;
+  const clearAimForToken = async (actorTokenIdForRpc: string): Promise<boolean> => {
     const supabase = createClient();
-
     if (!isDmUser) {
-      const actorTokenIdForRpc =
-        participantEntry.kind === "player"
-          ? participantEntry.participant_id.replace(/^player:/, "")
-          : participantEntry.participant_id;
-      const { error: rpcError } = await supabase.rpc("combat_clear_swing_weapon_for_token", {
+      const { error: rpcError } = await supabase.rpc("combat_clear_aim_for_token", {
         p_actor_token_id: actorTokenIdForRpc,
       });
       if (rpcError) {
@@ -2731,13 +3216,287 @@ export default function Combat({
       return true;
     }
 
-    const nextEntries = initiativeEntries.map((entry) =>
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) => {
+      const tokenId =
+        entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (tokenId !== actorTokenIdForRpc) return entry;
+      return {
+        ...entry,
+        aim_target_id: null,
+        aim_target_name: null,
+        aim_weapon_item_id: null,
+        aim_weapon_name: null,
+      };
+    });
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
+    return true;
+  };
+
+  const clearReadiedForToken = async (actorTokenIdForRpc: string): Promise<boolean> => {
+    const supabase = createClient();
+    if (!isDmUser) {
+      const { error: rpcError } = await supabase.rpc("combat_clear_readied_for_token", {
+        p_actor_token_id: actorTokenIdForRpc,
+      });
+      if (rpcError) {
+        setError(rpcError.message);
+        return false;
+      }
+      return true;
+    }
+
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) => {
+      const tokenId =
+        entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (tokenId !== actorTokenIdForRpc) return entry;
+      return {
+        ...entry,
+        readied_weapon_item_id: null,
+        readied_weapon_name: null,
+        readied_weapon_hand: null,
+        readied_ammo_item: null,
+      };
+    });
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
+    return true;
+  };
+
+  const clearSwingForParticipant = async (
+    participantId: string | null,
+    options?: { preserveAim?: boolean }
+  ): Promise<boolean> => {
+    if (!participantId) return true;
+    const participantEntry = initiativeEntries.find((entry) => entry.participant_id === participantId) || null;
+    const actorTokenIdForRpc =
+      participantEntry?.kind === "player"
+        ? participantEntry.participant_id.replace(/^player:/, "")
+        : participantEntry?.participant_id || null;
+    const shouldClearSwing = Boolean(participantEntry?.swing_weapon_item_id);
+    const shouldClearAim = !options?.preserveAim && Boolean(participantEntry?.aim_target_id);
+    if (!shouldClearSwing && !shouldClearAim) return true;
+    const supabase = createClient();
+
+    if (!isDmUser) {
+      if (!actorTokenIdForRpc) return false;
+      if (shouldClearSwing) {
+        const { error: rpcError } = await supabase.rpc("combat_clear_swing_weapon_for_token", {
+          p_actor_token_id: actorTokenIdForRpc,
+        });
+        if (rpcError) {
+          setError(rpcError.message);
+          return false;
+        }
+      }
+      if (shouldClearAim) {
+        const { error: rpcError } = await supabase.rpc("combat_clear_aim_for_token", {
+          p_actor_token_id: actorTokenIdForRpc,
+        });
+        if (rpcError) {
+          setError(rpcError.message);
+          return false;
+        }
+      }
+      return true;
+    }
+
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) =>
       entry.participant_id === participantId
-        ? { ...entry, swing_weapon_item_id: null, swing_weapon_name: null }
+        ? {
+            ...entry,
+            swing_weapon_item_id: null,
+            swing_weapon_name: null,
+            ...(options?.preserveAim
+              ? {}
+              : {
+                  aim_target_id: null,
+                  aim_target_name: null,
+                  aim_weapon_item_id: null,
+                  aim_weapon_name: null,
+                }),
+          }
         : entry
     );
     setInitiativeEntries(nextEntries);
-    await saveInitiativeState(nextEntries, initiativeCurrentIndex, combatMode, initiativeMonsters, engagements);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
+    return true;
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      if (!combatMode || !currentReadied || !currentEntry || !actorTokenId) return;
+      const heldHand =
+        currentEntry.kind === "player"
+          ? readiedHandForWeapon(character?.equipment_slots, {
+              id: currentReadied.weaponItemId,
+              name: currentReadied.weaponName,
+            })
+          : readiedHandForWeapon(currentEntry.monster_snapshot?.equipment_slots, {
+              id: currentReadied.weaponItemId,
+              name: currentReadied.weaponName,
+            });
+      if (heldHand && heldHand === currentReadied.weaponHand) return;
+      const sig = `${actorTokenId}:${currentReadied.weaponItemId}:${currentReadied.ammoItem.id}`;
+      if (handledInvalidReadiedRef.current === sig) return;
+      handledInvalidReadiedRef.current = sig;
+      const supabase = createClient();
+      const actorToken = tokenByCharacterId.get(actorTokenId);
+      const actorZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
+
+      if (currentEntry.kind === "player") {
+        const actor = characters.find((c) => c.id === actorTokenId);
+        if (actor) {
+          const inventory = actor.inventory || [];
+          const currentWeight = inventory.reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
+          const maxWeight = (actor.max_attributes?.STR ?? actor.attributes?.STR ?? 0) * 2;
+          const ammoWeight = (currentReadied.ammoItem.quantity || 1) * currentReadied.ammoItem.weight;
+          if (currentWeight + ammoWeight <= maxWeight) {
+            await supabase
+              .from("characters")
+              .update({ inventory: addItemToInventory(inventory, currentReadied.ammoItem) })
+              .eq("id", actor.id);
+          } else if (actorZone !== null) {
+            const { data: state } = await supabase
+              .from("combat_state")
+              .select("zone_loot")
+              .eq("id", 1)
+              .maybeSingle<{ zone_loot: ZoneLootDrop[] | null }>();
+            const nextLoot = [
+              ...normalizeZoneLoot(state?.zone_loot),
+              { zone_id: actorZone, item: currentReadied.ammoItem },
+            ];
+            await supabase.from("combat_state").update({ zone_loot: nextLoot }).eq("id", 1);
+          }
+        }
+      } else if (isDmUser && currentEntry.monster_snapshot) {
+        const nextSnapshot = {
+          ...currentEntry.monster_snapshot,
+          gear: addItemToInventory(currentEntry.monster_snapshot.gear || [], currentReadied.ammoItem),
+        };
+        const nextEntries = initiativeEntries.map((entry) =>
+          entry.participant_id === currentEntry.participant_id
+            ? { ...entry, monster_snapshot: nextSnapshot }
+            : entry
+        );
+        const nextMonsters = initiativeMonsters.map((monster) =>
+          monster.id === currentEntry.participant_id
+            ? { ...monster, monster_snapshot: nextSnapshot }
+            : monster
+        );
+        setInitiativeEntries(nextEntries);
+        setInitiativeMonsters(nextMonsters);
+        await saveInitiativeState(nextEntries, initiativeCurrentIndex, combatMode, nextMonsters, engagements);
+      }
+
+      await clearReadiedForToken(actorTokenId);
+      await loadCharacters();
+    };
+    void run();
+  }, [
+    combatMode,
+    currentReadied,
+    currentEntry,
+    actorTokenId,
+    character?.equipment_slots,
+    tokenByCharacterId,
+    zoneRegionMap,
+    characters,
+    initiativeEntries,
+    initiativeMonsters,
+    initiativeCurrentIndex,
+    engagements,
+    isDmUser,
+    saveInitiativeState,
+    clearReadiedForToken,
+    loadCharacters,
+  ]);
+
+  const setAimForCurrentActor = async (
+    actorTokenIdForRpc: string,
+    targetTokenId: string,
+    targetName: string,
+    weaponItemId: string,
+    weaponName: string
+  ): Promise<boolean> => {
+    const supabase = createClient();
+    if (!isDmUser) {
+      const { error: rpcError } = await supabase.rpc("combat_set_aim_for_token", {
+        p_actor_token_id: actorTokenIdForRpc,
+        p_target_token_id: targetTokenId,
+        p_target_name: targetName,
+        p_weapon_item_id: weaponItemId,
+        p_weapon_name: weaponName,
+      });
+      if (rpcError) {
+        setError(rpcError.message);
+        return false;
+      }
+      return true;
+    }
+
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) => {
+      const tokenId =
+        entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (tokenId !== actorTokenIdForRpc) return entry;
+      return {
+        ...entry,
+        aim_target_id: targetTokenId,
+        aim_target_name: targetName,
+        aim_weapon_item_id: weaponItemId,
+        aim_weapon_name: weaponName,
+      };
+    });
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
     return true;
   };
 
@@ -2757,13 +3516,77 @@ export default function Combat({
       return true;
     }
 
-    const nextEntries = initiativeEntries.map((entry) =>
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) =>
       entry.participant_id === currentEntry.participant_id
         ? { ...entry, swing_weapon_item_id: weaponItemId, swing_weapon_name: weaponName }
         : entry
     );
     setInitiativeEntries(nextEntries);
-    await saveInitiativeState(nextEntries, initiativeCurrentIndex, combatMode, initiativeMonsters, engagements);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
+    return true;
+  };
+
+  const setReadiedForToken = async (
+    actorTokenIdForRpc: string,
+    weaponItemId: string,
+    weaponName: string,
+    weaponHand: "left" | "right" | "both",
+    ammoItem: InventoryItem
+  ): Promise<boolean> => {
+    const supabase = createClient();
+    if (!isDmUser) {
+      const { error: rpcError } = await supabase.rpc("combat_set_readied_for_token", {
+        p_actor_token_id: actorTokenIdForRpc,
+        p_weapon_item_id: weaponItemId,
+        p_weapon_name: weaponName,
+        p_weapon_hand: weaponHand,
+        p_ammo_item: ammoItem,
+      });
+      if (rpcError) {
+        setError(rpcError.message);
+        return false;
+      }
+      return true;
+    }
+
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return false;
+    const nextEntries = latest.freshEntries.map((entry) => {
+      const tokenId =
+        entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (tokenId !== actorTokenIdForRpc) return entry;
+      return {
+        ...entry,
+        readied_weapon_item_id: weaponItemId,
+        readied_weapon_name: weaponName,
+        readied_weapon_hand: weaponHand,
+        readied_ammo_item: ammoItem,
+      };
+    });
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(latest.freshMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      latest.freshMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
     return true;
   };
 
@@ -3029,10 +3852,45 @@ export default function Combat({
   const requestRetreat = async () => {
     if (!canUseRetreatFromSelection || !actorTokenId || !currentEntry) return;
     const actingParticipantId = currentEntry.participant_id;
-    const didConsume = await consumeFastOrSlow();
-    if (!didConsume) return;
+    const isFreeRetreat = isFreeRetreatAvailable;
+    if (!isFreeRetreat) {
+      const didConsume = await consumeFastOrSlow();
+      if (!didConsume) return;
+    }
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
+
+    if (isFreeRetreat) {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("combat_break_engagement_token", {
+        p_actor_token_id: actorTokenId,
+      });
+      if (rpcError) {
+        if (/not engaged with an enemy/i.test(rpcError.message || "")) {
+          if (isDmUser) {
+            const nextEdges = engagements.filter(
+              (edge) => edge.a !== actorTokenId && edge.b !== actorTokenId
+            );
+            setEngagements(nextEdges);
+            setSelectedTokenId(null);
+            await saveInitiativeState(
+              initiativeEntries,
+              initiativeCurrentIndex,
+              combatMode,
+              initiativeMonsters,
+              nextEdges
+            );
+            return;
+          }
+          setError("Combat RPC is outdated for allied free retreat. Please run latest supabase/combat.sql.");
+          return;
+        }
+        setError(rpcError.message);
+        return;
+      }
+      setSelectedTokenId(null);
+      return;
+    }
 
     if (currentEntry.kind === "player") {
       if (!actorCharacter) return;
@@ -3157,6 +4015,238 @@ export default function Combat({
     await setSwingForCurrentActor(weapon.id, weapon.name);
   };
 
+  const requestReadyOrLoadWeapon = async (option: {
+    weaponItemId: string;
+    weaponName: string;
+    isLoading: boolean;
+    hand: "left" | "right" | "both";
+  }) => {
+    if (!currentEntry || !actorTokenId) return;
+    const didConsume = option.isLoading ? await consumeAction("slow") : await consumeAction("fast");
+    if (!didConsume) return;
+    const preserveAim =
+      !!currentAim && currentAim.weaponItemId === option.weaponItemId;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim });
+    if (!swingCleared) return;
+
+    if (currentEntry.kind === "player") {
+      if (!character || !actorCharacter || character.id !== actorCharacter.id) return;
+      const consumed = consumeFirstAmmo(character.inventory || []);
+      if (!consumed.ammo) return;
+      const supabase = createClient();
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ inventory: consumed.nextItems })
+        .eq("id", actorCharacter.id);
+      if (updateError) {
+        setError(updateError.message);
+        return;
+      }
+      await setReadiedForToken(
+        actorTokenId,
+        option.weaponItemId,
+        option.weaponName,
+        option.hand,
+        consumed.ammo
+      );
+      await loadCharacters();
+      return;
+    }
+
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return;
+    const actorEntry = latest.freshEntries.find((entry) => entry.participant_id === currentEntry.participant_id) || null;
+    if (!actorEntry?.monster_snapshot) return;
+    const latestConsumed = consumeFirstAmmo(actorEntry.monster_snapshot.gear || []);
+    if (!latestConsumed.ammo) return;
+    const nextSnapshot = { ...actorEntry.monster_snapshot, gear: latestConsumed.nextItems };
+    const nextEntries = latest.freshEntries.map((entry) =>
+      entry.participant_id === currentEntry.participant_id
+        ? {
+            ...entry,
+            monster_snapshot: nextSnapshot,
+            readied_weapon_item_id: option.weaponItemId,
+            readied_weapon_name: option.weaponName,
+            readied_weapon_hand: option.hand,
+            readied_ammo_item: latestConsumed.ammo,
+          }
+        : entry
+    );
+    const nextMonsters = latest.freshMonsters.map((monster) =>
+      monster.id === currentEntry.participant_id
+        ? { ...monster, monster_snapshot: nextSnapshot }
+        : monster
+    );
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(nextMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
+    await saveInitiativeState(
+      nextEntries,
+      latest.freshCurrentIndex,
+      combatMode,
+      nextMonsters,
+      latest.freshEngagements,
+      null,
+      latest.freshLoot
+    );
+  };
+
+  const requestAim = async (option: { weaponItemId: string; weaponName: string }) => {
+    if (!currentEntry || !actorTokenId || !selectedTokenId) return;
+    const didConsume = await consumeAction("fast");
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim: false });
+    if (!swingCleared) return;
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+    await setAimForCurrentActor(actorTokenId, selectedTokenId, targetName, option.weaponItemId, option.weaponName);
+  };
+
+  const requestShoot = async (option: {
+    weaponItemId: string;
+    weaponName: string;
+    rangePenalty: number;
+    aimBonusDice: number;
+    targetZoneId: number | null;
+  }) => {
+    if (!currentEntry || !actorTokenId || !selectedTokenId || !currentReadied) return;
+    if (isActorEngaged) return;
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim: true });
+    if (!swingCleared) return;
+    const aimCleared = await clearAimForToken(actorTokenId);
+    if (!aimCleared) return;
+    const readiedCleared = await clearReadiedForToken(actorTokenId);
+    if (!readiedCleared) return;
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+    const totalBonusDice = option.rangePenalty + option.aimBonusDice;
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `shoot:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: selectedTokenId,
+        targetName,
+        weaponItemId: option.weaponItemId,
+        weaponName: option.weaponName,
+        weaponBaseDamage: Math.max(0, (playerEquippedRangedWeapons(character).find((w) => w.id === option.weaponItemId)?.damage ?? 0)),
+        maneuver: "Shoot",
+        rollAttribute: "AGL",
+        rollSkill: "MARKSMANSHIP",
+        requiredSuccesses: 1,
+        bonusDice: totalBonusDice,
+        shootTargetZoneId: option.targetZoneId,
+        shootAmmoItem: currentReadied.ammoItem,
+      });
+      setSelectedTokenId(null);
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const weapon = monsterEquippedRangedWeapons(snapshot).find((w) => w.id === option.weaponItemId);
+    if (!weapon) return;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
+    const signedSkillPool = Math.max(0, snapshot.special ?? 0) + totalBonusDice;
+    const skillIsNegative = signedSkillPool < 0;
+    const skillDice = rollD6Pool(Math.abs(signedSkillPool));
+    const gearDice = rollD6Pool(Math.max(0, weapon.gearBonus ?? 0));
+    const rawSuccesses =
+      attributeDice.filter((d) => d === 6).length +
+      skillDice.filter((d) => d === 6).length +
+      gearDice.filter((d) => d === 6).length;
+    const successes = skillIsNegative
+      ? Math.max(0, rawSuccesses - skillDice.filter((d) => d === 6).length * 2)
+      : rawSuccesses;
+
+    setMonsterRollResult({
+      actionLabel: `Shoot (${option.weaponName})`,
+      attributeDice,
+      skillDice,
+      skillIsNegative,
+      gearDice,
+      successes,
+    });
+
+    await onResolveMeleeAttack({
+      id: `monster-shoot:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: selectedTokenId,
+      weaponName: option.weaponName,
+      weaponBaseDamage: Math.max(0, weapon.damage ?? 0),
+      maneuver: "Shoot",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+      shootTargetZoneId: option.targetZoneId,
+      shootAmmoItem: currentReadied.ammoItem,
+    });
+  };
+
+  const requestUnready = async () => {
+    if (!currentEntry || !actorTokenId || !currentReadied) return;
+    const actorToken = tokenByCharacterId.get(actorTokenId);
+    const actorZone = actorToken ? zoneIdAtPoint(zoneRegionMap, actorToken) : null;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim: false });
+    if (!swingCleared) return;
+    const supabase = createClient();
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter || !character) return;
+      const inventory = character.inventory || [];
+      const currentWeight = inventory.reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
+      const maxWeight = (character.max_attributes?.STR ?? character.attributes?.STR ?? 0) * 2;
+      const ammoWeight = (currentReadied.ammoItem.quantity || 1) * currentReadied.ammoItem.weight;
+      if (currentWeight + ammoWeight <= maxWeight) {
+        const { error: updateError } = await supabase
+          .from("characters")
+          .update({ inventory: addItemToInventory(inventory, currentReadied.ammoItem) })
+          .eq("id", actorCharacter.id);
+        if (updateError) {
+          setError(updateError.message);
+          return;
+        }
+      } else if (actorZone !== null) {
+        const { data: state } = await supabase
+          .from("combat_state")
+          .select("zone_loot")
+          .eq("id", 1)
+          .maybeSingle<{ zone_loot: ZoneLootDrop[] | null }>();
+        const nextLoot = [...normalizeZoneLoot(state?.zone_loot), { zone_id: actorZone, item: currentReadied.ammoItem }];
+        await supabase.from("combat_state").update({ zone_loot: nextLoot }).eq("id", 1);
+      }
+      const cleared = await clearReadiedForToken(actorTokenId);
+      if (!cleared) return;
+      await loadCharacters();
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot) return;
+    const nextGear = addItemToInventory(snapshot.gear || [], currentReadied.ammoItem);
+    const nextSnapshot = { ...snapshot, gear: nextGear };
+    const nextEntries = initiativeEntries.map((entry) =>
+      entry.participant_id === currentEntry.participant_id
+        ? {
+            ...entry,
+            monster_snapshot: nextSnapshot,
+            readied_weapon_item_id: null,
+            readied_weapon_name: null,
+            readied_weapon_hand: null,
+            readied_ammo_item: null,
+          }
+        : entry
+    );
+    const nextMonsters = initiativeMonsters.map((monster) =>
+      monster.id === currentEntry.participant_id
+        ? { ...monster, monster_snapshot: nextSnapshot }
+        : monster
+    );
+    setInitiativeEntries(nextEntries);
+    setInitiativeMonsters(nextMonsters);
+    await saveInitiativeState(nextEntries, initiativeCurrentIndex, combatMode, nextMonsters, engagements);
+  };
+
   const requestGetUp = async () => {
     if (!canUseGetUpFromSelection || !actorTokenId || !currentEntry) return;
     const actingParticipantId = currentEntry.participant_id;
@@ -3239,6 +4329,8 @@ export default function Combat({
     if (!currentEntry || !actorTokenId || !canUseRelease) return;
     const otherTokenId = actorGrapplingTargetId || actorClingingTargetId;
     if (!otherTokenId) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_release_grapple_or_cling", {
       p_actor_token_id: actorTokenId,
@@ -3774,18 +4866,10 @@ export default function Combat({
           )}
         </div>
         <div className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
-          {canUseEngageFromSelection && (
-          <button
-            onClick={requestEngage}
-            className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Engage
-          </button>
-          )}
           {canUseGrappleFromSelection && (
             <button
               onClick={() => void requestGrappleLike("Grapple")}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               Grapple
             </button>
@@ -3793,17 +4877,66 @@ export default function Combat({
           {canUseClingFromSelection && (
             <button
               onClick={() => void requestGrappleLike("Cling")}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               Cling
             </button>
           )}
-          {canUseRelease && (
+          {readyOrLoadOptions
+            .filter((option) => option.isLoading)
+            .map((option) => (
+              <button
+                key={`ready-load-${option.weaponItemId}`}
+                onClick={() => void requestReadyOrLoadWeapon(option)}
+                className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+              >
+                {`Load (${option.weaponName})`}
+              </button>
+            ))}
+          {shootActionOptions.map((option) => (
             <button
-              onClick={() => void requestRelease()}
-              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+              key={`shoot-${option.weaponItemId}-${selectedTokenId ?? "target"}`}
+              onClick={() => void requestShoot(option)}
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
-              Release
+              {`Shoot (${option.weaponName})`}
+            </button>
+          ))}
+          {meleeActionOptions
+            .filter((option) => option.maneuver !== "Grapple Attack")
+            .map((option) => (
+              <button
+                key={`${option.maneuver}-${option.weaponItemId ?? "none"}`}
+                onClick={() => void requestMeleeAction(option)}
+                className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+              >
+                {option.maneuver === "Strike"
+                  ? "Strike"
+                  : `${option.maneuver} (${option.weaponName})`}
+              </button>
+            ))}
+          {canUseCoupFromSelection && (
+            <button
+              onClick={() => void requestCoupDeGrace()}
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+            >
+              Coup de Grace
+            </button>
+          )}
+          {canUseCrawlFromSelection && (
+            <button
+              onClick={() => void requestRun()}
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+            >
+              Crawl
+            </button>
+          )}
+          {canUseRetreatFromSelection && !isFreeRetreatAvailable && (
+            <button
+              onClick={() => void requestRetreat()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Retreat
             </button>
           )}
           {canUseBreakFree && (
@@ -3814,14 +4947,6 @@ export default function Combat({
               Break Free
             </button>
           )}
-          {canUseRetreatFromSelection && (
-          <button
-            onClick={() => void requestRetreat()}
-            className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Retreat
-          </button>
-          )}
           {canUseFeintFromSelection && (
             <button
               onClick={() => void requestFeint()}
@@ -3831,13 +4956,33 @@ export default function Combat({
             </button>
           )}
           {canUseDrawGearFromToken && (
-          <button
-            onClick={requestDrawGear}
-            className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
-          >
-            Draw Gear
-          </button>
+            <button
+              onClick={requestDrawGear}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Draw Gear
+            </button>
           )}
+          {readyOrLoadOptions
+            .filter((option) => !option.isLoading)
+            .map((option) => (
+              <button
+                key={`ready-load-${option.weaponItemId}`}
+                onClick={() => void requestReadyOrLoadWeapon(option)}
+                className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              >
+                {`Ready (${option.weaponName})`}
+              </button>
+            ))}
+          {aimActionOptions.map((option) => (
+            <button
+              key={`aim-${option.weaponItemId}-${selectedTokenId ?? "target"}`}
+              onClick={() => void requestAim(option)}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              {`Aim (${option.weaponName})`}
+            </button>
+          ))}
           {swingWeaponOptions.map((weapon) => (
             <button
               key={`swing-${weapon.id}`}
@@ -3847,19 +4992,17 @@ export default function Combat({
               {`Swing (${weapon.name})`}
             </button>
           ))}
-          {meleeActionOptions.map((option) => (
-            <button
-              key={`${option.maneuver}-${option.weaponItemId ?? "none"}`}
-              onClick={() => void requestMeleeAction(option)}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
-            >
-              {option.maneuver === "Strike"
-                ? "Strike"
-                : option.maneuver === "Grapple Attack"
-                  ? "Grapple Attack"
-                  : `${option.maneuver} (${option.weaponName})`}
-            </button>
-          ))}
+          {meleeActionOptions
+            .filter((option) => option.maneuver === "Grapple Attack")
+            .map((option) => (
+              <button
+                key={`${option.maneuver}-${option.weaponItemId ?? "none"}`}
+                onClick={() => void requestMeleeAction(option)}
+                className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              >
+                Grapple Attack
+              </button>
+            ))}
           {shoveActionOptions.map((option) => (
             <button
               key={`shove-${option.weaponItemId ?? "default"}-${option.weaponName}`}
@@ -3878,14 +5021,6 @@ export default function Combat({
               {`Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`}
             </button>
           ))}
-          {canUseCoupFromSelection && (
-            <button
-              onClick={() => void requestCoupDeGrace()}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
-            >
-              Coup de Grace
-            </button>
-          )}
           {pickUpActionOptions.map((item) => (
             <button
               key={`pickup-${selectedZoneTarget?.zoneId ?? "zone"}-${item.id}`}
@@ -3903,20 +5038,44 @@ export default function Combat({
               Get Up
             </button>
           )}
-          {canUseCrawlFromSelection && (
-            <button
-              onClick={() => void requestRun()}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
-            >
-              Crawl
-            </button>
-          )}
           {canUseRunFromSelection && (
             <button
               onClick={() => void requestRun()}
               className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
             >
               Run
+            </button>
+          )}
+          {canUseEngageFromSelection && (
+            <button
+              onClick={requestEngage}
+              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Engage
+            </button>
+          )}
+          {canUseRelease && (
+            <button
+              onClick={() => void requestRelease()}
+              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+            >
+              Release
+            </button>
+          )}
+          {canUseUnready && currentReadied && (
+            <button
+              onClick={() => void requestUnready()}
+              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+            >
+              {`Unready (${currentReadied.weaponName})`}
+            </button>
+          )}
+          {canUseRetreatFromSelection && isFreeRetreatAvailable && (
+            <button
+              onClick={() => void requestRetreat()}
+              className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+            >
+              Retreat
             </button>
           )}
           {canPass && (

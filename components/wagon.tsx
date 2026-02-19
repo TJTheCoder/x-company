@@ -4,10 +4,11 @@ import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { CharacterType, InventoryItem } from "../app/protected/page";
 import {
+  addItemToInventory,
+  applyGearDamageToItem,
   buildItemFromForm,
   getImplementedItemAutofill,
   isImplementedItem,
-  normalizeInventoryItems,
 } from "@/lib/item-catalog";
 
 type WagonData = {
@@ -125,7 +126,7 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
 
     const updatedWagonData = {
       ...wagonData,
-      [wagon]: normalizeInventoryItems([...wagonData[wagon], newItem]),
+      [wagon]: addItemToInventory(wagonData[wagon], newItem),
     };
 
     const saved = await saveWagons(updatedWagonData);
@@ -191,19 +192,19 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
       return;
     }
 
+    const existing = wagonData[editingItem.wagon].find((item) => item.id === editingItem.itemId);
+    if (!existing) return;
+    const withoutEdited = wagonData[editingItem.wagon].filter((item) => item.id !== editingItem.itemId);
+    const editedItem = buildItemFromForm({
+      id: existing.id,
+      name,
+      weight,
+      gearBonus,
+      quantity: quantity > 1 ? quantity : undefined,
+    });
     const updatedWagonData = {
       ...wagonData,
-      [editingItem.wagon]: normalizeInventoryItems(wagonData[editingItem.wagon].map(item =>
-        item.id === editingItem.itemId
-          ? buildItemFromForm({
-              id: item.id,
-              name,
-              weight,
-              gearBonus,
-              quantity: quantity > 1 ? quantity : undefined,
-            })
-          : item
-      )),
+      [editingItem.wagon]: addItemToInventory(withoutEdited, editedItem),
     };
 
     const saved = await saveWagons(updatedWagonData);
@@ -265,11 +266,7 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
 
     const updatedWagonData = {
       ...wagonData,
-      [wagon]: wagonData[wagon].map(i =>
-        i.id === itemId
-          ? { ...i, gearBonus: item.gearBonus! - 1 }
-          : i
-      ),
+      [wagon]: applyGearDamageToItem(wagonData[wagon], itemId, 1),
     };
 
     const saved = await saveWagons(updatedWagonData);
@@ -302,8 +299,7 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
       [wagon]: wagonData[wagon].filter(i => i.id !== item.id),
     };
 
-    const updatedCharacterInventory = [...characterInventory, item];
-    const normalizedCharacterInventory = normalizeInventoryItems(updatedCharacterInventory);
+    const normalizedCharacterInventory = addItemToInventory(characterInventory, item);
 
     const saved = await saveWagons(updatedWagonData);
     if (saved) {
@@ -330,7 +326,7 @@ export default function Wagon({ character, updateCharacter, saveCharacter, wagon
     const updatedWagonData = {
       ...wagonData,
       [sourceWagon]: wagonData[sourceWagon].filter(i => i.id !== item.id),
-      [targetWagon]: [...wagonData[targetWagon], item],
+      [targetWagon]: addItemToInventory(wagonData[targetWagon], item),
     };
 
     const saved = await saveWagons(updatedWagonData);

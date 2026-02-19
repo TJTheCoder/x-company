@@ -68,8 +68,11 @@ export function parseMonsterGearCsv(csv: string): InventoryItem[] {
 
   const parsed: InventoryItem[] = [];
 
-  names.forEach((name, idx) => {
-    const canonical = getImplementedItemAutofill(name);
+  names.forEach((rawName, idx) => {
+    const qtyMatch = rawName.match(/^(.*?)\s*x\s*(\d+)$/i);
+    const baseName = (qtyMatch?.[1] ?? rawName).trim();
+    const quantity = qtyMatch ? Math.max(1, Number.parseInt(qtyMatch[2], 10) || 1) : 1;
+    const canonical = getImplementedItemAutofill(baseName);
     if (!canonical) return;
     parsed.push(
       buildItemFromForm({
@@ -77,6 +80,7 @@ export function parseMonsterGearCsv(csv: string): InventoryItem[] {
         name: canonical.name,
         weight: canonical.weight,
         gearBonus: canonical.gearBonus,
+        quantity,
       })
     );
   });
@@ -109,7 +113,12 @@ export function parseMonsterArtsCsv(csv: string): Art[] {
 }
 
 export function monsterToGearCsv(monster: MonsterTemplate): string {
-  return (monster.gear || []).map((item) => item.name).join(", ");
+  return (monster.gear || [])
+    .map((item) => {
+      const qty = Math.max(1, item.quantity || 1);
+      return qty > 1 ? `${item.name} x${qty}` : item.name;
+    })
+    .join(", ");
 }
 
 export function monsterToTraitsCsv(monster: MonsterTemplate): string {

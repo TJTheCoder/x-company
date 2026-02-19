@@ -4,10 +4,13 @@ import { useState } from "react";
 import { CharacterType, EquipmentSlots, InventoryItem } from "../app/protected/page";
 import { createClient } from "@/lib/supabase/client";
 import {
+  addItemToInventory,
+  applyGearDamageToItem,
   buildItemFromForm,
   getImplementedItemAutofill,
   isImplementedItem,
   normalizeInventoryItems,
+  splitOneFromStack,
 } from "@/lib/item-catalog";
 
 type WagonData = {
@@ -72,6 +75,12 @@ export default function Inventory({
     ...defaultSlots,
     ...(character?.equipment_slots || {}),
   };
+  const equippedItemIds = new Set(
+    [equipmentSlots.armor, equipmentSlots.helmet, equipmentSlots.left, equipmentSlots.right].filter(
+      (value): value is string => !!value
+    )
+  );
+  const visibleInventory = inventory.filter((item) => !equippedItemIds.has(item.id));
 
   const sanitizeEquipmentSlots = (slots: EquipmentSlots, items: InventoryItem[]): EquipmentSlots => {
     const ids = new Set(items.map((item) => item.id));
@@ -135,31 +144,43 @@ export default function Inventory({
     const canEquip = await consumeEquipActionIfInCombat();
     if (!canEquip) return;
 
+    let nextInventory = inventory;
+    let equipItem = item;
+    if ((item.quantity || 1) > 1) {
+      const split = splitOneFromStack(nextInventory, item.id);
+      if (!split.splitItem) return;
+      nextInventory = split.nextItems;
+      equipItem = split.splitItem;
+    }
+
     const nextSlots: EquipmentSlots = { ...equipmentSlots };
 
     if (slot === "armor") {
-      nextSlots.armor = item.id;
+      nextSlots.armor = equipItem.id;
     } else if (slot === "helmet") {
-      nextSlots.helmet = item.id;
+      nextSlots.helmet = equipItem.id;
     } else if (slot === "left" || slot === "right") {
-      if (item.wield === "2H") {
-        nextSlots.left = item.id;
-        nextSlots.right = item.id;
+      if (equipItem.wield === "2H") {
+        nextSlots.left = equipItem.id;
+        nextSlots.right = equipItem.id;
       } else {
         if (nextSlots.left && nextSlots.right && nextSlots.left === nextSlots.right) {
           // Replacing a 2H item with a 1H item in one hand.
           nextSlots.left = null;
           nextSlots.right = null;
         }
-        nextSlots[slot] = item.id;
+        nextSlots[slot] = equipItem.id;
         const otherSlot: "left" | "right" = slot === "left" ? "right" : "left";
-        if (nextSlots[otherSlot] === item.id) {
+        if (nextSlots[otherSlot] === equipItem.id) {
           nextSlots[otherSlot] = null;
         }
       }
     }
 
-    const updates = { equipment_slots: nextSlots };
+    const updates = {
+      inventory: nextInventory,
+      equipment_slots: sanitizeEquipmentSlots(nextSlots, nextInventory),
+    };
     updateCharacter(updates);
     await saveCharacter(updates);
     setError("");
@@ -268,7 +289,7 @@ export default function Inventory({
       }),
     };
 
-    const updatedInventory = normalizeInventoryItems([...inventory, newItem]);
+    const updatedInventory = addItemToInventory(inventory, newItem);
     const updates = {
       inventory: updatedInventory,
       equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
@@ -332,17 +353,17 @@ export default function Inventory({
       return;
     }
 
-    const updatedInventory = normalizeInventoryItems(inventory.map(item =>
-      item.id === editingItem
-        ? buildItemFromForm({
-            id: item.id,
-            name,
-            weight,
-            gearBonus,
-            quantity: quantity > 1 ? quantity : undefined,
-          })
-        : item
-    ));
+    const editedBase = inventory.find((item) => item.id === editingItem);
+    if (!editedBase) return;
+    const withoutEdited = inventory.filter((item) => item.id !== editingItem);
+    const editedItem = buildItemFromForm({
+      id: editedBase.id,
+      name,
+      weight,
+      gearBonus,
+      quantity: quantity > 1 ? quantity : undefined,
+    });
+    const updatedInventory = addItemToInventory(withoutEdited, editedItem);
 
     const updates = {
       inventory: updatedInventory,
@@ -388,11 +409,7 @@ export default function Inventory({
       return;
     }
 
-    const updatedInventory = inventory.map(i =>
-      i.id === itemId
-        ? { ...i, gearBonus: item.gearBonus! - 1 }
-        : i
-    );
+    const updatedInventory = applyGearDamageToItem(inventory, itemId, 1);
 
     const updates = {
       inventory: updatedInventory,
@@ -431,7 +448,7 @@ export default function Inventory({
     const updatedInventory = inventory.filter(i => i.id !== item.id);
     const updatedWagonData = {
       ...wagonData,
-      [wagon]: [...wagonData[wagon], item],
+      [wagon]: addItemToInventory(wagonData[wagon], item),
     };
 
     // Save to Supabase
@@ -522,7 +539,7 @@ export default function Inventory({
         return;
       }
 
-      const updatedRecipientInventory = normalizeInventoryItems([...recipientInventory, sendingItem]);
+      const updatedRecipientInventory = addItemToInventory(recipientInventory, sendingItem);
       const updatedSenderInventory = normalizeInventoryItems(inventory.filter((item) => item.id !== sendingItem.id));
 
       const supabase = createClient();
@@ -729,14 +746,14 @@ export default function Inventory({
 
       {/* Inventory List */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 w-full">
-        {inventory.length === 0 && !showAddItem && (
+        {visibleInventory.length === 0 && !showAddItem && (
           <div className="text-center py-12 col-span-full">
             <p className="text-amber-300/60 text-lg">Your inventory is empty</p>
             <p className="text-amber-300/40 text-sm mt-2">Add items to get started</p>
           </div>
         )}
 
-        {inventory.map((item) => {
+        {visibleInventory.map((item) => {
           const quantity = item.quantity || 1;
           const totalWeight = item.weight * quantity;
           

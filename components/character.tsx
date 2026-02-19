@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CharacterType, InventoryItem, PendingMeleeAction, ResolvedMeleeAttack } from "../app/protected/page";
+import { applyGearDamageToItem } from "@/lib/item-catalog";
 
 type Attributes = {
   STR: number;
@@ -397,18 +398,7 @@ export default function Character({
     // Handle gear damage from ALL gear ones
     let updatedInventory = character.inventory || [];
     if (gearOnes > 0 && currentRoll.gearItemId) {
-      updatedInventory = updatedInventory.map(item => {
-        if (item.id === currentRoll.gearItemId && item.gearBonus) {
-          const newGearBonus = Math.max(0, item.gearBonus - gearOnes);
-          return { ...item, gearBonus: newGearBonus > 0 ? newGearBonus : undefined };
-        }
-        return item;
-      }).filter(item => {
-        if (item.id === currentRoll.gearItemId && item.gearBonus === undefined) {
-          return false;
-        }
-        return true;
-      });
+      updatedInventory = applyGearDamageToItem(updatedInventory, currentRoll.gearItemId, gearOnes);
 
       const gearStillExists = updatedInventory.find(item => item.id === currentRoll.gearItemId);
       if (!gearStillExists) {

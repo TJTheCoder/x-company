@@ -141,14 +141,14 @@ const ARROW_IRON_HEAD: CanonicalItem = {
   key: "arrow (iron head)",
   name: "Arrow (Iron Head)",
   weight: 0.2,
-  itemType: "Generic",
+  itemType: "Ammunition",
 };
 
 const ARROW_WOODEN_HEAD: CanonicalItem = {
   key: "arrow (wooden head)",
   name: "Arrow (Wooden Head)",
   weight: 0.2,
-  itemType: "Generic",
+  itemType: "Ammunition",
 };
 
 const TORCH: CanonicalItem = {
@@ -226,6 +226,104 @@ export function normalizeInventoryItem(item: InventoryItem): InventoryItem {
 
 export function normalizeInventoryItems(items: InventoryItem[]): InventoryItem[] {
   return items.map(normalizeInventoryItem);
+}
+
+function normalizedPropsKey(item: InventoryItem): string {
+  if (!Array.isArray(item.properties) || item.properties.length === 0) return "";
+  return [...item.properties]
+    .map((value) => String(value).trim().toLowerCase())
+    .sort()
+    .join("|");
+}
+
+export function canItemsStack(a: InventoryItem, b: InventoryItem): boolean {
+  const na = normalizeInventoryItem(a);
+  const nb = normalizeInventoryItem(b);
+  return (
+    na.name === nb.name &&
+    na.weight === nb.weight &&
+    (na.gearBonus ?? null) === (nb.gearBonus ?? null) &&
+    (na.item_key ?? null) === (nb.item_key ?? null) &&
+    (na.item_type ?? null) === (nb.item_type ?? null) &&
+    (na.wield ?? null) === (nb.wield ?? null) &&
+    (na.damage ?? null) === (nb.damage ?? null) &&
+    (na.range_band ?? null) === (nb.range_band ?? null) &&
+    normalizedPropsKey(na) === normalizedPropsKey(nb)
+  );
+}
+
+export function addItemToInventory(items: InventoryItem[], item: InventoryItem): InventoryItem[] {
+  const base = normalizeInventoryItems(items);
+  const normalizedItem = normalizeInventoryItem(item);
+  const incomingQty = Math.max(1, normalizedItem.quantity || 1);
+  const targetIdx = base.findIndex((existing) => canItemsStack(existing, normalizedItem));
+  if (targetIdx < 0) {
+    return [...base, { ...normalizedItem, quantity: incomingQty > 1 ? incomingQty : undefined }];
+  }
+  const currentQty = Math.max(1, base[targetIdx].quantity || 1);
+  const mergedQty = currentQty + incomingQty;
+  const next = [...base];
+  next[targetIdx] = {
+    ...base[targetIdx],
+    quantity: mergedQty > 1 ? mergedQty : undefined,
+  };
+  return next;
+}
+
+export function splitOneFromStack(
+  items: InventoryItem[],
+  itemId: string,
+  explicitNewId?: string
+): { nextItems: InventoryItem[]; splitItem: InventoryItem | null } {
+  const idx = items.findIndex((item) => item.id === itemId);
+  if (idx < 0) return { nextItems: items, splitItem: null };
+  const source = items[idx];
+  const qty = Math.max(1, source.quantity || 1);
+  if (qty <= 1) return { nextItems: items, splitItem: source };
+
+  const nextItems = [...items];
+  nextItems[idx] = { ...source, quantity: qty - 1 > 1 ? qty - 1 : undefined };
+  const splitItem: InventoryItem = {
+    ...source,
+    id: explicitNewId || `${source.id}:split:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    quantity: undefined,
+  };
+  nextItems.push(splitItem);
+  return { nextItems, splitItem };
+}
+
+export function applyGearDamageToItem(
+  items: InventoryItem[],
+  itemId: string,
+  damage: number
+): InventoryItem[] {
+  const dmg = Math.max(0, Math.trunc(damage));
+  if (dmg <= 0) return items;
+  const idx = items.findIndex((item) => item.id === itemId);
+  if (idx < 0) return items;
+  const source = items[idx];
+  if (!source.gearBonus || source.gearBonus <= 0) return items;
+
+  const qty = Math.max(1, source.quantity || 1);
+  const nextGearBonus = Math.max(0, source.gearBonus - dmg);
+  if (qty <= 1) {
+    if (nextGearBonus <= 0) {
+      return items.filter((item) => item.id !== itemId);
+    }
+    return items.map((item) => (item.id === itemId ? { ...item, gearBonus: nextGearBonus } : item));
+  }
+
+  const nextItems = [...items];
+  nextItems[idx] = { ...source, quantity: qty - 1 > 1 ? qty - 1 : undefined };
+  if (nextGearBonus > 0) {
+    nextItems.push({
+      ...source,
+      id: `${source.id}:dur:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      quantity: undefined,
+      gearBonus: nextGearBonus,
+    });
+  }
+  return nextItems;
 }
 
 export function buildItemFromForm(params: {

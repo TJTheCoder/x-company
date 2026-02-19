@@ -1970,6 +1970,415 @@ $$;
 
 grant execute on function public.combat_clear_swing_weapon_for_token(text) to authenticated;
 
+create or replace function public.combat_set_readied_for_token(
+  p_actor_token_id text,
+  p_weapon_item_id text,
+  p_weapon_name text,
+  p_weapon_hand text,
+  p_ammo_item jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_weapon_item_id is null or btrim(p_weapon_item_id) = '' then
+    raise exception 'Weapon item id is required';
+  end if;
+  if p_weapon_name is null or btrim(p_weapon_name) = '' then
+    raise exception 'Weapon name is required';
+  end if;
+  if p_weapon_hand not in ('left', 'right', 'both') then
+    raise exception 'Weapon hand must be left, right, or both';
+  end if;
+  if p_ammo_item is null or jsonb_typeof(p_ammo_item) <> 'object' then
+    raise exception 'Ammo item is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can ready weapons';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can ready weapons';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only ready weapons for your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only ready weapons for your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{readied_weapon_item_id}', to_jsonb(p_weapon_item_id), true);
+  v_entry := jsonb_set(v_entry, '{readied_weapon_name}', to_jsonb(p_weapon_name), true);
+  v_entry := jsonb_set(v_entry, '{readied_weapon_hand}', to_jsonb(p_weapon_hand), true);
+  v_entry := jsonb_set(v_entry, '{readied_ammo_item}', p_ammo_item, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_set_readied_for_token(text, text, text, text, jsonb) to authenticated;
+
+create or replace function public.combat_clear_readied_for_token(
+  p_actor_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can clear readied weapon';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can clear readied weapon';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only clear readied weapon for your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only clear readied weapon for your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{readied_weapon_item_id}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{readied_weapon_name}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{readied_weapon_hand}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{readied_ammo_item}', 'null'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_clear_readied_for_token(text) to authenticated;
+
+create or replace function public.combat_set_aim_for_token(
+  p_actor_token_id text,
+  p_target_token_id text,
+  p_target_name text,
+  p_weapon_item_id text,
+  p_weapon_name text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_target_token_id is null or btrim(p_target_token_id) = '' then
+    raise exception 'Target token is required';
+  end if;
+  if p_weapon_item_id is null or btrim(p_weapon_item_id) = '' then
+    raise exception 'Weapon item id is required';
+  end if;
+  if p_weapon_name is null or btrim(p_weapon_name) = '' then
+    raise exception 'Weapon name is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can aim';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can aim';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only aim with your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only aim with your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{aim_target_id}', to_jsonb(p_target_token_id), true);
+  v_entry := jsonb_set(v_entry, '{aim_target_name}', to_jsonb(coalesce(nullif(btrim(p_target_name), ''), 'Target')), true);
+  v_entry := jsonb_set(v_entry, '{aim_weapon_item_id}', to_jsonb(p_weapon_item_id), true);
+  v_entry := jsonb_set(v_entry, '{aim_weapon_name}', to_jsonb(p_weapon_name), true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_set_aim_for_token(text, text, text, text, text) to authenticated;
+
+create or replace function public.combat_clear_aim_for_token(
+  p_actor_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can clear aim';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can clear aim';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only clear aim for your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only clear aim for your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{aim_target_id}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{aim_target_name}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{aim_weapon_item_id}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{aim_weapon_name}', 'null'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_clear_aim_for_token(text) to authenticated;
+
 create or replace function public.combat_resolve_shove(
   p_actor_token_id text,
   p_target_token_id text,
@@ -2249,6 +2658,10 @@ declare
   v_target_slots jsonb;
   v_target_item jsonb;
   v_target_item_name text;
+  v_readied_weapon_item_id text;
+  v_readied_weapon_name text;
+  v_readied_ammo_item jsonb;
+  v_should_clear_readied boolean := false;
   v_snapshot jsonb;
   v_snapshot_gear jsonb;
   v_snapshot_slots jsonb;
@@ -2350,6 +2763,10 @@ begin
   if not coalesce(p_success, false) then
     return;
   end if;
+
+  v_readied_weapon_item_id := nullif(coalesce(v_target_entry->>'readied_weapon_item_id', ''), '');
+  v_readied_weapon_name := nullif(coalesce(v_target_entry->>'readied_weapon_name', ''), '');
+  v_readied_ammo_item := v_target_entry->'readied_ammo_item';
 
   if coalesce(v_target_entry->>'kind', '') = 'player' then
     begin
@@ -2474,6 +2891,29 @@ begin
     from jsonb_array_elements(v_monsters) as mon(value);
   end if;
 
+  v_should_clear_readied :=
+    v_readied_weapon_item_id is not null and (
+      v_readied_weapon_item_id = p_target_item_id
+      or (v_readied_weapon_name is not null and v_readied_weapon_name = v_target_item_name)
+    );
+
+  if v_should_clear_readied then
+    if v_readied_ammo_item is not null and jsonb_typeof(v_readied_ammo_item) = 'object' then
+      v_zone_loot := coalesce(v_zone_loot, '[]'::jsonb) || jsonb_build_array(
+        jsonb_build_object(
+          'zone_id', p_zone_id,
+          'item', v_readied_ammo_item
+        )
+      );
+    end if;
+    v_target_entry := jsonb_set(v_target_entry, '{readied_weapon_item_id}', 'null'::jsonb, true);
+    v_target_entry := jsonb_set(v_target_entry, '{readied_weapon_name}', 'null'::jsonb, true);
+    v_target_entry := jsonb_set(v_target_entry, '{readied_weapon_hand}', 'null'::jsonb, true);
+    v_target_entry := jsonb_set(v_target_entry, '{readied_ammo_item}', 'null'::jsonb, true);
+  end if;
+
+  v_entries := jsonb_set(v_entries, array[v_target_idx::text], v_target_entry, false);
+
   v_zone_loot := coalesce(v_zone_loot, '[]'::jsonb) || jsonb_build_array(
     jsonb_build_object(
       'zone_id', p_zone_id,
@@ -2516,6 +2956,9 @@ declare
   v_actor_owner_email text;
   v_drop jsonb;
   v_item jsonb;
+  v_item_qty int;
+  v_merge_ord int;
+  v_merge_item jsonb;
   v_actor_snapshot jsonb;
   v_actor_gear jsonb;
   v_monster_id text;
@@ -2602,6 +3045,7 @@ begin
     raise exception 'Item not found in zone';
   end if;
   v_item := v_drop->'item';
+  v_item_qty := greatest(1, coalesce((v_item->>'quantity')::int, 1));
 
   v_zone_loot := coalesce(
     (
@@ -2622,12 +3066,56 @@ begin
       raise exception 'Actor character not found';
     end;
 
+    select coalesce(inventory, '[]'::jsonb)
+    into v_actor_gear
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    select e.ord, e.value
+    into v_merge_ord, v_merge_item
+    from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
+    where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
+    order by e.ord
+    limit 1;
+
+    if v_merge_ord is null then
+      v_actor_gear := coalesce(v_actor_gear, '[]'::jsonb) || jsonb_build_array(v_item);
+    else
+      v_merge_item := jsonb_set(
+        v_merge_item,
+        '{quantity}',
+        to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
+        true
+      );
+      v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+    end if;
+
     update public.characters
-    set inventory = coalesce(inventory, '[]'::jsonb) || jsonb_build_array(v_item)
+    set inventory = v_actor_gear
     where id = v_actor_uuid;
   else
     v_actor_snapshot := coalesce(v_actor_entry->'monster_snapshot', '{}'::jsonb);
-    v_actor_gear := coalesce(v_actor_snapshot->'gear', '[]'::jsonb) || jsonb_build_array(v_item);
+    v_actor_gear := coalesce(v_actor_snapshot->'gear', '[]'::jsonb);
+    select e.ord, e.value
+    into v_merge_ord, v_merge_item
+    from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
+    where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
+    order by e.ord
+    limit 1;
+
+    if v_merge_ord is null then
+      v_actor_gear := v_actor_gear || jsonb_build_array(v_item);
+    else
+      v_merge_item := jsonb_set(
+        v_merge_item,
+        '{quantity}',
+        to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
+        true
+      );
+      v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+    end if;
+
     v_actor_snapshot := jsonb_set(v_actor_snapshot, '{gear}', v_actor_gear, true);
     v_actor_entry := jsonb_set(v_actor_entry, '{monster_snapshot}', v_actor_snapshot, true);
     v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
@@ -2676,9 +3164,7 @@ declare
   v_tokens jsonb;
   v_actor_uuid uuid;
   v_actor_owner_email text;
-  v_actor_is_monster boolean;
-  v_other_token text;
-  v_has_enemy boolean := false;
+  v_has_engagement boolean := false;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -2707,7 +3193,6 @@ begin
   if jsonb_array_length(v_entries) = 0 then
     raise exception 'No initiative entries';
   end if;
-  v_actor_is_monster := p_actor_token_id like 'monster:%';
 
   if not v_is_dm then
     begin
@@ -2734,26 +3219,16 @@ begin
     raise exception 'Actor token not found';
   end if;
 
-  for v_other_token in
-    select case
-             when ed.value->>'a' = p_actor_token_id then ed.value->>'b'
-             when ed.value->>'b' = p_actor_token_id then ed.value->>'a'
-             else null
-           end as other_token
+  select exists (
+    select 1
     from jsonb_array_elements(v_edges) as ed(value)
-  loop
-    if v_other_token is null then
-      continue;
-    end if;
+    where ed.value->>'a' = p_actor_token_id
+       or ed.value->>'b' = p_actor_token_id
+  )
+  into v_has_engagement;
 
-    if (v_other_token like 'monster:%') <> v_actor_is_monster then
-      v_has_enemy := true;
-      exit;
-    end if;
-  end loop;
-
-  if not v_has_enemy then
-    raise exception 'Actor is not engaged with an enemy';
+  if not v_has_engagement then
+    raise exception 'Actor is not engaged';
   end if;
 
   v_edges := coalesce(

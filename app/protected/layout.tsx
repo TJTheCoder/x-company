@@ -1,5 +1,6 @@
 import { ReactNode, Suspense } from "react";
 import { AuthGuard } from "@/components/auth-guard";
+import { RepoStatsFooterText } from "@/components/repo-stats-footer-text";
 
 export default function ProtectedLayout({ children }: { children: ReactNode }) {
   return (
@@ -15,7 +16,7 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
       </div>
 
       <footer className="w-full py-6 border-t border-amber-600/20 text-center text-amber-300">
-        A mysterious figure is watching...
+        <RepoStatsFooterText />
       </footer>
     </div>
   );

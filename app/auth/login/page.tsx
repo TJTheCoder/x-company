@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { LoginForm } from "@/components/login-form";
 import { LoginRedirect } from "@/components/login-redirect";
 import { FloatingParticles } from "@/components/floating-particles";
+import { RepoStatsFooterText } from "@/components/repo-stats-footer-text";
 
 export default function Page() {
   return (
@@ -33,7 +34,7 @@ export default function Page() {
 
       {/* Footer */}
       <footer className="absolute bottom-0 left-0 w-full flex items-center justify-center py-6 border-t border-amber-600/20 backdrop-blur-sm">
-        <p className="text-amber-300/50 text-sm">A mysterious figure is watching...</p>
+        <p className="text-amber-300/50 text-sm"><RepoStatsFooterText /></p>
       </footer>
     </main>
   );

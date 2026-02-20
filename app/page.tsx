@@ -5,6 +5,7 @@ import { HeroWrapper } from "@/components/hero-wrapper";
 import { hasEnvVars } from "@/lib/utils";
 import { Suspense } from "react";
 import { Hero } from "@/components/hero";
+import { RepoStatsFooterText } from "@/components/repo-stats-footer-text";
 
 export default function Home() {
   return (
@@ -46,7 +47,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="w-full flex items-center justify-center text-sm text-amber-200 gap-6 py-12 mt-20 border-t border-amber-600/20 backdrop-blur-sm">
-        <p>A mysterious figure is watching...</p>
+        <p><RepoStatsFooterText /></p>
       </footer>
     </main>
   );

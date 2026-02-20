@@ -148,6 +148,30 @@ export type ResolvedMeleeAttack = {
   destinationY?: number;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  skipReaction?: boolean;
+};
+
+export type PendingReactionRoll = {
+  id: string;
+  reactionId: string;
+  targetCharacterId: string;
+  mode: "dodge-stand" | "dodge-prone" | "parry";
+  rollAttribute: keyof Attributes;
+  rollSkill: string;
+  bonusDice: number;
+  gearItemId?: string | null;
+  applyProne?: boolean;
+  attack: ResolvedMeleeAttack;
+};
+
+export type ResolvedReactionRoll = {
+  id: string;
+  reactionId: string;
+  targetCharacterId: string;
+  mode: "dodge-stand" | "dodge-prone" | "parry";
+  totalSuccesses: number;
+  applyProne?: boolean;
+  attack: ResolvedMeleeAttack;
 };
 
 type WagonData = {
@@ -180,6 +204,8 @@ export default function Dashboard() {
   const [drawGearReturnToCombat, setDrawGearReturnToCombat] = useState(false);
   const [pendingMeleeAction, setPendingMeleeAction] = useState<PendingMeleeAction | null>(null);
   const [meleeRollReturnToCombat, setMeleeRollReturnToCombat] = useState(false);
+  const [pendingReactionRoll, setPendingReactionRoll] = useState<PendingReactionRoll | null>(null);
+  const [reactionRollReturnToCombat, setReactionRollReturnToCombat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -511,8 +537,18 @@ export default function Dashboard() {
     setActiveTab("character");
   };
 
+  const queueReactionRoll = (roll: PendingReactionRoll) => {
+    setPendingReactionRoll(roll);
+    setReactionRollReturnToCombat(true);
+    setActiveTab("character");
+  };
+
   const clearPendingMeleeAction = (actionId: string) => {
     setPendingMeleeAction((prev) => (prev?.id === actionId ? null : prev));
+  };
+
+  const clearPendingReactionRoll = (rollId: string) => {
+    setPendingReactionRoll((prev) => (prev?.id === rollId ? null : prev));
   };
 
   const onMeleeRollCleared = () => {
@@ -521,11 +557,166 @@ export default function Dashboard() {
     setMeleeRollReturnToCombat(false);
   };
 
+  const onReactionRollCleared = () => {
+    if (!reactionRollReturnToCombat) return;
+    setActiveTab("combat");
+    setReactionRollReturnToCombat(false);
+  };
+
   const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
     const successes = Math.max(0, attack.totalSuccesses);
     const requiredSuccesses = Math.max(0, attack.requiredSuccesses ?? 1);
     const supabase = createClient();
     const didSucceed = successes >= requiredSuccesses;
+    const reactionEligibleManeuvers = new Set<ResolvedMeleeAttack["maneuver"]>([
+      "Shove",
+      "Disarm",
+      "Feint",
+      "Slash",
+      "Stab",
+      "Strike",
+      "Grapple",
+      "Cling",
+      "Shoot",
+    ]);
+    const isBroken = (attributes: Attributes | null | undefined): boolean => {
+      if (!attributes) return false;
+      return (
+        (attributes.STR ?? 0) <= 0 ||
+        (attributes.AGL ?? 0) <= 0 ||
+        (attributes.WIT ?? 0) <= 0 ||
+        (attributes.EMP ?? 0) <= 0
+      );
+    };
+    const rollArmorDice = (count: number): { dice: number[]; successes: number } => {
+      const dice = Array.from({ length: Math.max(0, count) }, () => Math.floor(Math.random() * 6) + 1);
+      const successes = dice.filter((d) => d === 6).length;
+      return { dice, successes };
+    };
+    const armorDiceForCharacter = (target: {
+      inventory?: InventoryItem[] | null;
+      equipment_slots?: { armor?: string | null; helmet?: string | null };
+    }): number => {
+      const inventory = target.inventory || [];
+      const slots = target.equipment_slots || { armor: null, helmet: null };
+      const matchesSlot = (slotValue: string | null | undefined, item: InventoryItem) =>
+        slotValue && (slotValue === item.id || slotValue === item.name);
+      const armor = inventory.find((item) => item.item_type === "Armor" && matchesSlot(slots.armor, item));
+      const helmet = inventory.find((item) => item.item_type === "Helmet" && matchesSlot(slots.helmet, item));
+      return Math.max(0, armor?.gearBonus ?? 0) + Math.max(0, helmet?.gearBonus ?? 0);
+    };
+    const armorDiceForMonster = (snapshot: { natural_armor?: number; gear?: InventoryItem[]; equipment_slots?: any }) => {
+      const gear = snapshot.gear || [];
+      const slots = snapshot.equipment_slots || { armor: null, helmet: null };
+      const matchesSlot = (slotValue: string | null | undefined, item: InventoryItem) =>
+        slotValue && (slotValue === item.id || slotValue === item.name);
+      const armor = gear.find((item) => item.item_type === "Armor" && matchesSlot(slots.armor, item));
+      const helmet = gear.find((item) => item.item_type === "Helmet" && matchesSlot(slots.helmet, item));
+      const gearDice = Math.max(0, armor?.gearBonus ?? 0) + Math.max(0, helmet?.gearBonus ?? 0);
+      const natural = Math.max(0, snapshot.natural_armor ?? 0);
+      return gearDice + natural;
+    };
+    const shouldOfferReaction =
+      !attack.skipReaction &&
+      successes > 0 &&
+      reactionEligibleManeuvers.has(attack.maneuver);
+
+    if (shouldOfferReaction) {
+      const { data: combatState } = await supabase
+        .from("combat_state")
+        .select("combat_mode, initiative_entries, pending_reactions")
+        .eq("id", 1)
+        .maybeSingle<{
+          combat_mode?: boolean | null;
+          initiative_entries: Array<{
+            participant_id: string;
+            fast_available?: boolean | null;
+            prone?: boolean | null;
+            grappled_by_id?: string | null;
+            clung_onto_by_id?: string | null;
+            clung_onto_by_ids?: string[] | null;
+            dead?: boolean | null;
+            kind?: "player" | "monster" | null;
+            monster_snapshot?: {
+              str?: number | null;
+              agl?: number | null;
+              wit?: number | null;
+              emp?: number | null;
+              dead?: boolean | null;
+            } | null;
+          }> | null;
+          pending_reactions?: Array<{ id?: string; attackId?: string; targetCharacterId?: string }> | null;
+        }>();
+
+      const entries = Array.isArray(combatState?.initiative_entries) ? combatState!.initiative_entries : [];
+      const pending = Array.isArray(combatState?.pending_reactions) ? combatState!.pending_reactions : [];
+      const existingForAttack = pending.some((reaction) => reaction?.attackId === attack.id);
+
+      if (!existingForAttack && combatState?.combat_mode) {
+        const entry = entries.find(
+          (e) =>
+            e.participant_id === attack.targetCharacterId ||
+            e.participant_id === `player:${attack.targetCharacterId}`
+        );
+        const fastAvailable = entry ? (entry.fast_available ?? true) : false;
+        const isProne = Boolean(entry?.prone);
+        const isHeld =
+          Boolean(entry?.grappled_by_id) ||
+          Boolean(entry?.clung_onto_by_id) ||
+          Boolean((entry?.clung_onto_by_ids || []).length > 0);
+        const isEntryDead = Boolean(entry?.dead || entry?.monster_snapshot?.dead);
+        const isMonsterTarget = attack.targetCharacterId.startsWith("monster:");
+        let canReact = fastAvailable && !isProne && !isHeld && !isEntryDead;
+        if (canReact && isMonsterTarget) {
+          const snap = entry?.monster_snapshot;
+          if (snap) {
+            const broken =
+              (snap.str ?? 0) <= 0 || (snap.agl ?? 0) <= 0 || (snap.wit ?? 0) <= 0 || (snap.emp ?? 0) <= 0;
+            if (broken) canReact = false;
+          }
+        }
+        if (canReact && !isMonsterTarget) {
+          const { data: targetCharacter } = await supabase
+            .from("characters")
+            .select("id, attributes, dead")
+            .eq("id", attack.targetCharacterId)
+            .maybeSingle<{ id: string; attributes: Attributes | null; dead?: boolean | null }>();
+          const isTargetDead = Boolean(targetCharacter?.dead);
+          if (isTargetDead || isBroken(targetCharacter?.attributes)) {
+            canReact = false;
+          }
+        }
+
+        if (canReact) {
+          const reactionPayload = {
+            id: `reaction:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            attackId: attack.id,
+            attackerCharacterId: attack.attackerCharacterId,
+            targetCharacterId: attack.targetCharacterId,
+            weaponName: attack.weaponName,
+            weaponBaseDamage: attack.weaponBaseDamage,
+            maneuver: attack.maneuver,
+            totalSuccesses: successes,
+            requiredSuccesses,
+            swingBonusDamage: attack.swingBonusDamage ?? 0,
+            disarmTargetItemId: attack.disarmTargetItemId ?? null,
+            disarmZoneId: attack.disarmZoneId ?? null,
+            destinationX: attack.destinationX ?? null,
+            destinationY: attack.destinationY ?? null,
+            shootTargetZoneId: attack.shootTargetZoneId ?? null,
+            shootAmmoItem: attack.shootAmmoItem ?? null,
+            createdAt: new Date().toISOString(),
+          };
+          const { error: reactionError } = await supabase.rpc("combat_enqueue_reaction", {
+            p_reaction: reactionPayload,
+          });
+          if (!reactionError) {
+            return;
+          }
+          console.error("Failed to enqueue reaction:", reactionError);
+        }
+      }
+    }
     const pruneBrokenOnlyEngagements = async () => {
       const { error: pruneError } = await supabase.rpc("combat_prune_fully_broken_engagements");
       if (pruneError) {
@@ -879,6 +1070,10 @@ export default function Dashboard() {
             id: string;
             monster_snapshot?: {
               str?: number;
+              agl?: number;
+              natural_armor?: number;
+              gear?: InventoryItem[];
+              equipment_slots?: { armor?: string | null; helmet?: string | null };
             } | null;
           }> | null;
           initiative_entries: Array<{
@@ -886,6 +1081,9 @@ export default function Dashboard() {
             monster_snapshot?: {
               str?: number;
               agl?: number;
+              natural_armor?: number;
+              gear?: InventoryItem[];
+              equipment_slots?: { armor?: string | null; helmet?: string | null };
             } | null;
             prone?: boolean | null;
           }> | null;
@@ -898,6 +1096,18 @@ export default function Dashboard() {
 
       const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
       const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+      const targetMonster = monsters.find((monster) => monster.id === attack.targetCharacterId);
+      const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
+      const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
+      let mitigatedDamage = damage;
+      if (snapshot) {
+        const armorDice = armorDiceForMonster(snapshot);
+        if (armorDice > 0) {
+          const armorRoll = rollArmorDice(armorDice);
+          mitigatedDamage = Math.max(0, damage - armorRoll.successes);
+        }
+      }
+      if (mitigatedDamage <= 0) return;
 
       const nextMonsters = monsters.map((monster) => {
         if (monster.id !== attack.targetCharacterId || !monster.monster_snapshot) return monster;
@@ -905,14 +1115,14 @@ export default function Dashboard() {
           ...monster,
           monster_snapshot: {
             ...monster.monster_snapshot,
-            str: Math.max(0, (monster.monster_snapshot.str ?? 0) - damage),
+            str: Math.max(0, (monster.monster_snapshot.str ?? 0) - mitigatedDamage),
           },
         };
       });
 
       const nextEntries = entries.map((entry) => {
         if (entry.participant_id !== attack.targetCharacterId || !entry.monster_snapshot) return entry;
-        const nextStr = Math.max(0, (entry.monster_snapshot.str ?? 0) - damage);
+        const nextStr = Math.max(0, (entry.monster_snapshot.str ?? 0) - mitigatedDamage);
         const nextAgl = Math.max(0, entry.monster_snapshot.agl ?? 0);
         const isPhysBroken = nextStr <= 0 || nextAgl <= 0;
         return {
@@ -941,9 +1151,15 @@ export default function Dashboard() {
 
     const { data: target, error: targetError } = await supabase
       .from("characters")
-      .select("id, attributes, spirits")
+      .select("id, attributes, spirits, inventory, equipment_slots")
       .eq("id", attack.targetCharacterId)
-      .maybeSingle<{ id: string; attributes: Attributes; spirits: number }>();
+      .maybeSingle<{
+        id: string;
+        attributes: Attributes;
+        spirits: number;
+        inventory?: InventoryItem[] | null;
+        equipment_slots?: { armor?: string | null; helmet?: string | null } | null;
+      }>();
 
     if (targetError) {
       console.error("Failed to load attack target:", targetError);
@@ -952,9 +1168,17 @@ export default function Dashboard() {
 
     if (!target) return;
 
+    let mitigatedDamage = damage;
+    const armorDice = armorDiceForCharacter(target);
+    if (armorDice > 0) {
+      const armorRoll = rollArmorDice(armorDice);
+      mitigatedDamage = Math.max(0, damage - armorRoll.successes);
+    }
+    if (mitigatedDamage <= 0) return;
+
     const nextAttributes: Attributes = {
       ...target.attributes,
-      STR: Math.max(0, (target.attributes.STR ?? 0) - damage),
+      STR: Math.max(0, (target.attributes.STR ?? 0) - mitigatedDamage),
     };
     const shouldZeroSpirit = Object.values(nextAttributes).some((value) => value <= 0);
     const updates: Partial<CharacterType> = shouldZeroSpirit
@@ -1004,6 +1228,42 @@ export default function Dashboard() {
       }
     }
     await pruneBrokenOnlyEngagements();
+  };
+
+  const resolveReactionRoll = async (roll: ResolvedReactionRoll) => {
+    const supabase = createClient();
+    const reducedSuccesses = Math.max(0, roll.attack.totalSuccesses - Math.max(0, roll.totalSuccesses));
+    const finalAttack: ResolvedMeleeAttack = {
+      ...roll.attack,
+      totalSuccesses: reducedSuccesses,
+      skipReaction: true,
+    };
+
+    const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
+      p_actor_token_id: roll.targetCharacterId,
+    });
+    if (consumeError) {
+      console.error("Failed to consume reaction action:", consumeError);
+    }
+
+    if (roll.applyProne) {
+      const { error: proneError } = await supabase.rpc("combat_set_prone_for_token", {
+        p_actor_token_id: roll.targetCharacterId,
+        p_prone: true,
+      });
+      if (proneError) {
+        console.error("Failed to apply prone from reaction:", proneError);
+      }
+    }
+
+    const { error: clearError } = await supabase.rpc("combat_clear_reaction", {
+      p_reaction_id: roll.reactionId,
+    });
+    if (clearError) {
+      console.error("Failed to clear reaction:", clearError);
+    }
+
+    await resolveMeleeAttack(finalAttack);
   };
 
   if (showCharacterSelect) {
@@ -1255,6 +1515,10 @@ export default function Dashboard() {
               onConsumePendingMeleeAction={clearPendingMeleeAction}
               onResolveMeleeAttack={resolveMeleeAttack}
               onMeleeRollCleared={onMeleeRollCleared}
+              pendingReactionRoll={pendingReactionRoll}
+              onConsumePendingReactionRoll={clearPendingReactionRoll}
+              onResolveReactionRoll={resolveReactionRoll}
+              onReactionRollCleared={onReactionRollCleared}
             />
           )}
           {activeTab === "inventory" && (
@@ -1298,6 +1562,7 @@ export default function Dashboard() {
               onRequestDrawGear={startDrawGearFromCombat}
               character={character}
               onQueueMeleeAction={queueMeleeAction}
+              onQueueReactionRoll={queueReactionRoll}
               onResolveMeleeAttack={resolveMeleeAttack}
             />
           )}

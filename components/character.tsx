@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CharacterType, InventoryItem, PendingMeleeAction, ResolvedMeleeAttack } from "../app/protected/page";
+import {
+  CharacterType,
+  InventoryItem,
+  PendingMeleeAction,
+  PendingReactionRoll,
+  ResolvedMeleeAttack,
+  ResolvedReactionRoll,
+} from "../app/protected/page";
 import { applyGearDamageToItem } from "@/lib/item-catalog";
 
 type Attributes = {
@@ -58,6 +65,10 @@ type CharacterProps = {
   onConsumePendingMeleeAction: (actionId: string) => void;
   onResolveMeleeAttack: (attack: ResolvedMeleeAttack) => void | Promise<void>;
   onMeleeRollCleared: () => void;
+  pendingReactionRoll: PendingReactionRoll | null;
+  onConsumePendingReactionRoll: (rollId: string) => void;
+  onResolveReactionRoll: (roll: ResolvedReactionRoll) => void | Promise<void>;
+  onReactionRollCleared: () => void;
 };
 
 const emptyRoll = (): RollState => ({
@@ -78,6 +89,10 @@ type ActiveMeleeAttack = PendingMeleeAction & {
   attr: keyof Attributes;
 };
 
+type ActiveReactionRoll = PendingReactionRoll & {
+  attr: keyof Attributes;
+};
+
 export default function Character({
   character,
   updateCharacter,
@@ -86,6 +101,10 @@ export default function Character({
   onConsumePendingMeleeAction,
   onResolveMeleeAttack,
   onMeleeRollCleared,
+  pendingReactionRoll,
+  onConsumePendingReactionRoll,
+  onResolveReactionRoll,
+  onReactionRollCleared,
 }: CharacterProps) {
   const [rollStates, setRollStates] = useState<Record<string, RollState>>({
     STR: emptyRoll(),
@@ -98,11 +117,14 @@ export default function Character({
   const [selectedGear, setSelectedGear] = useState<InventoryItem | null>(null);
   const [bonusDice, setBonusDice] = useState<string>("0");
   const [activeMeleeAttack, setActiveMeleeAttack] = useState<ActiveMeleeAttack | null>(null);
+  const [activeReactionRoll, setActiveReactionRoll] = useState<ActiveReactionRoll | null>(null);
   const characterRef = useRef<CharacterType | null>(character);
   const rollStatesRef = useRef<Record<string, RollState>>(rollStates);
   const isPageUnloadingRef = useRef(false);
   const activeMeleeAttackRef = useRef<ActiveMeleeAttack | null>(null);
+  const activeReactionRollRef = useRef<ActiveReactionRoll | null>(null);
   const handledPendingMeleeActionIdRef = useRef<string | null>(null);
+  const handledPendingReactionRollIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     characterRef.current = character;
@@ -115,6 +137,10 @@ export default function Character({
   useEffect(() => {
     activeMeleeAttackRef.current = activeMeleeAttack;
   }, [activeMeleeAttack]);
+
+  useEffect(() => {
+    activeReactionRollRef.current = activeReactionRoll;
+  }, [activeReactionRoll]);
 
   // Returns true if the given attribute's roll slot has any dice in it.
   const hasRollFor = (attr: keyof Attributes) => {
@@ -193,6 +219,24 @@ export default function Character({
     onMeleeRollCleared();
   };
 
+  const resolveReactionRollForRoll = (attr: keyof Attributes, roll: RollState) => {
+    const pending = activeReactionRollRef.current;
+    if (!pending || pending.attr !== attr) return;
+    activeReactionRollRef.current = null;
+    setActiveReactionRoll(null);
+
+    void onResolveReactionRoll({
+      id: pending.id,
+      reactionId: pending.reactionId,
+      targetCharacterId: pending.targetCharacterId,
+      mode: pending.mode,
+      totalSuccesses: totalSuccessesFromRoll(roll),
+      applyProne: pending.applyProne,
+      attack: pending.attack,
+    });
+    onReactionRollCleared();
+  };
+
   const applySpiritDelta = (delta: number) => {
     const currentCharacter = characterRef.current;
     if (!currentCharacter || delta <= 0) return;
@@ -211,6 +255,7 @@ export default function Character({
   const resolveRollClear = (attr: keyof Attributes, roll: RollState) => {
     applySpiritOnClear(attr, roll);
     resolveMeleeAttackForRoll(attr, roll);
+    resolveReactionRollForRoll(attr, roll);
   };
 
   const clearRollAndResolveSpirit = (attr: keyof Attributes) => {
@@ -626,6 +671,58 @@ export default function Character({
     onConsumePendingMeleeAction(pendingMeleeAction.id);
     handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
   }, [character, pendingMeleeAction]);
+
+  useEffect(() => {
+    if (!character || !pendingReactionRoll) return;
+    if (pendingReactionRoll.targetCharacterId !== character.id) return;
+    if (handledPendingReactionRollIdRef.current === pendingReactionRoll.id) return;
+
+    const rollAttribute = pendingReactionRoll.rollAttribute;
+    const rollSkill = pendingReactionRoll.rollSkill;
+    const usesGear = Boolean(pendingReactionRoll.gearItemId);
+    const gearItem = usesGear
+      ? (character.inventory || []).find((item) => item.id === pendingReactionRoll.gearItemId) || null
+      : null;
+    if (usesGear && !gearItem) {
+      onConsumePendingReactionRoll(pendingReactionRoll.id);
+      handledPendingReactionRollIdRef.current = pendingReactionRoll.id;
+      return;
+    }
+
+    clearPreviousRoll(rollAttribute);
+    if (hasRollFor(rollAttribute)) {
+      clearRollAndResolveSpirit(rollAttribute);
+    }
+
+    setSelectedAttribute(rollAttribute);
+    setSelectedSkill(rollSkill);
+    setSelectedGear(usesGear ? gearItem : null);
+    setBonusDice(`${pendingReactionRoll.bonusDice ?? 0}`);
+    setActiveReactionRoll({ ...pendingReactionRoll, attr: rollAttribute });
+
+    const attrCount = character.attributes[rollAttribute] ?? 0;
+    const signedSkillCount = (character.skills[rollSkill] ?? 0) + (pendingReactionRoll.bonusDice ?? 0);
+    const skillCount = Math.abs(signedSkillCount);
+    const skillIsNegative = signedSkillCount < 0;
+    const gearCount = usesGear ? Math.max(0, gearItem?.gearBonus ?? 0) : 0;
+
+    setRollStates((prev) => ({
+      ...prev,
+      [rollAttribute]: {
+        attributeDice: Array.from({ length: attrCount }, () => Math.floor(Math.random() * 6) + 1),
+        skillDice: Array.from({ length: skillCount }, () => Math.floor(Math.random() * 6) + 1),
+        skillIsNegative,
+        gearDice: Array.from({ length: gearCount }, () => Math.floor(Math.random() * 6) + 1),
+        poolUsed: gearCount > 0 ? "all" : "attribute+skill",
+        hasBeenPushed: false,
+        requiredSuccesses: 0,
+        gearItemId: gearItem?.id,
+      },
+    }));
+
+    onConsumePendingReactionRoll(pendingReactionRoll.id);
+    handledPendingReactionRollIdRef.current = pendingReactionRoll.id;
+  }, [character, pendingReactionRoll]);
 
   if (!character) {
     return <p className="text-amber-300 text-center">No character found for your account.</p>;

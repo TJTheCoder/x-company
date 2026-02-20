@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import type { CharacterType, InventoryItem, PendingMeleeAction, ResolvedMeleeAttack } from "@/app/protected/page";
+import type {
+  CharacterType,
+  InventoryItem,
+  PendingMeleeAction,
+  PendingReactionRoll,
+  ResolvedMeleeAttack,
+} from "@/app/protected/page";
 import { addItemToInventory, isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
 import {
   buildMonsterSnapshot,
@@ -17,6 +23,7 @@ type CombatProps = {
   onRequestDrawGear?: () => void;
   character: CharacterType | null;
   onQueueMeleeAction?: (action: PendingMeleeAction) => void;
+  onQueueReactionRoll?: (roll: PendingReactionRoll) => void;
   onResolveMeleeAttack?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
 };
 
@@ -116,6 +123,7 @@ type CombatStateRow = {
   initiative_entries: InitiativeEntry[] | null;
   initiative_current_index: number | null;
   zone_loot: ZoneLootDrop[] | null;
+  pending_reactions?: PendingReaction[] | null;
   updated_by_email: string | null;
   updated_at: string;
 };
@@ -126,6 +134,26 @@ type CombatStateMutationRow = {
   initiative_current_index: number | null;
   engagements: EngagementEdge[] | null;
   zone_loot: ZoneLootDrop[] | null;
+};
+
+type PendingReaction = {
+  id: string;
+  attackId: string;
+  attackerCharacterId: string;
+  targetCharacterId: string;
+  weaponName: string;
+  weaponBaseDamage: number;
+  maneuver: ResolvedMeleeAttack["maneuver"];
+  totalSuccesses: number;
+  requiredSuccesses?: number;
+  swingBonusDamage?: number;
+  disarmTargetItemId?: string | null;
+  disarmZoneId?: number | null;
+  destinationX?: number | null;
+  destinationY?: number | null;
+  shootTargetZoneId?: number | null;
+  shootAmmoItem?: InventoryItem | null;
+  createdAt?: string | null;
 };
 
 type TokenPosition = {
@@ -168,6 +196,17 @@ type MonsterRollResult = {
 const MAP_BUCKET = "combat-assets";
 const DM_EMAIL = "drocasma9@gmail.com";
 type TokenSide = "player" | "monster";
+const REACTION_MANEUVER_SET = new Set<ResolvedMeleeAttack["maneuver"]>([
+  "Shove",
+  "Disarm",
+  "Feint",
+  "Slash",
+  "Stab",
+  "Strike",
+  "Grapple",
+  "Cling",
+  "Shoot",
+]);
 
 const normalizeEmail = (value: string | null | undefined): string =>
   (value || "").trim().toLowerCase();
@@ -488,6 +527,61 @@ function normalizeZoneLoot(raw: ZoneLootDrop[] | null | undefined): ZoneLootDrop
       return { zone_id: Math.trunc(v.zone_id as number), item };
     })
     .filter((value): value is ZoneLootDrop => !!value);
+}
+
+function normalizePendingReactions(raw: PendingReaction[] | null | undefined): PendingReaction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((value) => {
+      if (!value || typeof value !== "object") return null;
+      const v = value as Partial<PendingReaction>;
+      if (typeof v.id !== "string" || !v.id.trim()) return null;
+      if (typeof v.attackId !== "string" || !v.attackId.trim()) return null;
+      if (typeof v.attackerCharacterId !== "string" || !v.attackerCharacterId.trim()) return null;
+      if (typeof v.targetCharacterId !== "string" || !v.targetCharacterId.trim()) return null;
+      if (typeof v.weaponName !== "string") return null;
+      if (typeof v.weaponBaseDamage !== "number") return null;
+      if (typeof v.totalSuccesses !== "number") return null;
+      if (
+        v.maneuver !== "Slash" &&
+        v.maneuver !== "Stab" &&
+        v.maneuver !== "Strike" &&
+        v.maneuver !== "Shoot" &&
+        v.maneuver !== "Grapple Attack" &&
+        v.maneuver !== "Retreat" &&
+        v.maneuver !== "Shove" &&
+        v.maneuver !== "Disarm" &&
+        v.maneuver !== "Grapple" &&
+        v.maneuver !== "Cling" &&
+        v.maneuver !== "Break Free" &&
+        v.maneuver !== "Feint" &&
+        v.maneuver !== "Coup de Grace" &&
+        v.maneuver !== "Crawl"
+      ) {
+        return null;
+      }
+      return {
+        id: v.id,
+        attackId: v.attackId,
+        attackerCharacterId: v.attackerCharacterId,
+        targetCharacterId: v.targetCharacterId,
+        weaponName: v.weaponName,
+        weaponBaseDamage: v.weaponBaseDamage,
+        maneuver: v.maneuver,
+        totalSuccesses: v.totalSuccesses,
+        requiredSuccesses: typeof v.requiredSuccesses === "number" ? v.requiredSuccesses : undefined,
+        swingBonusDamage: typeof v.swingBonusDamage === "number" ? v.swingBonusDamage : undefined,
+        disarmTargetItemId: typeof v.disarmTargetItemId === "string" ? v.disarmTargetItemId : null,
+        disarmZoneId: typeof v.disarmZoneId === "number" ? v.disarmZoneId : null,
+        destinationX: typeof v.destinationX === "number" ? v.destinationX : null,
+        destinationY: typeof v.destinationY === "number" ? v.destinationY : null,
+        shootTargetZoneId: typeof v.shootTargetZoneId === "number" ? v.shootTargetZoneId : null,
+        shootAmmoItem:
+          v.shootAmmoItem && typeof v.shootAmmoItem === "object" ? (v.shootAmmoItem as InventoryItem) : null,
+        createdAt: typeof v.createdAt === "string" ? v.createdAt : null,
+      };
+    })
+    .filter((value): value is PendingReaction => !!value);
 }
 
 type ZoneRegionMap = {
@@ -835,6 +929,12 @@ function playerEquippedMeleeWeapons(character: CharacterLite | CharacterType | n
     }));
 }
 
+function isParryingWeapon(item: InventoryItem): boolean {
+  if (item.item_type !== "Melee Weapon") return false;
+  const props = Array.isArray(item.properties) ? item.properties : [];
+  return props.some((prop) => String(prop).trim().toLowerCase() === "parrying");
+}
+
 function playerEquippedRangedWeapons(character: CharacterLite | CharacterType | null | undefined): InventoryItem[] {
   return playerHeldItems(character).filter((item) => item.item_type === "Ranged Weapon");
 }
@@ -945,6 +1045,7 @@ export default function Combat({
   onRequestDrawGear,
   character,
   onQueueMeleeAction,
+  onQueueReactionRoll,
   onResolveMeleeAttack,
 }: CombatProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
@@ -958,6 +1059,7 @@ export default function Combat({
   const [initiativeEntries, setInitiativeEntries] = useState<InitiativeEntry[]>([]);
   const [initiativeCurrentIndex, setInitiativeCurrentIndex] = useState<number | null>(null);
   const [zoneLoot, setZoneLoot] = useState<ZoneLootDrop[]>([]);
+  const [pendingReactions, setPendingReactions] = useState<PendingReaction[]>([]);
   const [zoneHoverInfo, setZoneHoverInfo] = useState<{ x: number; y: number; zoneId: number; items: InventoryItem[] } | null>(null);
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
   const [monsterNameDrafts, setMonsterNameDrafts] = useState<Record<string, string>>({});
@@ -970,6 +1072,7 @@ export default function Combat({
   const [showZoneTint, setShowZoneTint] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isResolvingReaction, setIsResolvingReaction] = useState(false);
   const [imageNatural, setImageNatural] = useState<{ w: number; h: number } | null>(null);
   const [imageRect, setImageRect] = useState<ImageRect | null>(null);
   const isSyncingRef = useRef(false);
@@ -979,6 +1082,7 @@ export default function Combat({
   const draggedTokenRef = useRef<string | null>(null);
 
   const isDmUser = isDM && userEmail === DM_EMAIL;
+  const isDmViewer = isDM;
   const canDraw = isDmUser && !!mapUrl && !!imageRect;
   const playerEntries = useMemo<InitiativeEntry[]>(
     () =>
@@ -1076,6 +1180,7 @@ export default function Combat({
     if (currentEntry.kind === "monster") return currentEntry.participant_id;
     return actorCharacter?.id ?? null;
   }, [currentEntry, actorCharacter]);
+  const currentUserTokenId = character?.id ?? null;
   const actorTokenCharacter = actorTokenId ? characters.find((char) => char.id === actorTokenId) || null : null;
   const tokenStateById = useMemo(() => {
     const map = new Map<
@@ -1118,6 +1223,16 @@ export default function Combat({
     }
     return map;
   }, [initiativeEntries, characterById, monsterByParticipantId]);
+  const currentUserEntry = useMemo(() => {
+    if (!currentUserTokenId) return null;
+    return (
+      initiativeEntries.find(
+        (entry) =>
+          entry.participant_id === currentUserTokenId || entry.participant_id === `player:${currentUserTokenId}`
+      ) || null
+    );
+  }, [initiativeEntries, currentUserTokenId]);
+  const currentUserState = currentUserTokenId ? tokenStateById.get(currentUserTokenId) || null : null;
   const actorState = actorTokenId
     ? tokenStateById.get(actorTokenId) || {
         dead: false,
@@ -1220,6 +1335,359 @@ export default function Combat({
   const isActorClinging = Boolean(actorClingingTargetId);
   const isActorClungOnto = actorClungOntoByIds.length > 0;
   const actorHardLockedByHold = isActorGrappling || isActorGrappled || isActorClinging;
+  const pendingReaction = useMemo(() => {
+    if (pendingReactions.length === 0) return null;
+    if (currentUserTokenId) {
+      const matches = pendingReactions.filter((reaction) => reaction.targetCharacterId === currentUserTokenId);
+      if (matches.length > 0) {
+        return matches.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""))[0];
+      }
+    }
+    if (isDmViewer) {
+      const matches = pendingReactions.filter((reaction) => reaction.targetCharacterId.startsWith("monster:"));
+      if (matches.length > 0) {
+        return matches.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""))[0];
+      }
+    }
+    return null;
+  }, [pendingReactions, currentUserTokenId, isDmViewer]);
+  const reactionTargetId = pendingReaction?.targetCharacterId ?? null;
+  const reactionTargetEntry = useMemo(() => {
+    if (!reactionTargetId) return null;
+    return (
+      initiativeEntries.find(
+        (entry) => entry.participant_id === reactionTargetId || entry.participant_id === `player:${reactionTargetId}`
+      ) || null
+    );
+  }, [initiativeEntries, reactionTargetId]);
+  const reactionTargetState = reactionTargetId ? tokenStateById.get(reactionTargetId) || null : null;
+  const reactionTargetFastAvailable = reactionTargetEntry ? reactionTargetEntry.fast_available !== false : false;
+  const reactionTargetIsProne = Boolean(reactionTargetEntry?.prone);
+  const reactionTargetIsHeld =
+    Boolean(reactionTargetEntry?.grappled_by_id) ||
+    Boolean(reactionTargetEntry?.clung_onto_by_id) ||
+    Boolean((reactionTargetEntry?.clung_onto_by_ids || []).length > 0);
+  const reactionTargetIsDead = Boolean(reactionTargetState?.dead);
+  const reactionTargetIsBroken = Boolean(reactionTargetState?.physicalBroken || reactionTargetState?.mentalBroken);
+  const reactionTargetIsMonster =
+    Boolean(reactionTargetId?.startsWith("monster:")) || reactionTargetEntry?.kind === "monster";
+  const viewerCanControlReaction =
+    Boolean(pendingReaction) &&
+    (reactionTargetIsMonster ? isDmViewer : Boolean(reactionTargetId && reactionTargetId === currentUserTokenId));
+  const canReact =
+    combatMode &&
+    Boolean(pendingReaction) &&
+    viewerCanControlReaction &&
+    reactionTargetFastAvailable &&
+    !reactionTargetIsProne &&
+    !reactionTargetIsHeld &&
+    !reactionTargetIsDead &&
+    !reactionTargetIsBroken;
+  const sizeForTokenId = useCallback(
+    (tokenId: string | null | undefined): number => {
+      if (!tokenId) return 1;
+      const entry =
+        initiativeEntries.find(
+          (item) => item.participant_id === tokenId || item.participant_id === `player:${tokenId}`
+        ) || null;
+      if (entry?.kind === "monster") {
+        return Math.max(1, entry.monster_snapshot?.size ?? monsterByParticipantId.get(tokenId)?.monster_snapshot?.size ?? 1);
+      }
+      return 1;
+    },
+    [initiativeEntries, monsterByParticipantId]
+  );
+  const rollReaction = useCallback(
+    (opts: { attribute: "STR" | "AGL"; skill: "MELEE" | "MOVE"; bonusDice: number; gearDice: number }) => {
+      if (!character) {
+        return { successes: 0, attributeDice: [], skillDice: [], gearDice: [], skillIsNegative: false };
+      }
+      const attrCount = Math.max(0, character.attributes?.[opts.attribute] ?? 0);
+      const signedSkill = (character.skills?.[opts.skill] ?? 0) + opts.bonusDice;
+      const skillCount = Math.max(0, Math.abs(signedSkill));
+      const skillIsNegative = signedSkill < 0;
+      const gearCount = Math.max(0, opts.gearDice);
+      const attributeDice = rollD6Pool(attrCount);
+      const skillDice = rollD6Pool(skillCount);
+      const gearDice = rollD6Pool(gearCount);
+      const attrSixes = attributeDice.filter((d) => d === 6).length;
+      const skillSixes = skillDice.filter((d) => d === 6).length;
+      const gearSixes = gearDice.filter((d) => d === 6).length;
+      const successes = Math.max(0, attrSixes + gearSixes + skillSixes - (skillIsNegative ? skillSixes : 0));
+      return { successes, attributeDice, skillDice, gearDice, skillIsNegative };
+    },
+    [character]
+  );
+  const rollMonsterReaction = useCallback(
+    (opts: { attribute: "STR" | "AGL"; bonusDice: number; gearDice: number }) => {
+      if (!reactionTargetEntry?.monster_snapshot) {
+        return { successes: 0, attributeDice: [], skillDice: [], gearDice: [] };
+      }
+      const snapshot = reactionTargetEntry.monster_snapshot;
+      const attrCount = Math.max(0, opts.attribute === "STR" ? snapshot.str ?? 0 : snapshot.agl ?? 0);
+      const skillCount = Math.max(0, (snapshot.special ?? 0) + opts.bonusDice);
+      const gearCount = Math.max(0, opts.gearDice);
+      const attributeDice = rollD6Pool(attrCount);
+      const skillDice = rollD6Pool(skillCount);
+      const gearDice = rollD6Pool(gearCount);
+      const successes =
+        attributeDice.filter((d) => d === 6).length +
+        skillDice.filter((d) => d === 6).length +
+        gearDice.filter((d) => d === 6).length;
+      return { successes, attributeDice, skillDice, gearDice };
+    },
+    [reactionTargetEntry]
+  );
+  const reactionManeuver = pendingReaction?.maneuver ?? null;
+  const dodgeStandingBonus = reactionManeuver === "Slash" ? 0 : -2;
+  const dodgeProneBonus = reactionManeuver === "Slash" ? 2 : 0;
+  const sizeDelta = pendingReaction
+    ? sizeForTokenId(reactionTargetId) - sizeForTokenId(pendingReaction.attackerCharacterId)
+    : 0;
+  const parryOptions = useMemo(() => {
+    if (!pendingReaction || !canReact || !reactionManeuver || !REACTION_MANEUVER_SET.has(reactionManeuver)) {
+      return [] as Array<{ id: string; name: string; gearBonus: number; kind: "weapon" | "shield" }>;
+    }
+    if (reactionManeuver === "Shove") return [];
+    if (reactionTargetIsMonster) {
+      const snapshot = reactionTargetEntry?.monster_snapshot;
+      if (!snapshot) return [];
+      const weapons = monsterEquippedMeleeWeapons(snapshot)
+        .filter((weapon) => weapon.properties.some((prop) => prop === "parrying"))
+        .map((weapon) => ({
+          id: weapon.id,
+          name: weapon.name,
+          gearBonus: Math.max(0, weapon.gearBonus ?? 0),
+          kind: "weapon" as const,
+        }));
+      const shields = monsterEquippedShields(snapshot).map((shield) => ({
+        id: shield.id,
+        name: shield.name,
+        gearBonus: Math.max(0, shield.gearBonus ?? 0),
+        kind: "shield" as const,
+      }));
+      return [...weapons, ...shields];
+    }
+    if (!character) return [];
+    const held = playerHeldItems(character);
+    const shields = held.filter((item) => item.item_type === "Shield");
+    const parryingWeapons = held.filter((item) => isParryingWeapon(item));
+    return [
+      ...parryingWeapons.map((item) => ({
+        id: item.id,
+        name: item.name,
+        gearBonus: Math.max(0, item.gearBonus ?? 0),
+        kind: "weapon" as const,
+      })),
+      ...shields.map((item) => ({
+        id: item.id,
+        name: item.name,
+        gearBonus: Math.max(0, item.gearBonus ?? 0),
+        kind: "shield" as const,
+      })),
+    ];
+  }, [pendingReaction, canReact, reactionManeuver, character, reactionTargetIsMonster, reactionTargetEntry]);
+  const shouldShowReactionModal =
+    Boolean(pendingReaction) &&
+    REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
+    combatMode &&
+    viewerCanControlReaction;
+  const resolvePendingReaction = useCallback(
+    async (
+      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry",
+      parryItem?: { id: string; gearBonus: number; kind: "weapon" | "shield"; name: string }
+    ) => {
+      if (!pendingReaction) return;
+      const supabase = createClient();
+      const baseAttack: ResolvedMeleeAttack = {
+        id: pendingReaction.attackId,
+        attackerCharacterId: pendingReaction.attackerCharacterId,
+        targetCharacterId: pendingReaction.targetCharacterId,
+        weaponName: pendingReaction.weaponName,
+        weaponBaseDamage: pendingReaction.weaponBaseDamage,
+        maneuver: pendingReaction.maneuver,
+        totalSuccesses: pendingReaction.totalSuccesses,
+        requiredSuccesses: pendingReaction.requiredSuccesses ?? 1,
+        swingBonusDamage: pendingReaction.swingBonusDamage ?? 0,
+        disarmTargetItemId: pendingReaction.disarmTargetItemId ?? null,
+        disarmZoneId: pendingReaction.disarmZoneId ?? null,
+        destinationX: pendingReaction.destinationX ?? undefined,
+        destinationY: pendingReaction.destinationY ?? undefined,
+        shootTargetZoneId: pendingReaction.shootTargetZoneId ?? null,
+        shootAmmoItem: pendingReaction.shootAmmoItem ?? null,
+        skipReaction: true,
+      };
+
+      const maneuverBonus =
+        mode === "parry" && parryItem
+          ? parryItem.kind === "weapon"
+            ? reactionManeuver === "Stab"
+              ? -2
+              : reactionManeuver === "Strike"
+                ? 2
+                : 0
+            : reactionManeuver === "Stab" || reactionManeuver === "Strike"
+              ? 2
+              : 0
+          : 0;
+
+      if (mode === "pass") {
+        setIsResolvingReaction(true);
+        try {
+          const { error: clearError } = await supabase.rpc("combat_clear_reaction", {
+            p_reaction_id: pendingReaction.id,
+          });
+          if (clearError) {
+            setError(clearError.message);
+          }
+          await onResolveMeleeAttack?.(baseAttack);
+        } finally {
+          setIsResolvingReaction(false);
+        }
+        return;
+      }
+
+      if (!canReact || !reactionTargetId) return;
+
+      if (!reactionTargetIsMonster && onQueueReactionRoll) {
+        const rollAttribute = mode === "dodge-stand" || mode === "dodge-prone" ? "AGL" : "STR";
+        const rollSkill = mode === "dodge-stand" || mode === "dodge-prone" ? "MOVE" : "MELEE";
+        const bonusDice =
+          mode === "dodge-stand"
+            ? dodgeStandingBonus
+            : mode === "dodge-prone"
+              ? dodgeProneBonus
+              : maneuverBonus + sizeDelta;
+        const gearItemId = mode === "parry" && parryItem ? parryItem.id : null;
+        onQueueReactionRoll({
+          id: `reaction-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+          reactionId: pendingReaction.id,
+          targetCharacterId: reactionTargetId,
+          mode: mode === "parry" ? "parry" : mode,
+          rollAttribute,
+          rollSkill,
+          bonusDice,
+          gearItemId,
+          applyProne: mode === "dodge-prone",
+          attack: baseAttack,
+        });
+        return;
+      }
+
+      setIsResolvingReaction(true);
+      try {
+        let reducedSuccesses = baseAttack.totalSuccesses;
+        if (reactionTargetIsMonster) {
+          if (mode === "dodge-stand") {
+            const roll = rollMonsterReaction({
+              attribute: "AGL",
+              bonusDice: dodgeStandingBonus,
+              gearDice: 0,
+            });
+            if (isDmViewer) {
+              setMonsterRollResult({
+                actionLabel: "Dodge (Standing)",
+                attributeDice: roll.attributeDice,
+                skillDice: roll.skillDice,
+                gearDice: roll.gearDice,
+                successes: roll.successes,
+              });
+            }
+            reducedSuccesses = Math.max(0, baseAttack.totalSuccesses - roll.successes);
+          } else if (mode === "dodge-prone") {
+            const roll = rollMonsterReaction({
+              attribute: "AGL",
+              bonusDice: dodgeProneBonus,
+              gearDice: 0,
+            });
+            if (isDmViewer) {
+              setMonsterRollResult({
+                actionLabel: "Dodge (Fall Prone)",
+                attributeDice: roll.attributeDice,
+                skillDice: roll.skillDice,
+                gearDice: roll.gearDice,
+                successes: roll.successes,
+              });
+            }
+            reducedSuccesses = Math.max(0, baseAttack.totalSuccesses - roll.successes);
+          } else if (mode === "parry" && parryItem) {
+            const roll = rollMonsterReaction({
+              attribute: "STR",
+              bonusDice: maneuverBonus + sizeDelta,
+              gearDice: parryItem.gearBonus,
+            });
+            if (isDmViewer) {
+              setMonsterRollResult({
+                actionLabel: `Parry (${parryItem.name})`,
+                attributeDice: roll.attributeDice,
+                skillDice: roll.skillDice,
+                gearDice: roll.gearDice,
+                successes: roll.successes,
+              });
+            }
+            reducedSuccesses = Math.max(0, baseAttack.totalSuccesses - roll.successes);
+          }
+        } else {
+          const roll = rollReaction({
+            attribute: mode === "parry" ? "STR" : "AGL",
+            skill: mode === "parry" ? "MELEE" : "MOVE",
+            bonusDice:
+              mode === "dodge-stand"
+                ? dodgeStandingBonus
+                : mode === "dodge-prone"
+                  ? dodgeProneBonus
+                  : maneuverBonus + sizeDelta,
+            gearDice: mode === "parry" && parryItem ? parryItem.gearBonus : 0,
+          });
+          reducedSuccesses = Math.max(0, baseAttack.totalSuccesses - roll.successes);
+        }
+
+        const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
+          p_actor_token_id: reactionTargetId,
+        });
+        if (consumeError) {
+          setError(consumeError.message);
+        }
+
+        if (mode === "dodge-prone") {
+          const { error: proneError } = await supabase.rpc("combat_set_prone_for_token", {
+            p_actor_token_id: reactionTargetId,
+            p_prone: true,
+          });
+          if (proneError) {
+            setError(proneError.message);
+          }
+        }
+
+        const { error: clearError } = await supabase.rpc("combat_clear_reaction", {
+          p_reaction_id: pendingReaction.id,
+        });
+        if (clearError) {
+          setError(clearError.message);
+        }
+
+        const finalAttack = { ...baseAttack, totalSuccesses: reducedSuccesses };
+        await onResolveMeleeAttack?.(finalAttack);
+      } finally {
+        setIsResolvingReaction(false);
+      }
+    },
+    [
+      pendingReaction,
+      canReact,
+      rollReaction,
+      rollMonsterReaction,
+      dodgeStandingBonus,
+      dodgeProneBonus,
+      reactionManeuver,
+      sizeDelta,
+      reactionTargetId,
+      reactionTargetIsMonster,
+      isDmViewer,
+      onResolveMeleeAttack,
+      onQueueReactionRoll,
+    ]
+  );
   const actorHoldCounterpartIds = useMemo(() => {
     const ids = new Set<string>();
     if (actorGrapplingTargetId) ids.add(actorGrapplingTargetId);
@@ -2260,7 +2728,7 @@ export default function Combat({
     const fullSelect = await supabase
       .from("combat_state")
       .select(
-        "id, map_url, zone_lines, token_positions, engagements, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, zone_loot, updated_by_email, updated_at"
+        "id, map_url, zone_lines, token_positions, engagements, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, zone_loot, pending_reactions, updated_by_email, updated_at"
       )
       .eq("id", 1)
       .maybeSingle<CombatStateRow>();
@@ -2275,14 +2743,14 @@ export default function Combat({
           "id, map_url, zone_lines, token_positions, engagements, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, updated_by_email, updated_at"
         )
         .eq("id", 1)
-        .maybeSingle<Omit<CombatStateRow, "zone_loot">>();
+        .maybeSingle<Omit<CombatStateRow, "zone_loot" | "pending_reactions">>();
       if (fallbackSelect.error) {
         setError(fallbackSelect.error.message);
         isSyncingRef.current = false;
         return;
       }
       data = fallbackSelect.data
-        ? ({ ...fallbackSelect.data, zone_loot: [] } as CombatStateRow)
+        ? ({ ...fallbackSelect.data, zone_loot: [], pending_reactions: [] } as CombatStateRow)
         : null;
       loadError = null;
     }
@@ -2322,6 +2790,7 @@ export default function Combat({
     setInitiativeEntries(normalizeInitiativeEntries(data?.initiative_entries));
     setInitiativeCurrentIndex(data?.initiative_current_index ?? null);
     setZoneLoot(normalizeZoneLoot(data?.zone_loot));
+    setPendingReactions(normalizePendingReactions(data?.pending_reactions));
     setError(null);
     isSyncingRef.current = false;
   }, []);
@@ -4848,7 +5317,70 @@ export default function Combat({
   };
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 min-h-[560px]">
+    <>
+      {shouldShowReactionModal && pendingReaction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+          <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
+                <p className="text-sm text-amber-200/80">
+                  Incoming: {pendingReaction.maneuver} ({pendingReaction.weaponName})
+                </p>
+                <p className="text-xs text-amber-200/70">Successes: {pendingReaction.totalSuccesses}</p>
+              </div>
+              <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-semibold text-amber-200">
+                Fast Action
+              </span>
+            </div>
+
+            {!canReact && (
+              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
+                Reaction unavailable (no fast action or restricted).
+              </div>
+            )}
+
+            <div className="mt-4 grid grid-cols-1 gap-2">
+              {canReact && (
+                <>
+                  <button
+                    onClick={() => void resolvePendingReaction("dodge-stand")}
+                    disabled={isResolvingReaction}
+                    className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                  >
+                    Dodge (Standing)
+                  </button>
+                  <button
+                    onClick={() => void resolvePendingReaction("dodge-prone")}
+                    disabled={isResolvingReaction}
+                    className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                  >
+                    Dodge (Fall Prone)
+                  </button>
+                  {parryOptions.map((option) => (
+                    <button
+                      key={`parry-${option.id}`}
+                      onClick={() => void resolvePendingReaction("parry", option)}
+                      disabled={isResolvingReaction}
+                      className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-60"
+                    >
+                      {`Parry (${option.name})`}
+                    </button>
+                  ))}
+                </>
+              )}
+              <button
+                onClick={() => void resolvePendingReaction("pass")}
+                disabled={isResolvingReaction}
+                className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600 disabled:opacity-60"
+              >
+                Pass
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 min-h-[560px]">
       <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
         <h3 className="text-xl font-bold text-amber-300 mb-3">Combat Actions</h3>
         <div className="rounded border border-amber-500/20 bg-gray-900/30 p-3 text-sm text-amber-100/90 mb-3">
@@ -5639,5 +6171,6 @@ export default function Combat({
         </div>
       </aside>
     </div>
+    </>
   );
 }

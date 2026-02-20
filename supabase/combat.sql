@@ -12,6 +12,7 @@ create table if not exists public.combat_state (
   initiative_monsters jsonb not null default '[]'::jsonb,
   initiative_entries jsonb not null default '[]'::jsonb,
   initiative_current_index int null,
+  pending_reactions jsonb not null default '[]'::jsonb,
   updated_by_email text null,
   updated_at timestamptz not null default now()
 );
@@ -40,6 +41,7 @@ alter table public.combat_state add column if not exists combat_mode boolean not
 alter table public.combat_state add column if not exists initiative_monsters jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists initiative_entries jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists initiative_current_index int null;
+alter table public.combat_state add column if not exists pending_reactions jsonb not null default '[]'::jsonb;
 
 alter table public.monsters add column if not exists name text;
 alter table public.monsters add column if not exists physical int;
@@ -136,9 +138,9 @@ for delete to authenticated
 using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
 
 insert into public.combat_state (
-  id, map_url, zone_lines, token_positions, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, updated_by_email
+  id, map_url, zone_lines, token_positions, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, pending_reactions, updated_by_email
 )
-values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, null)
+values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, '[]'::jsonb, null)
 on conflict (id) do nothing;
 
 create or replace function public.combat_upsert_player_token(
@@ -834,6 +836,290 @@ end;
 $$;
 
 grant execute on function public.combat_use_fast_or_slow() to authenticated;
+
+create or replace function public.combat_enqueue_reaction(
+  p_reaction jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_reactions jsonb;
+  v_id text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_reaction is null or jsonb_typeof(p_reaction) <> 'object' then
+    raise exception 'Reaction payload is required';
+  end if;
+
+  v_id := nullif(coalesce(p_reaction->>'id', ''), '');
+  if v_id is null then
+    raise exception 'Reaction id is required';
+  end if;
+
+  select coalesce(pending_reactions, '[]'::jsonb)
+  into v_reactions
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if jsonb_typeof(v_reactions) <> 'array' then
+    v_reactions := '[]'::jsonb;
+  end if;
+
+  if exists (select 1 from jsonb_array_elements(v_reactions) as r where r->>'id' = v_id) then
+    return;
+  end if;
+
+  v_reactions := v_reactions || jsonb_build_array(p_reaction);
+
+  update public.combat_state
+  set pending_reactions = v_reactions,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_enqueue_reaction(jsonb) to authenticated;
+
+create or replace function public.combat_clear_reaction(
+  p_reaction_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_reactions jsonb;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_reaction_id is null or btrim(p_reaction_id) = '' then
+    raise exception 'Reaction id is required';
+  end if;
+
+  select coalesce(pending_reactions, '[]'::jsonb)
+  into v_reactions
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if jsonb_typeof(v_reactions) <> 'array' then
+    v_reactions := '[]'::jsonb;
+  end if;
+
+  select coalesce(jsonb_agg(r), '[]'::jsonb)
+  into v_reactions
+  from jsonb_array_elements(v_reactions) as r
+  where r->>'id' <> p_reaction_id;
+
+  update public.combat_state
+  set pending_reactions = v_reactions,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_clear_reaction(text) to authenticated;
+
+create or replace function public.combat_use_reaction_action(
+  p_actor_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_available boolean;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can react';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can react';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only react for your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only react for your own character';
+    end if;
+  end if;
+
+  v_available := coalesce((v_entry ->> 'fast_available')::boolean, true);
+  if not v_available then
+    raise exception 'No fast action available';
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{fast_available}', 'false'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_use_reaction_action(text) to authenticated;
+
+create or replace function public.combat_set_prone_for_token(
+  p_actor_token_id text,
+  p_prone boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    raise exception 'No initiative entries';
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can update prone';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can update prone';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{prone}', to_jsonb(coalesce(p_prone, false)), true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_set_prone_for_token(text, boolean) to authenticated;
 
 create or replace function public.combat_apply_feint(
   p_actor_token_id text,

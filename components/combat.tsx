@@ -73,6 +73,66 @@ const {
 const FLAMING_LONGSWORD_PROPERTY = "flaming longsword";
 const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
 const LAMP_OIL_KEY = "lamp oil";
+const FAST_FOOTWORK_TALENT_ID = "talent-fast-footwork";
+
+type GroupedItemDisplay = {
+  key: string;
+  label: string;
+  count: number;
+  representative: InventoryItem;
+  candidateIds: string[];
+};
+
+const itemGroupingKey = (item: InventoryItem): string => {
+  const name = String(item.name || "").trim().toLowerCase();
+  const gear = typeof item.gearBonus === "number" && !Number.isNaN(item.gearBonus) ? Math.trunc(item.gearBonus) : null;
+  return `${name}::${gear ?? "none"}`;
+};
+
+const itemGroupingLabel = (item: InventoryItem): string => {
+  const gear = typeof item.gearBonus === "number" && !Number.isNaN(item.gearBonus) ? Math.trunc(item.gearBonus) : null;
+  if (gear !== null) return `${item.name} (+${gear})`;
+  return item.name;
+};
+
+const groupItemsForDisplay = (items: InventoryItem[]): GroupedItemDisplay[] => {
+  const groups = new Map<string, GroupedItemDisplay>();
+  for (const item of items) {
+    const key = itemGroupingKey(item);
+    const countDelta = Math.max(1, Math.trunc(item.quantity ?? 1));
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += countDelta;
+      existing.candidateIds.push(item.id);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: itemGroupingLabel(item),
+      count: countDelta,
+      representative: item,
+      candidateIds: [item.id],
+    });
+  }
+  return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label));
+};
+
+const hasTalentLevelAtLeast = (
+  character: CharacterLite | null | undefined,
+  talentId: string,
+  minLevel: number
+): boolean => {
+  if (!character) return false;
+  const levels = character.talent_levels || {};
+  const mapLevelRaw = levels[talentId];
+  const mapLevel = typeof mapLevelRaw === "number" && Number.isFinite(mapLevelRaw) ? Math.trunc(mapLevelRaw) : 0;
+  const listLevel = (character.talents || []).reduce((best, talent) => {
+    if (!talent || talent.id !== talentId) return best;
+    const lvl = typeof talent.level === "number" && Number.isFinite(talent.level) ? Math.trunc(talent.level) : 0;
+    return Math.max(best, lvl);
+  }, 0);
+  return Math.max(mapLevel, listLevel) >= minLevel;
+};
 
 export default function Combat({
   isDM,
@@ -196,6 +256,10 @@ export default function Combat({
             .map((drop) => drop.item)
         : [],
     [selectedZoneTarget, zoneLoot]
+  );
+  const selectedZoneLootSummary = useMemo(
+    () => groupItemsForDisplay(selectedZoneLootItems),
+    [selectedZoneLootItems]
   );
   const zoneRegionMap = useMemo(() => buildZoneRegionMap(zoneLines), [zoneLines]);
   const zoneAdjacency = useMemo(() => buildZoneAdjacency(zoneRegionMap), [zoneRegionMap]);
@@ -548,6 +612,17 @@ export default function Combat({
   const reactionTargetIsBroken = Boolean(reactionTargetState?.physicalBroken || reactionTargetState?.mentalBroken);
   const reactionTargetIsMonster =
     Boolean(reactionTargetId?.startsWith("monster:")) || reactionTargetEntry?.kind === "monster";
+  const reactionTargetCharacter = reactionTargetId ? characterById.get(reactionTargetId) || null : null;
+  const reactionTargetHasFastFootworkLv1 = hasTalentLevelAtLeast(
+    reactionTargetCharacter,
+    FAST_FOOTWORK_TALENT_ID,
+    1
+  );
+  const freeDodgeAvailable =
+    Boolean(pendingReaction) &&
+    !reactionTargetIsMonster &&
+    reactionTargetHasFastFootworkLv1 &&
+    !Boolean(reactionTargetEntry?.fast_footwork_dodge_used);
   const viewerCanControlReaction =
     Boolean(pendingReaction) &&
     (reactionTargetIsMonster ? isDmViewer : Boolean(reactionTargetId && reactionTargetId === currentUserTokenId));
@@ -627,7 +702,17 @@ export default function Combat({
   const sizeDelta = pendingReaction
     ? sizeForTokenId(reactionTargetId) - sizeForTokenId(pendingReaction.attackerCharacterId)
     : 0;
-  const canDodgeReaction = canReact && !isSkillBlockedForToken(reactionTargetId, "MOVE");
+  const canDodgeReaction =
+    combatMode &&
+    Boolean(pendingReaction) &&
+    viewerCanControlReaction &&
+    (reactionTargetFastAvailable || freeDodgeAvailable) &&
+    !reactionTargetIsProne &&
+    !reactionTargetIsHeld &&
+    !reactionTargetIsCovered &&
+    !reactionTargetIsDead &&
+    !reactionTargetIsBroken &&
+    !isSkillBlockedForToken(reactionTargetId, "MOVE");
   const canParryReaction = canReact && !isSkillBlockedForToken(reactionTargetId, "MELEE");
   const parryOptions = useMemo(() => {
     if (!pendingReaction || !canParryReaction || !reactionManeuver || !REACTION_MANEUVER_SET.has(reactionManeuver)) {
@@ -774,13 +859,9 @@ export default function Combat({
         return;
       }
 
-      if (!canReact || !reactionTargetId) return;
-      if ((mode === "dodge-stand" || mode === "dodge-prone") && isSkillBlockedForToken(reactionTargetId, "MOVE")) {
-        return;
-      }
-      if (mode === "parry" && isSkillBlockedForToken(reactionTargetId, "MELEE")) {
-        return;
-      }
+      if (!reactionTargetId) return;
+      if ((mode === "dodge-stand" || mode === "dodge-prone") && !canDodgeReaction) return;
+      if (mode === "parry" && !canParryReaction) return;
 
       const tauntPenalty = await consumeTauntPenaltyForToken(reactionTargetId);
 
@@ -914,6 +995,8 @@ export default function Combat({
     [
       pendingReaction,
       canReact,
+      canDodgeReaction,
+      canParryReaction,
       rollReaction,
       rollMonsterReaction,
       dodgeStandingBonus,
@@ -2406,6 +2489,10 @@ export default function Combat({
     actorRestrictedToCrawl,
     actorRestrictedToRun,
   ]);
+  const pickUpActionOptionGroups = useMemo(
+    () => groupItemsForDisplay(pickUpActionOptions),
+    [pickUpActionOptions]
+  );
 
   const loadCombatState = useCallback(async () => {
     if (isSyncingRef.current) return;
@@ -2489,15 +2576,26 @@ export default function Combat({
     const supabase = createClient();
     const { data, error: loadError } = await supabase
       .from("characters")
-      .select("id, name, email, icon_url, attributes, max_attributes, skills, inventory, equipment_slots, spirits, dead")
+      .select("id, name, email, icon_url, attributes, max_attributes, skills, inventory, equipment_slots, spirits, dead, talent_levels, talents")
       .order("name", { ascending: true });
 
-    if (loadError) {
+    let rows = data as CharacterLite[] | null;
+    if (loadError && loadError.code === "42703") {
+      const fallback = await supabase
+        .from("characters")
+        .select("id, name, email, icon_url, attributes, max_attributes, skills, inventory, equipment_slots, spirits, dead, talent_levels")
+        .order("name", { ascending: true });
+      if (fallback.error) {
+        setError(fallback.error.message);
+        return;
+      }
+      rows = (fallback.data || []) as CharacterLite[];
+    } else if (loadError) {
       setError(loadError.message);
       return;
     }
 
-    const normalized = ((data ?? []) as CharacterLite[]).map((char) => ({
+    const normalized = ((rows ?? []) as CharacterLite[]).map((char) => ({
       ...char,
       inventory: normalizeInventoryItems(char.inventory || []),
     }));
@@ -4397,18 +4495,21 @@ export default function Combat({
     setSelectedTokenId(null);
   };
 
-  const requestPickUpAction = async (item: InventoryItem) => {
+  const requestPickUpAction = async (option: GroupedItemDisplay) => {
     if (!currentEntry || !actorTokenId || !selectedZoneTarget) return;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
     if (!swingCleared) return;
+    const candidateIds = option.candidateIds.filter((id) => Boolean(id));
+    if (candidateIds.length === 0) return;
+    const selectedItemId = candidateIds[Math.floor(Math.random() * candidateIds.length)];
 
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_pick_up_zone_item", {
       p_actor_token_id: actorTokenId,
       p_zone_id: selectedZoneTarget.zoneId,
-      p_item_id: item.id,
+      p_item_id: selectedItemId,
     });
     if (rpcError) {
       setError(rpcError.message);
@@ -5738,7 +5839,7 @@ export default function Combat({
               </div>
             </div>
 
-            {!canReact && (
+            {!canDodgeReaction && !canParryReaction && (
               <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
                 Reaction unavailable (no fast action or restricted).
               </div>
@@ -5750,14 +5851,22 @@ export default function Combat({
                   <button
                     onClick={() => void resolvePendingReaction("dodge-stand")}
                     disabled={isResolvingReaction || !canDodgeReaction}
-                    className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                      freeDodgeAvailable
+                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                    }`}
                   >
                     Dodge (Standing)
                   </button>
                   <button
                     onClick={() => void resolvePendingReaction("dodge-prone")}
                     disabled={isResolvingReaction || !canDodgeReaction}
-                    className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                      freeDodgeAvailable
+                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                    }`}
                   >
                     Dodge (Fall Prone)
                   </button>
@@ -5796,8 +5905,10 @@ export default function Combat({
           {selectedZoneTarget && (
             <div className="mt-1 text-xs text-amber-200/80">
               {`On Ground: ${
-                selectedZoneLootItems.length > 0
-                  ? selectedZoneLootItems.map((item) => item.name).join(", ")
+                selectedZoneLootSummary.length > 0
+                  ? selectedZoneLootSummary
+                      .map((group) => (group.count > 1 ? `${group.label} x${group.count}` : group.label))
+                      .join(", ")
                   : "None"
               }, Cover: ${zoneCoverIds.includes(selectedZoneTarget.zoneId) ? "Yes" : "No"}`}
             </div>
@@ -6017,13 +6128,13 @@ export default function Combat({
               {option.label}
             </button>
           ))}
-          {pickUpActionOptions.map((item) => (
+          {pickUpActionOptionGroups.map((option) => (
             <button
-              key={`pickup-${selectedZoneTarget?.zoneId ?? "zone"}-${item.id}`}
-              onClick={() => void requestPickUpAction(item)}
+              key={`pickup-${selectedZoneTarget?.zoneId ?? "zone"}-${option.key}`}
+              onClick={() => void requestPickUpAction(option)}
               className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
             >
-              {`Pick Up (${item.name})`}
+              {`Pick Up (${option.count > 1 ? `${option.label} x${option.count}` : option.label})`}
             </button>
           ))}
           {canUseGetUpFromSelection && (
@@ -6501,7 +6612,11 @@ export default function Combat({
             >
               <div className="font-semibold text-amber-300">{`Zone ${zoneHoverInfo.zoneId}`}</div>
               {zoneHoverInfo.items.length > 0 && (
-                <div>{zoneHoverInfo.items.map((item) => item.name).join(", ")}</div>
+                <div>
+                  {groupItemsForDisplay(zoneHoverInfo.items)
+                    .map((group) => (group.count > 1 ? `${group.label} x${group.count}` : group.label))
+                    .join(", ")}
+                </div>
               )}
               {zoneHoverInfo.hasCover && <div>Cover</div>}
             </div>

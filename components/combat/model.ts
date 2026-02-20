@@ -57,6 +57,7 @@ export type InitiativeEntry = {
   roll: number | null;
   slow_available: boolean;
   fast_available: boolean;
+  fast_footwork_dodge_used?: boolean;
   prone?: boolean;
   covered?: boolean;
   swing_weapon_item_id?: string | null;
@@ -106,6 +107,8 @@ export type CharacterLite = {
   equipment_slots?: CharacterType["equipment_slots"];
   max_attributes?: CharacterType["max_attributes"];
   skills?: CharacterType["skills"];
+  talent_levels?: CharacterType["talent_levels"];
+  talents?: CharacterType["talents"];
 };
 
 export type ZoneLootDrop = {
@@ -462,6 +465,7 @@ export function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undef
         roll: typeof e.roll === "number" ? e.roll : null,
         slow_available: e.slow_available ?? true,
         fast_available: e.fast_available ?? true,
+        fast_footwork_dodge_used: Boolean(e.fast_footwork_dodge_used),
         prone: e.prone ?? false,
         covered: e.covered ?? false,
         swing_weapon_item_id:

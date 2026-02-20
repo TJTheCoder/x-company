@@ -99,6 +99,29 @@ const skillAttributeFor = (skillName: string | null | undefined): keyof Attribut
   return skill ? skill.attribute : null;
 };
 
+const rollableGearBonus = (item: InventoryItem | null | undefined): number => {
+  if (!item) return 0;
+  if (item.item_type === "Armor" || item.item_type === "Helmet") {
+    if (typeof item.effective_gear_bonus === "number" && !Number.isNaN(item.effective_gear_bonus)) {
+      return Math.max(0, Math.trunc(item.effective_gear_bonus));
+    }
+  }
+  return Math.max(0, Math.trunc(item.gearBonus ?? 0));
+};
+
+const formatGearBonusLabel = (item: InventoryItem): string => {
+  const trueBonus = Math.max(0, Math.trunc(item.gearBonus ?? 0));
+  if (item.item_type !== "Armor" && item.item_type !== "Helmet") {
+    return `(+${trueBonus})`;
+  }
+  const effectiveBonus =
+    typeof item.effective_gear_bonus === "number" && !Number.isNaN(item.effective_gear_bonus)
+      ? Math.max(0, Math.trunc(item.effective_gear_bonus))
+      : trueBonus;
+  if (effectiveBonus === trueBonus) return `(+${trueBonus})`;
+  return `(+${trueBonus}/+${effectiveBonus})`;
+};
+
 export default function Character({
   character,
   updateCharacter,
@@ -386,6 +409,24 @@ export default function Character({
     }
   };
 
+  const resetEffectiveAfterGearUse = (gearItem: InventoryItem | null | undefined) => {
+    if (!character || !gearItem) return;
+    if (gearItem.item_type !== "Armor" && gearItem.item_type !== "Helmet") return;
+    const trueBonus = Math.max(0, Math.trunc(gearItem.gearBonus ?? 0));
+    const effectiveBonus =
+      typeof gearItem.effective_gear_bonus === "number" && !Number.isNaN(gearItem.effective_gear_bonus)
+        ? Math.max(0, Math.trunc(gearItem.effective_gear_bonus))
+        : trueBonus;
+    if (effectiveBonus === trueBonus) return;
+    const updatedInventory = (character.inventory || []).map((item) =>
+      item.id === gearItem.id ? { ...item, effective_gear_bonus: trueBonus } : item
+    );
+    const updates = { inventory: updatedInventory };
+    updateCharacter(updates);
+    saveCharacter(updates);
+    setSelectedGear((prev) => (prev && prev.id === gearItem.id ? { ...prev, effective_gear_bonus: trueBonus } : prev));
+  };
+
   const rollDice = (attr: keyof Attributes, pool: DicePool) => {
     if (!character) return;
 
@@ -395,7 +436,7 @@ export default function Character({
     const normalizedBonus = Number.isNaN(bonus) ? 0 : bonus;
     const modifiedSkillCount = skillPoints + normalizedBonus;
     const skillIsNegative = modifiedSkillCount < 0;
-    const gearBonus = selectedGear?.gearBonus ?? 0;
+    const gearBonus = rollableGearBonus(selectedGear);
 
     let attributeDice: number[] = [];
     let skillDice: number[] = [];
@@ -424,6 +465,9 @@ export default function Character({
         gearItemId: selectedGear?.id,
       },
     }));
+    if (pool === "gear" || pool === "attribute+gear" || pool === "skill+gear" || pool === "all") {
+      resetEffectiveAfterGearUse(selectedGear);
+    }
   };
 
   const pushDice = async (attr: keyof Attributes, pushPools: string[]) => {
@@ -673,7 +717,7 @@ export default function Character({
     const signedSkillCount = (character.skills[rollSkill] ?? 0) + actionBonusDice;
     const skillCount = Math.abs(signedSkillCount);
     const skillIsNegative = signedSkillCount < 0;
-    const gearCount = usesWeaponGear ? Math.max(0, weapon?.gearBonus ?? 0) : 0;
+    const gearCount = usesWeaponGear ? rollableGearBonus(weapon) : 0;
 
     setRollStates((prev) => ({
       ...prev,
@@ -688,6 +732,9 @@ export default function Character({
         gearItemId: weapon?.id,
       },
     }));
+    if (usesWeaponGear) {
+      resetEffectiveAfterGearUse(weapon);
+    }
 
     onConsumePendingMeleeAction(pendingMeleeAction.id);
     handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
@@ -751,7 +798,7 @@ export default function Character({
       : (character.skills[rollSkill] ?? 0) + (pendingReactionRoll.bonusDice ?? 0);
     const skillCount = Math.abs(signedSkillCount);
     const skillIsNegative = hasFixedSkill ? false : signedSkillCount < 0;
-    const gearCount = usesGear ? Math.max(0, gearItem?.gearBonus ?? 0) : 0;
+    const gearCount = usesGear ? rollableGearBonus(gearItem) : 0;
 
     setRollStates((prev) => ({
       ...prev,
@@ -766,6 +813,9 @@ export default function Character({
         gearItemId: gearItem?.id,
       },
     }));
+    if (usesGear) {
+      resetEffectiveAfterGearUse(gearItem);
+    }
 
     onConsumePendingReactionRoll(pendingReactionRoll.id);
     handledPendingReactionRollIdRef.current = pendingReactionRoll.id;
@@ -825,7 +875,7 @@ export default function Character({
                       : "bg-gray-700 text-purple-200 hover:bg-gray-600"
                   }`}
                 >
-                  {item.name} (+{item.gearBonus})
+                  {item.name} {formatGearBonusLabel(item)}
                 </button>
               ))}
             </div>

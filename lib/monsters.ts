@@ -57,6 +57,33 @@ const normalizeTrait = (trait: string): string => {
 
 const makeGearId = (name: string, idx: number): string =>
   `monster-gear:${name.toLowerCase().replace(/\s+/g, "-")}:${Date.now()}:${idx}`;
+const gearGroupKey = (item: InventoryItem): string => {
+  const gear = typeof item.gearBonus === "number" && !Number.isNaN(item.gearBonus) ? Math.trunc(item.gearBonus) : null;
+  return `${String(item.name || "").trim().toLowerCase()}::${gear ?? "none"}`;
+};
+const gearGroupLabel = (item: InventoryItem): string => {
+  const gear = typeof item.gearBonus === "number" && !Number.isNaN(item.gearBonus) ? Math.trunc(item.gearBonus) : null;
+  if (gear !== null) return `${item.name} (+${gear})`;
+  return item.name;
+};
+const summarizeGearForDisplay = (gear: InventoryItem[]): string => {
+  if (!gear || gear.length === 0) return "None";
+  const grouped = new Map<string, { label: string; count: number }>();
+  for (const item of gear) {
+    const key = gearGroupKey(item);
+    const count = Math.max(1, Math.trunc(item.quantity ?? 1));
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.count += count;
+      continue;
+    }
+    grouped.set(key, { label: gearGroupLabel(item), count });
+  }
+  return Array.from(grouped.values())
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((entry) => (entry.count > 1 ? `${entry.label} x${entry.count}` : entry.label))
+    .join(", ");
+};
 const artsCatalog = artsCatalogData as Art[];
 const artByName = new Map(artsCatalog.map((art) => [art.name.trim().toLowerCase(), art]));
 
@@ -167,7 +194,7 @@ export function formatMonsterTooltip(snapshot: MonsterSnapshot): string {
     left: null,
     right: null,
   };
-  const gear = gearList.length > 0 ? gearList.map((item) => item.name).join(", ") : "None";
+  const gear = summarizeGearForDisplay(gearList);
   const arts = artsList.length > 0 ? artsList.map((art) => art.name).join(", ") : "None";
   const equipped = [
     slots.helmet ? `Helmet: ${slots.helmet}` : null,

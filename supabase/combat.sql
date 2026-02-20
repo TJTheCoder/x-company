@@ -61,6 +61,8 @@ alter table public.monsters alter column size set default 1;
 update public.monsters set size = 1 where size is null;
 alter table public.monsters alter column size set not null;
 alter table public.characters add column if not exists dead boolean not null default false;
+alter table public.characters add column if not exists talent_levels jsonb not null default '{}'::jsonb;
+alter table public.characters add column if not exists talents jsonb not null default '[]'::jsonb;
 
 do $$
 begin
@@ -341,7 +343,12 @@ begin
 
   select coalesce(
     jsonb_agg(
-      jsonb_set((r.value->'entry'), '{slow_available}', 'true'::jsonb, true)
+      jsonb_set(
+        jsonb_set((r.value->'entry'), '{slow_available}', 'true'::jsonb, true),
+        '{fast_footwork_dodge_used}',
+        'false'::jsonb,
+        true
+      )
       order by r.ord
     ),
     '[]'::jsonb
@@ -1364,6 +1371,155 @@ end;
 $$;
 
 grant execute on function public.combat_use_reaction_action(text) to authenticated;
+
+create or replace function public.combat_consume_fast_footwork_dodge(
+  p_actor_token_id text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_used boolean := false;
+  v_has_talent boolean := false;
+  v_talent_levels jsonb;
+  v_talents jsonb;
+  v_level int := 0;
+  v_talent jsonb;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    return false;
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    return false;
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+  if v_entry_kind <> 'player' then
+    return false;
+  end if;
+
+  begin
+    v_actor_uuid := p_actor_token_id::uuid;
+  exception when others then
+    return false;
+  end;
+
+  if not v_is_dm then
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only react for your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only react for your own character';
+    end if;
+  end if;
+
+  begin
+    v_used := coalesce((v_entry->>'fast_footwork_dodge_used')::boolean, false);
+  exception when others then
+    v_used := false;
+  end;
+  if v_used then
+    return false;
+  end if;
+
+  select coalesce(talent_levels, '{}'::jsonb), coalesce(talents, '[]'::jsonb)
+  into v_talent_levels, v_talents
+  from public.characters
+  where id = v_actor_uuid
+  limit 1;
+
+  if jsonb_typeof(v_talent_levels) = 'object' then
+    begin
+      v_level := coalesce((v_talent_levels->>'talent-fast-footwork')::int, 0);
+    exception when others then
+      v_level := 0;
+    end;
+    if v_level >= 1 then
+      v_has_talent := true;
+    end if;
+  end if;
+
+  if not v_has_talent and jsonb_typeof(v_talents) = 'array' then
+    for v_talent in
+      select value
+      from jsonb_array_elements(v_talents) as t(value)
+    loop
+      if coalesce(v_talent->>'id', '') <> 'talent-fast-footwork' then
+        continue;
+      end if;
+      begin
+        v_level := coalesce((v_talent->>'level')::int, 0);
+      exception when others then
+        v_level := 0;
+      end;
+      if v_level >= 1 then
+        v_has_talent := true;
+        exit;
+      end if;
+    end loop;
+  end if;
+
+  if not v_has_talent then
+    return false;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{fast_footwork_dodge_used}', 'true'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+
+  return true;
+end;
+$$;
+
+grant execute on function public.combat_consume_fast_footwork_dodge(text) to authenticated;
 
 create or replace function public.combat_set_prone_for_token(
   p_actor_token_id text,

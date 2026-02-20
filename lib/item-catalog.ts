@@ -251,9 +251,21 @@ function resolveCanonical(item: Partial<InventoryItem>): CanonicalItem | null {
 
 export function normalizeInventoryItem(item: InventoryItem): InventoryItem {
   const canonical = resolveCanonical(item);
-  if (!canonical) return item;
+  if (!canonical) {
+    const normalized: InventoryItem = { ...item };
+    if (
+      (normalized.item_type === "Armor" || normalized.item_type === "Helmet") &&
+      typeof normalized.gearBonus === "number" &&
+      !Number.isNaN(normalized.gearBonus)
+    ) {
+      if (typeof normalized.effective_gear_bonus !== "number" || Number.isNaN(normalized.effective_gear_bonus)) {
+        normalized.effective_gear_bonus = normalized.gearBonus;
+      }
+    }
+    return normalized;
+  }
 
-  return {
+  const normalized: InventoryItem = {
     ...item,
     name: canonical.name,
     weight: canonical.weight,
@@ -266,6 +278,16 @@ export function normalizeInventoryItem(item: InventoryItem): InventoryItem {
     range_band: canonical.rangeBand ?? item.range_band,
     properties: canonical.properties ?? item.properties,
   };
+  if (
+    (normalized.item_type === "Armor" || normalized.item_type === "Helmet") &&
+    typeof normalized.gearBonus === "number" &&
+    !Number.isNaN(normalized.gearBonus)
+  ) {
+    if (typeof normalized.effective_gear_bonus !== "number" || Number.isNaN(normalized.effective_gear_bonus)) {
+      normalized.effective_gear_bonus = normalized.gearBonus;
+    }
+  }
+  return normalized;
 }
 
 export function normalizeInventoryItems(items: InventoryItem[]): InventoryItem[] {
@@ -287,6 +309,7 @@ export function canItemsStack(a: InventoryItem, b: InventoryItem): boolean {
     na.name === nb.name &&
     na.weight === nb.weight &&
     (na.gearBonus ?? null) === (nb.gearBonus ?? null) &&
+    (na.effective_gear_bonus ?? null) === (nb.effective_gear_bonus ?? null) &&
     (na.item_key ?? null) === (nb.item_key ?? null) &&
     (na.item_type ?? null) === (nb.item_type ?? null) &&
     (na.wield ?? null) === (nb.wield ?? null) &&
@@ -354,7 +377,30 @@ export function applyGearDamageToItem(
     if (nextGearBonus <= 0) {
       return items.filter((item) => item.id !== itemId);
     }
-    return items.map((item) => (item.id === itemId ? { ...item, gearBonus: nextGearBonus } : item));
+    return items.map((item) => {
+      if (item.id !== itemId) return item;
+      const nextItem: InventoryItem = { ...item, gearBonus: nextGearBonus };
+      if (
+        item.item_type === "Armor" ||
+        item.item_type === "Helmet"
+      ) {
+        if (
+          typeof item.effective_gear_bonus === "number" &&
+          !Number.isNaN(item.effective_gear_bonus) &&
+          item.effective_gear_bonus < 0
+        ) {
+          nextItem.effective_gear_bonus = item.effective_gear_bonus;
+        } else if (
+          typeof item.effective_gear_bonus === "number" &&
+          !Number.isNaN(item.effective_gear_bonus)
+        ) {
+          nextItem.effective_gear_bonus = Math.min(item.effective_gear_bonus, nextGearBonus);
+        } else {
+          nextItem.effective_gear_bonus = nextGearBonus;
+        }
+      }
+      return nextItem;
+    });
   }
 
   const nextItems = [...items];
@@ -365,6 +411,9 @@ export function applyGearDamageToItem(
       id: `${source.id}:dur:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
       quantity: undefined,
       gearBonus: nextGearBonus,
+      ...(source.item_type === "Armor" || source.item_type === "Helmet"
+        ? { effective_gear_bonus: Math.min(source.effective_gear_bonus ?? nextGearBonus, nextGearBonus) }
+        : {}),
     });
   }
   return nextItems;

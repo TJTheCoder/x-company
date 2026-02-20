@@ -73,6 +73,7 @@ export type InventoryItem = {
   name: string;
   weight: number;
   gearBonus?: number;
+  effective_gear_bonus?: number;
   quantity?: number;
   item_key?: string;
   item_type?: string;
@@ -713,6 +714,66 @@ export default function Dashboard() {
     }
   };
 
+  const resetEffectiveBonusesForArmorItems = (
+    items: InventoryItem[]
+  ): { items: InventoryItem[]; changed: boolean } => {
+    let changed = false;
+    const nextItems = items.map((item) => {
+      if (item.item_type !== "Armor" && item.item_type !== "Helmet") return item;
+      const trueBonus = Math.max(0, Math.trunc(item.gearBonus ?? 0));
+      const currentEffective =
+        typeof item.effective_gear_bonus === "number" && !Number.isNaN(item.effective_gear_bonus)
+          ? Math.max(0, Math.trunc(item.effective_gear_bonus))
+          : trueBonus;
+      if (currentEffective === trueBonus) return item;
+      changed = true;
+      return { ...item, effective_gear_bonus: trueBonus };
+    });
+    return { items: nextItems, changed };
+  };
+
+  const effectiveArmorDiceForItem = (item: InventoryItem | null | undefined): number => {
+    if (!item) return 0;
+    if (item.item_type === "Armor" || item.item_type === "Helmet") {
+      if (typeof item.effective_gear_bonus === "number" && !Number.isNaN(item.effective_gear_bonus)) {
+        return Math.max(0, Math.trunc(item.effective_gear_bonus));
+      }
+    }
+    return Math.max(0, Math.trunc(item.gearBonus ?? 0));
+  };
+
+  const isChainmailArmorItem = (item: InventoryItem): boolean => {
+    if (item.item_type !== "Armor") return false;
+    const props = Array.isArray(item.properties) ? item.properties : [];
+    return props.some((value) => String(value).trim().toLowerCase() === "chainmail");
+  };
+
+  const applyTemporaryArmorRollEffectiveBonuses = (
+    items: InventoryItem[],
+    options: { applyChainmailPenalty: boolean; applyWoodenHeadBonus: boolean }
+  ): { items: InventoryItem[]; changed: boolean } => {
+    let changed = false;
+    const nextItems = items.map((item) => {
+      if (item.item_type !== "Armor" && item.item_type !== "Helmet") return item;
+      const trueBonus = Math.max(0, Math.trunc(item.gearBonus ?? 0));
+      let targetEffective = trueBonus;
+      if (options.applyChainmailPenalty && isChainmailArmorItem(item)) {
+        targetEffective = Math.max(0, targetEffective - 3);
+      }
+      if (options.applyWoodenHeadBonus) {
+        targetEffective = Math.max(0, targetEffective * 2);
+      }
+      const currentEffective =
+        typeof item.effective_gear_bonus === "number" && !Number.isNaN(item.effective_gear_bonus)
+          ? Math.max(0, Math.trunc(item.effective_gear_bonus))
+          : trueBonus;
+      if (currentEffective === targetEffective) return item;
+      changed = true;
+      return { ...item, effective_gear_bonus: targetEffective };
+    });
+    return { items: nextItems, changed };
+  };
+
   const getFlameIntensityForToken = async (tokenId: string): Promise<number> => {
     const supabase = createClient();
     const { data: combatState, error: combatError } = await supabase
@@ -772,11 +833,33 @@ export default function Dashboard() {
         gear?: InventoryItem[];
         equipment_slots?: { armor?: string | null; helmet?: string | null };
       };
-      const equipped = findEquipped(snapshot.gear || [], snapshot.equipment_slots);
-      const armorDice = equipped.armorDice + Math.max(0, Number(snapshot.natural_armor ?? 0));
+      const normalizedGear = resetEffectiveBonusesForArmorItems(snapshot.gear || []);
+      const gearForRoll = normalizedGear.items;
+      if (normalizedGear.changed) {
+        const nextMonsters = (combatState.initiative_monsters || []).map((item) =>
+          item.id === tokenId
+            ? { ...item, monster_snapshot: { ...(item.monster_snapshot || {}), gear: gearForRoll } }
+            : item
+        );
+        const nextEntries = (combatState.initiative_entries || []).map((item) =>
+          item.participant_id === tokenId
+            ? { ...item, monster_snapshot: { ...(item.monster_snapshot || {}), gear: gearForRoll } }
+            : item
+        );
+        const { error: updateError } = await supabase
+          .from("combat_state")
+          .update({ initiative_monsters: nextMonsters, initiative_entries: nextEntries })
+          .eq("id", 1);
+        if (updateError) {
+          console.error("Failed to reset monster armor effective bonus:", updateError);
+        }
+      }
+      const equipped = findEquipped(gearForRoll, snapshot.equipment_slots);
+      const naturalArmorDice = Math.max(0, Number(snapshot.natural_armor ?? 0));
       let reduction = 0;
       reduction += rollArmorDice(equipped.helmetDice);
-      if (reduction < preArmorDamage) reduction += rollArmorDice(armorDice);
+      if (reduction < preArmorDamage) reduction += rollArmorDice(equipped.armorDice);
+      if (reduction < preArmorDamage) reduction += rollArmorDice(naturalArmorDice);
       return Math.max(0, Math.min(preArmorDamage, reduction));
     }
 
@@ -793,7 +876,21 @@ export default function Dashboard() {
       if (targetError) console.error("Failed to load player armor for flame:", targetError);
       return 0;
     }
-    const equipped = findEquipped(target.inventory || [], target.equipment_slots || null);
+    const normalizedInventory = resetEffectiveBonusesForArmorItems(target.inventory || []);
+    const inventoryForRoll = normalizedInventory.items;
+    if (normalizedInventory.changed) {
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ inventory: inventoryForRoll })
+        .eq("id", tokenId);
+      if (updateError) {
+        console.error("Failed to reset player armor effective bonus:", updateError);
+      }
+      if (character?.id === tokenId) {
+        updateCharacter({ inventory: inventoryForRoll });
+      }
+    }
+    const equipped = findEquipped(inventoryForRoll, target.equipment_slots || null);
     let reduction = 0;
     reduction += rollArmorDice(equipped.helmetDice);
     if (reduction < preArmorDamage) reduction += rollArmorDice(equipped.armorDice);
@@ -1003,14 +1100,6 @@ export default function Dashboard() {
         inventory.find((item) => item.item_type === "Helmet" && matchesSlot(resolvedSlots.helmet, item)) || null;
       return { armor, helmet };
     };
-    const isChainmailPenaltyAttack = attack.maneuver === "Shoot" || attack.maneuver === "Stab";
-    const adjustedArmorDiceForManeuver = (item: InventoryItem | null): number => {
-      const base = Math.max(0, item?.gearBonus ?? 0);
-      if (!item || !isChainmailPenaltyAttack) return base;
-      const props = Array.isArray(item.properties) ? item.properties.map((p) => String(p).toLowerCase()) : [];
-      const isChainmail = props.includes("chainmail");
-      return isChainmail ? Math.max(0, base - 3) : base;
-    };
     const armorPartsForCharacter = (target: {
       inventory?: InventoryItem[] | null;
       equipment_slots?: { armor?: string | null; helmet?: string | null; armor_ask?: boolean } | null;
@@ -1021,24 +1110,28 @@ export default function Dashboard() {
       return {
         armor,
         helmet,
-        armorDice: adjustedArmorDiceForManeuver(armor),
-        helmetDice: Math.max(0, helmet?.gearBonus ?? 0),
+        armorDice: effectiveArmorDiceForItem(armor),
+        helmetDice: effectiveArmorDiceForItem(helmet),
         ask: slots.armor_ask !== false,
       };
     };
-    const armorPartsForMonster = (snapshot: {
+    const armorPartsForMonster = (
+      snapshot: {
       natural_armor?: number;
       gear?: InventoryItem[];
       equipment_slots?: any;
-    }) => {
+      },
+      naturalArmorMultiplier: number = 1
+    ) => {
       const gear = snapshot.gear || [];
       const slots = snapshot.equipment_slots || { armor: null, helmet: null };
       const { armor, helmet } = findEquippedArmor(gear, slots);
       return {
         armor,
         helmet,
-        armorDice: adjustedArmorDiceForManeuver(armor) + Math.max(0, snapshot.natural_armor ?? 0),
-        helmetDice: Math.max(0, helmet?.gearBonus ?? 0),
+        armorDice: effectiveArmorDiceForItem(armor),
+        helmetDice: effectiveArmorDiceForItem(helmet),
+        naturalArmorDice: Math.max(0, Math.trunc((snapshot.natural_armor ?? 0) * Math.max(0, naturalArmorMultiplier))),
       };
     };
     const shouldOfferReaction =
@@ -1089,6 +1182,70 @@ export default function Dashboard() {
         .trim()
         .toLowerCase();
       return rangeBand === "engaged";
+    };
+    const isWoodenHeadArrow = (ammo: InventoryItem | null | undefined): boolean => {
+      if (!ammo) return false;
+      const normalizedName = String(ammo.name || "").trim().toLowerCase();
+      const normalizedKey = String(ammo.item_key || "").trim().toLowerCase();
+      return normalizedName === "arrow (wooden head)" || normalizedKey === "arrow (wooden head)";
+    };
+    const isShortOrGreaterRangeBand = (rangeBand: string | null | undefined): boolean => {
+      const normalized = String(rangeBand || "").trim().toLowerCase();
+      return normalized === "short" || normalized === "close" || normalized === "long" || normalized === "distant";
+    };
+    const isStrikeWithShortOrGreaterDefaultRange = async (): Promise<boolean> => {
+      if (attack.maneuver !== "Strike") return false;
+      const weaponName = String(attack.weaponName || "").trim().toLowerCase();
+      if (attack.attackerCharacterId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{ id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+            initiative_entries: Array<{ participant_id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) {
+            console.error("Failed to load attacker monster range for strike:", combatError);
+          }
+          return false;
+        }
+        const entry = (combatState.initiative_entries || []).find((item) => item.participant_id === attack.attackerCharacterId);
+        const monster = (combatState.initiative_monsters || []).find((item) => item.id === attack.attackerCharacterId);
+        const snapshot = (entry?.monster_snapshot || monster?.monster_snapshot || {}) as {
+          range_band?: string;
+          gear?: InventoryItem[];
+        };
+        let defaultRangeBand: string | null = null;
+        if (weaponName === "strike") {
+          defaultRangeBand = String(snapshot.range_band || "").trim() || null;
+        } else {
+          const match = (snapshot.gear || []).find(
+            (item) => String(item.name || "").trim().toLowerCase() === weaponName
+          );
+          defaultRangeBand = match?.range_band ?? null;
+        }
+        return isShortOrGreaterRangeBand(defaultRangeBand);
+      }
+      if (weaponName === "strike") {
+        return false;
+      }
+      const { data: attacker, error: attackerError } = await supabase
+        .from("characters")
+        .select("id, inventory")
+        .eq("id", attack.attackerCharacterId)
+        .maybeSingle<{ id: string; inventory?: InventoryItem[] | null }>();
+      if (attackerError || !attacker) {
+        if (attackerError) {
+          console.error("Failed to load attacker range for strike:", attackerError);
+        }
+        return false;
+      }
+      const match = (attacker.inventory || []).find(
+        (item) => String(item.name || "").trim().toLowerCase() === weaponName
+      );
+      return isShortOrGreaterRangeBand(match?.range_band ?? null);
     };
 
     if (attack.maneuver === "Heal") {
@@ -1796,6 +1953,101 @@ export default function Dashboard() {
     };
     const armorSkipped = Boolean(attack.armorSkipped);
     let remainingSuccesses = successes;
+    const applyWoodenHeadArmorBonus = attack.maneuver === "Shoot" && isWoodenHeadArrow(attack.shootAmmoItem);
+    const applyChainmailPenalty =
+      (
+        attack.maneuver === "Shoot" ||
+        attack.maneuver === "Stab" ||
+        (attack.maneuver === "Strike" && (await isStrikeWithShortOrGreaterDefaultRange()))
+      );
+    const naturalArmorMultiplier = applyWoodenHeadArmorBonus ? 2 : 1;
+
+    if (armorSkipped && remainingSuccesses > 0) {
+      if (attack.targetCharacterId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: {
+                gear?: InventoryItem[];
+              } | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              monster_snapshot?: {
+                gear?: InventoryItem[];
+              } | null;
+            }> | null;
+          }>();
+        if (!combatError && combatState) {
+          const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+          const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+          const targetMonster = monsters.find((monster) => monster.id === attack.targetCharacterId);
+          const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
+          const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
+          if (snapshot) {
+            const normalizedGear = resetEffectiveBonusesForArmorItems(snapshot.gear || []);
+            if (normalizedGear.changed) {
+              const nextMonsters = monsters.map((monster) =>
+                monster.id === attack.targetCharacterId
+                  ? {
+                      ...monster,
+                      monster_snapshot: {
+                        ...(monster.monster_snapshot || {}),
+                        gear: normalizedGear.items,
+                      },
+                    }
+                  : monster
+              );
+              const nextEntries = entries.map((entry) =>
+                entry.participant_id === attack.targetCharacterId
+                  ? {
+                      ...entry,
+                      monster_snapshot: {
+                        ...(entry.monster_snapshot || {}),
+                        gear: normalizedGear.items,
+                      },
+                    }
+                  : entry
+              );
+              const { error: resetError } = await supabase
+                .from("combat_state")
+                .update({ initiative_monsters: nextMonsters, initiative_entries: nextEntries })
+                .eq("id", 1);
+              if (resetError) {
+                console.error("Failed to reset monster armor effective bonus after pass:", resetError);
+              }
+            }
+          }
+        }
+      } else {
+        const { data: target } = await supabase
+          .from("characters")
+          .select("id, inventory")
+          .eq("id", attack.targetCharacterId)
+          .maybeSingle<{
+            id: string;
+            inventory?: InventoryItem[] | null;
+          }>();
+        if (target) {
+          const normalizedInventory = resetEffectiveBonusesForArmorItems(target.inventory || []);
+          if (normalizedInventory.changed) {
+            const { error: resetError } = await supabase
+              .from("characters")
+              .update({ inventory: normalizedInventory.items })
+              .eq("id", attack.targetCharacterId);
+            if (resetError) {
+              console.error("Failed to reset player armor effective bonus after pass:", resetError);
+            } else if (character?.id === attack.targetCharacterId) {
+              updateCharacter({ inventory: normalizedInventory.items });
+            }
+          }
+        }
+      }
+    }
 
     if (!armorSkipped && remainingSuccesses > 0) {
       if (attack.targetCharacterId.startsWith("monster:")) {
@@ -1828,7 +2080,47 @@ export default function Dashboard() {
           const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
           const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
           if (snapshot) {
-            const { armorDice, helmetDice } = armorPartsForMonster(snapshot);
+            const normalizedGear = resetEffectiveBonusesForArmorItems(snapshot.gear || []);
+            const adjustedGear = applyTemporaryArmorRollEffectiveBonuses(normalizedGear.items, {
+              applyChainmailPenalty,
+              applyWoodenHeadBonus: applyWoodenHeadArmorBonus,
+            });
+            const snapshotForRoll = { ...snapshot, gear: adjustedGear.items };
+            if (normalizedGear.changed || adjustedGear.changed) {
+              const nextMonsters = monsters.map((monster) =>
+                monster.id === attack.targetCharacterId
+                  ? {
+                      ...monster,
+                      monster_snapshot: {
+                        ...(monster.monster_snapshot || {}),
+                        gear: adjustedGear.items,
+                      },
+                    }
+                  : monster
+              );
+              const nextEntries = entries.map((entry) =>
+                entry.participant_id === attack.targetCharacterId
+                  ? {
+                      ...entry,
+                      monster_snapshot: {
+                        ...(entry.monster_snapshot || {}),
+                        gear: adjustedGear.items,
+                      },
+                    }
+                  : entry
+              );
+              const { error: resetError } = await supabase
+                .from("combat_state")
+                .update({ initiative_monsters: nextMonsters, initiative_entries: nextEntries })
+                .eq("id", 1);
+              if (resetError) {
+                console.error("Failed to reset monster armor effective bonus:", resetError);
+              }
+            }
+            const { armorDice, helmetDice, naturalArmorDice } = armorPartsForMonster(
+              snapshotForRoll,
+              naturalArmorMultiplier
+            );
             if (!armorUsed.helmet && helmetDice > 0) {
               const armorRoll = rollArmorDice(helmetDice);
               remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
@@ -1838,6 +2130,10 @@ export default function Dashboard() {
               const armorRoll = rollArmorDice(armorDice);
               remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
               armorUsed.armor = true;
+            }
+            if (remainingSuccesses > 0 && naturalArmorDice > 0) {
+              const armorRoll = rollArmorDice(naturalArmorDice);
+              remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
             }
           }
         }
@@ -1852,7 +2148,24 @@ export default function Dashboard() {
             equipment_slots?: { armor?: string | null; helmet?: string | null; armor_ask?: boolean } | null;
           }>();
         if (target) {
-          const { armor, helmet, armorDice, helmetDice, ask } = armorPartsForCharacter(target);
+          const normalizedInventory = resetEffectiveBonusesForArmorItems(target.inventory || []);
+          const adjustedInventory = applyTemporaryArmorRollEffectiveBonuses(normalizedInventory.items, {
+            applyChainmailPenalty,
+            applyWoodenHeadBonus: applyWoodenHeadArmorBonus,
+          });
+          const targetForRoll = { ...target, inventory: adjustedInventory.items };
+          if (normalizedInventory.changed || adjustedInventory.changed) {
+            const { error: resetError } = await supabase
+              .from("characters")
+              .update({ inventory: adjustedInventory.items })
+              .eq("id", attack.targetCharacterId);
+            if (resetError) {
+              console.error("Failed to reset player armor effective bonus:", resetError);
+            } else if (character?.id === attack.targetCharacterId) {
+              updateCharacter({ inventory: adjustedInventory.items });
+            }
+          }
+          const { armor, helmet, armorDice, helmetDice, ask } = armorPartsForCharacter(targetForRoll);
           const canHelmet = helmetDice > 0 && !armorUsed.helmet;
           const canArmor = armorDice > 0 && !armorUsed.armor;
           if (canHelmet || canArmor) {
@@ -2109,11 +2422,29 @@ export default function Dashboard() {
       return;
     }
 
-    const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
-      p_actor_token_id: roll.targetCharacterId,
-    });
-    if (consumeError) {
-      console.error("Failed to consume reaction action:", consumeError);
+    const isDodgeReaction = roll.mode === "dodge-stand" || roll.mode === "dodge-prone";
+    let usedFreeDodge = false;
+    if (isDodgeReaction) {
+      const { data: freeDodgeData, error: freeDodgeError } = await supabase.rpc(
+        "combat_consume_fast_footwork_dodge",
+        {
+          p_actor_token_id: roll.targetCharacterId,
+        }
+      );
+      if (freeDodgeError) {
+        console.error("Failed to consume Fast Footwork dodge:", freeDodgeError);
+      } else {
+        usedFreeDodge = Boolean(freeDodgeData);
+      }
+    }
+
+    if (!usedFreeDodge) {
+      const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
+        p_actor_token_id: roll.targetCharacterId,
+      });
+      if (consumeError) {
+        console.error("Failed to consume reaction action:", consumeError);
+      }
     }
 
     if (roll.applyProne) {

@@ -218,6 +218,24 @@ export default function Inventory({
     saveCharacter(updates);
   };
 
+  const setEquippedEffectiveBonus = async (itemId: string, rawValue: string) => {
+    const item = inventory.find((invItem) => invItem.id === itemId);
+    if (!item) return;
+    if (item.item_type !== "Armor" && item.item_type !== "Helmet") return;
+    const trueBonus = Math.max(0, Math.trunc(item.gearBonus ?? 0));
+    const parsed = rawValue.trim() === "" ? trueBonus : Math.max(0, Math.trunc(Number(rawValue)));
+    if (Number.isNaN(parsed)) return;
+    const updatedInventory = inventory.map((invItem) =>
+      invItem.id === itemId ? { ...invItem, effective_gear_bonus: parsed } : invItem
+    );
+    const updates = {
+      inventory: updatedInventory,
+      equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+    };
+    updateCharacter(updates);
+    await saveCharacter(updates);
+  };
+
   const onSlotDrop = (slot: EquippableSlotKey, event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     const itemId = event.dataTransfer.getData("application/x-inventory-item-id");
@@ -648,15 +666,48 @@ export default function Inventory({
                 <div className="text-sm text-amber-200/50">Empty</div>
               )}
               {(slot === "armor" || slot === "helmet") && (
-                <label className="mt-2 flex items-center gap-2 text-xs text-amber-200/80">
-                  <input
-                    type="checkbox"
-                    checked={armorAsk}
-                    onChange={toggleArmorAsk}
-                    className="h-3.5 w-3.5 rounded border-amber-400/60 bg-gray-900 text-amber-400 focus:ring-amber-500"
-                  />
-                  Ask
-                </label>
+                <div className="mt-2 flex items-center gap-3">
+                  {equipped && (
+                    <label className="flex items-center gap-2 text-xs text-amber-200/80 flex-1 min-w-0">
+                      <span className="min-w-[46px]">Effective</span>
+                      <input
+                        type="number"
+                        className="w-full rounded bg-gray-800 px-2 py-1 text-xs text-amber-100 ring-1 ring-amber-600/40 focus:outline-none focus:ring-amber-500"
+                        value={
+                          typeof equipped.effective_gear_bonus === "number"
+                            ? equipped.effective_gear_bonus
+                            : Math.max(0, Math.trunc(equipped.gearBonus ?? 0))
+                        }
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          const parsed = value.trim() === "" ? 0 : Math.max(0, Math.trunc(Number(value)));
+                          if (!Number.isNaN(parsed)) {
+                            const updatedInventory = inventory.map((invItem) =>
+                              invItem.id === equipped.id ? { ...invItem, effective_gear_bonus: parsed } : invItem
+                            );
+                            updateCharacter({
+                              inventory: updatedInventory,
+                              equipment_slots: sanitizeEquipmentSlots(equipmentSlots, updatedInventory),
+                            });
+                          }
+                        }}
+                        onBlur={(event) => {
+                          void setEquippedEffectiveBonus(equipped.id, event.target.value);
+                        }}
+                        title="Effective gear bonus used for this armor/helmet when rolled"
+                      />
+                    </label>
+                  )}
+                  <label className="flex items-center gap-2 text-xs text-amber-200/80 shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={armorAsk}
+                      onChange={toggleArmorAsk}
+                      className="h-3.5 w-3.5 rounded border-amber-400/60 bg-gray-900 text-amber-400 focus:ring-amber-500"
+                    />
+                    Ask
+                  </label>
+                </div>
               )}
             </div>
           );

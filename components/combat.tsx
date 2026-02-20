@@ -70,6 +70,10 @@ const {
   cycleMonsterDrawGear,
 } = combatModel;
 
+const FLAMING_LONGSWORD_PROPERTY = "flaming longsword";
+const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
+const LAMP_OIL_KEY = "lamp oil";
+
 export default function Combat({
   isDM,
   userEmail,
@@ -78,6 +82,7 @@ export default function Combat({
   onQueueMeleeAction,
   onQueueReactionRoll,
   onResolveMeleeAttack,
+  onApplyStartOfTurnEffects,
   pendingArmorPrompt,
   onConsumeArmorPrompt,
   onArmorPromptPass,
@@ -119,6 +124,7 @@ export default function Combat({
   const isSyncingRef = useRef(false);
   const handledInvalidReadiedRef = useRef<string | null>(null);
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
+  const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const draggedTokenRef = useRef<string | null>(null);
@@ -331,6 +337,21 @@ export default function Combat({
     },
     [attributeValueForToken]
   );
+  const isLampOilItem = useCallback((item: InventoryItem | null | undefined): boolean => {
+    if (!item) return false;
+    const key = (item.item_key || "").trim().toLowerCase();
+    const name = (item.name || "").trim().toLowerCase();
+    return key === LAMP_OIL_KEY || name === "lamp oil";
+  }, []);
+  const isFlamingLongswordItem = useCallback((item: InventoryItem | null | undefined): boolean => {
+    if (!item) return false;
+    const name = String(item.name || "").trim().toLowerCase();
+    const key = String(item.item_key || "").trim().toLowerCase();
+    const props = Array.isArray(item.properties) ? item.properties : [];
+    const hasFlaggedProperty = props.some((prop) => String(prop).trim().toLowerCase() === FLAMING_LONGSWORD_PROPERTY);
+    // Accept legacy rows where item_type/properties may be missing but name/key already identifies it.
+    return hasFlaggedProperty || name === "flaming longsword" || key === "flaming longsword";
+  }, []);
   const actorDead = actorState.dead;
   const actorPhysicalBroken = actorState.physicalBroken;
   const actorMentalBroken = actorState.mentalBroken;
@@ -481,6 +502,11 @@ export default function Combat({
   const actorTauntedAngerById = currentEntry?.taunted_anger_by_id ?? null;
   const actorTauntedAngerByName = currentEntry?.taunted_anger_by_name ?? null;
   const actorTauntedDistractValue = Math.max(0, currentEntry?.taunted_distract_value ?? 0);
+  const actorFlameIntensity = Math.max(0, currentEntry?.flame_intensity ?? 0);
+  const actorUsedItemFlags = useMemo(
+    () => new Set((currentEntry?.used_item_flags || []).filter((value): value is string => typeof value === "string")),
+    [currentEntry]
+  );
   const actorTauntAngerTargetEntry = useMemo(
     () => findEntryForTokenId(actorTauntedAngerById),
     [findEntryForTokenId, actorTauntedAngerById]
@@ -1039,6 +1065,12 @@ export default function Combat({
           }
           if (entry?.taunted_anger_by_name) {
             flags.push(`Taunted (Angered by ${entry.taunted_anger_by_name})`);
+          }
+          if ((entry?.flame_intensity ?? 0) > 0) {
+            flags.push(`Flame ${Math.max(0, Math.trunc(entry?.flame_intensity ?? 0))}`);
+          }
+          for (const usedFlag of entry?.used_item_flags || []) {
+            if (usedFlag) flags.push(usedFlag);
           }
 
           const character = characters.find((char) => char.id === pos.character_id);
@@ -1606,6 +1638,102 @@ export default function Combat({
     if (isDmUser) return true;
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
   }, [currentEntry, userEmail, isDmUser]);
+  const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {
+    if (!currentEntry) return null;
+    if (currentEntry.kind === "player") {
+      const held = playerHeldItems(actorTokenCharacter);
+      return held.find((item) => isFlamingLongswordItem(item)) || null;
+    }
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot) return null;
+    const weapon = monsterEquippedMeleeWeapons(snapshot).find((item) =>
+      item.properties.some((prop) => prop === FLAMING_LONGSWORD_PROPERTY)
+    );
+    if (!weapon) return null;
+    return {
+      id: weapon.id,
+      name: weapon.name,
+      weight: 0,
+      item_type: "Melee Weapon",
+      properties: weapon.properties,
+    };
+  }, [currentEntry, actorTokenCharacter, isFlamingLongswordItem]);
+  const actorLampOilCount = useMemo(() => {
+    if (!currentEntry) return 0;
+    const sourceItems =
+      currentEntry.kind === "player"
+        ? actorTokenCharacter?.inventory || []
+        : currentEntry.monster_snapshot?.gear || [];
+    return sourceItems.reduce((count, item) => {
+      if (!isLampOilItem(item)) return count;
+      return count + Math.max(1, Math.trunc(item.quantity ?? 1));
+    }, 0);
+  }, [currentEntry, actorTokenCharacter, isLampOilItem]);
+  const canUseFlamingLongswordItem = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf || !actorTokenId) return false;
+    if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
+    if (isActorCovered) return false;
+    if (!actorEquippedFlamingLongsword) return false;
+    if (actorLampOilCount < 1) return false;
+    return !actorUsedItemFlags.has(FLAMING_LONGSWORD_USED_FLAG);
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    isSelectedSelf,
+    actorTokenId,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    isActorCovered,
+    actorEquippedFlamingLongsword,
+    actorLampOilCount,
+    actorUsedItemFlags,
+  ]);
+  const canUseSnuff = useMemo(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf || !actorTokenId) return false;
+    if (!currentEntry.slow_available) return false;
+    if (actorFlameIntensity <= 0) return false;
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
+    if (isActorProne || actorHardLockedByHold) return false;
+    if (isActorCovered) return false;
+    if (isSkillBlockedForToken(actorTokenId, "MOVE")) return false;
+    return true;
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    isSelectedSelf,
+    actorTokenId,
+    actorFlameIntensity,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    isActorCovered,
+    isSkillBlockedForToken,
+  ]);
+  const setUsedItemFlag = useCallback(
+    async (tokenId: string, flag: string, enabled: boolean): Promise<boolean> => {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("combat_set_used_item_flag", {
+        p_actor_token_id: tokenId,
+        p_flag: flag,
+        p_enabled: enabled,
+      });
+      if (rpcError) {
+        setError(rpcError.message);
+        return false;
+      }
+      return true;
+    },
+    []
+  );
 
   const canUseDrawGearFromToken = useMemo(() => {
     if (!combatMode || !selectedTokenId || !currentEntry) return false;
@@ -3526,6 +3654,64 @@ export default function Combat({
   ]);
 
   useEffect(() => {
+    const participantId = currentEntry?.participant_id ?? null;
+    if (!participantId) {
+      startOfTurnEffectsCheckedParticipantRef.current = null;
+      return;
+    }
+    if (startOfTurnEffectsCheckedParticipantRef.current === participantId) return;
+    startOfTurnEffectsCheckedParticipantRef.current = participantId;
+    if (!combatMode || !isMyTurn || !actorTokenId) return;
+    if (!onApplyStartOfTurnEffects) return;
+    void onApplyStartOfTurnEffects(actorTokenId);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, onApplyStartOfTurnEffects]);
+
+  useEffect(() => {
+    if (!combatMode || !actorTokenId || !currentEntry) return;
+    if (!actorUsedItemFlags.has(FLAMING_LONGSWORD_USED_FLAG)) return;
+    const hasFlamingLongswordInInventory =
+      currentEntry.kind === "player"
+        ? (actorTokenCharacter?.inventory || []).some((item) => isFlamingLongswordItem(item))
+        : (currentEntry.monster_snapshot?.gear || []).some((item) => isFlamingLongswordItem(item));
+    if (hasFlamingLongswordInInventory) return;
+    void setUsedItemFlag(actorTokenId, FLAMING_LONGSWORD_USED_FLAG, false);
+  }, [
+    combatMode,
+    actorTokenId,
+    currentEntry,
+    actorUsedItemFlags,
+    actorTokenCharacter,
+    isFlamingLongswordItem,
+  ]);
+
+  useEffect(() => {
+    if (!combatMode || initiativeEntries.length === 0) return;
+    for (const entry of initiativeEntries) {
+      const flags = Array.isArray(entry.used_item_flags)
+        ? entry.used_item_flags.filter((value): value is string => typeof value === "string")
+        : [];
+      if (!flags.includes(FLAMING_LONGSWORD_USED_FLAG)) continue;
+      const tokenId = entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      const canMutate = isDmUser || (entry.kind === "player" && tokenId === currentUserTokenId);
+      if (!canMutate) continue;
+      const hasFlamingLongswordInInventory =
+        entry.kind === "player"
+          ? (characterById.get(tokenId)?.inventory || []).some((item) => isFlamingLongswordItem(item))
+          : (entry.monster_snapshot?.gear || []).some((item) => isFlamingLongswordItem(item));
+      if (hasFlamingLongswordInInventory) continue;
+      void setUsedItemFlag(tokenId, FLAMING_LONGSWORD_USED_FLAG, false);
+    }
+  }, [
+    combatMode,
+    initiativeEntries,
+    isDmUser,
+    currentUserTokenId,
+    characterById,
+    isFlamingLongswordItem,
+    setUsedItemFlag,
+  ]);
+
+  useEffect(() => {
     const run = async () => {
       if (!combatMode || !currentReadied || !currentEntry || !actorTokenId) return;
       const heldHand =
@@ -4405,6 +4591,132 @@ export default function Combat({
       weaponName: "Flee",
       weaponBaseDamage: 0,
       maneuver: "Flee",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+    });
+  };
+  const consumeOneLampOil = (items: InventoryItem[]): InventoryItem[] => {
+    let consumed = false;
+    const next: InventoryItem[] = [];
+    for (const item of items) {
+      if (!consumed && isLampOilItem(item)) {
+        const qty = Math.max(1, Math.trunc(item.quantity ?? 1));
+        consumed = true;
+        if (qty > 1) {
+          next.push({ ...item, quantity: qty - 1 });
+        }
+        continue;
+      }
+      next.push(item);
+    }
+    return consumed ? next : items;
+  };
+  const requestUseFlamingLongswordItem = async () => {
+    if (!currentEntry || !actorTokenId || !canUseFlamingLongswordItem) return;
+    const didConsume = await consumeFastOrSlow();
+    if (!didConsume) return;
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+
+    if (currentEntry.kind === "player") {
+      if (!actorTokenCharacter) return;
+      const source = actorTokenCharacter.inventory || [];
+      const nextInventory = consumeOneLampOil(source);
+      if (nextInventory === source) return;
+      const supabase = createClient();
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ inventory: nextInventory })
+        .eq("id", actorTokenCharacter.id);
+      if (updateError) {
+        setError(updateError.message);
+        return;
+      }
+      await loadCharacters();
+    } else {
+      const latest = await fetchLatestInitiativeState();
+      if (!latest) return;
+      const actorEntry = latest.freshEntries.find((entry) => entry.participant_id === currentEntry.participant_id) || null;
+      const snapshot = actorEntry?.monster_snapshot || null;
+      if (!snapshot) return;
+      const nextGear = consumeOneLampOil(snapshot.gear || []);
+      if (nextGear === (snapshot.gear || [])) return;
+      const nextSnapshot = { ...snapshot, gear: nextGear };
+      const nextEntries = latest.freshEntries.map((entry) =>
+        entry.participant_id === currentEntry.participant_id ? { ...entry, monster_snapshot: nextSnapshot } : entry
+      );
+      const nextMonsters = latest.freshMonsters.map((monster) =>
+        monster.id === currentEntry.participant_id ? { ...monster, monster_snapshot: nextSnapshot } : monster
+      );
+      setInitiativeEntries(nextEntries);
+      setInitiativeMonsters(nextMonsters);
+      setInitiativeCurrentIndex(latest.freshCurrentIndex);
+      await saveInitiativeState(
+        nextEntries,
+        latest.freshCurrentIndex,
+        combatMode,
+        nextMonsters,
+        latest.freshEngagements,
+        null,
+        latest.freshLoot
+      );
+    }
+
+    await setUsedItemFlag(actorTokenId, FLAMING_LONGSWORD_USED_FLAG, true);
+    setSelectedTokenId(null);
+  };
+  const requestSnuff = async () => {
+    if (!currentEntry || !actorTokenId || !canUseSnuff) return;
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+    const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `snuff:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        targetCharacterId: actorCharacter.id,
+        targetName: actorCharacter.name,
+        weaponItemId: null,
+        weaponName: "Snuff",
+        weaponBaseDamage: 0,
+        maneuver: "Snuff",
+        rollAttribute: "AGL",
+        rollSkill: "MOVE",
+        requiredSuccesses: 1,
+        bonusDice: tauntPenalty,
+      });
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
+    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const skillIsNegative = signedSkillPool < 0;
+    const skillDice = rollD6Pool(Math.abs(signedSkillPool));
+    const rawSuccesses = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    const successes = skillIsNegative
+      ? Math.max(0, rawSuccesses - skillDice.filter((d) => d === 6).length * 2)
+      : rawSuccesses;
+    setMonsterRollResult({
+      actionLabel: "Snuff",
+      attributeDice,
+      skillDice,
+      skillIsNegative,
+      gearDice: [],
+      successes,
+    });
+    await onResolveMeleeAttack({
+      id: `monster-snuff:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      targetCharacterId: actorTokenId,
+      weaponName: "Snuff",
+      weaponBaseDamage: 0,
+      maneuver: "Snuff",
       totalSuccesses: successes,
       requiredSuccesses: 1,
     });
@@ -5587,6 +5899,22 @@ export default function Combat({
               className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
             >
               Feint
+            </button>
+          )}
+          {canUseSnuff && (
+            <button
+              onClick={() => void requestSnuff()}
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+            >
+              Snuff
+            </button>
+          )}
+          {canUseFlamingLongswordItem && (
+            <button
+              onClick={() => void requestUseFlamingLongswordItem()}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              Use Item (Flaming Longsword)
             </button>
           )}
           {canUseDrawGearFromToken && (

@@ -597,6 +597,7 @@ declare
   v_current jsonb;
   v_current_email text;
   v_reset_entries jsonb;
+  v_next_entry jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -633,6 +634,9 @@ begin
   v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
 
   v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+  v_next_entry := v_entries -> v_next_idx;
+  v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
   if v_next_idx = 0 and v_count > 0 then
     v_reset_entries := public.combat_apply_round_transition(v_entries);
@@ -673,6 +677,7 @@ declare
   v_after_slow boolean;
   v_next_idx int;
   v_reset_entries jsonb;
+  v_next_entry jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -723,6 +728,9 @@ begin
 
   if not v_after_fast and not v_after_slow then
     v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+    v_next_entry := v_entries -> v_next_idx;
+    v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+    v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
     if v_next_idx = 0 and v_count > 0 then
       v_reset_entries := public.combat_apply_round_transition(v_entries);
@@ -768,6 +776,7 @@ declare
   v_key text;
   v_next_idx int;
   v_reset_entries jsonb;
+  v_next_entry jsonb;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -819,6 +828,9 @@ begin
 
   if not v_fast and not v_slow then
     v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+    v_next_entry := v_entries -> v_next_idx;
+    v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+    v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
     if v_next_idx = 0 and v_count > 0 then
       v_reset_entries := public.combat_apply_round_transition(v_entries);
@@ -1045,6 +1057,122 @@ end;
 $$;
 
 grant execute on function public.combat_consume_taunt_distract(text) to authenticated;
+
+create or replace function public.combat_set_used_item_flag(
+  p_actor_token_id text,
+  p_flag text,
+  p_enabled boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_flags jsonb;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+  if p_flag is null or btrim(p_flag) = '' then
+    raise exception 'Flag is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    return;
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    return;
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can update item flags';
+    end if;
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can update item flags';
+    end;
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+  end if;
+
+  if jsonb_typeof(v_entry->'used_item_flags') = 'array' then
+    v_flags := v_entry->'used_item_flags';
+  else
+    v_flags := '[]'::jsonb;
+  end if;
+
+  if coalesce(p_enabled, false) then
+    if not exists (
+      select 1
+      from jsonb_array_elements_text(v_flags) as x(value)
+      where x.value = p_flag
+    ) then
+      v_flags := v_flags || jsonb_build_array(p_flag);
+    end if;
+  else
+    select coalesce(jsonb_agg(to_jsonb(x.value)), '[]'::jsonb)
+    into v_flags
+    from jsonb_array_elements_text(v_flags) as x(value)
+    where x.value <> p_flag;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{used_item_flags}', v_flags, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_set_used_item_flag(text, text, boolean) to authenticated;
 
 create or replace function public.combat_enqueue_reaction(
   p_reaction jsonb

@@ -24,6 +24,30 @@ const SHORTSWORD: CanonicalItem = {
   properties: ["Edged", "Pointed", "Parrying"],
 };
 
+const LONGSWORD: CanonicalItem = {
+  key: "longsword",
+  name: "Longsword",
+  weight: 2,
+  gearBonus: 2,
+  itemType: "Melee Weapon",
+  wield: "1H",
+  damage: 2,
+  rangeBand: "Engaged",
+  properties: ["Edged", "Pointed", "Parrying"],
+};
+
+const FLAMING_LONGSWORD: CanonicalItem = {
+  key: "flaming longsword",
+  name: "Flaming Longsword",
+  weight: 2,
+  gearBonus: 2,
+  itemType: "Melee Weapon",
+  wield: "1H",
+  damage: 2,
+  rangeBand: "Engaged",
+  properties: ["Edged", "Pointed", "Parrying", "Flaming Longsword"],
+};
+
 const GREATSWORD: CanonicalItem = {
   key: "greatsword",
   name: "Greatsword",
@@ -62,6 +86,15 @@ const PLATE_ARMOR: CanonicalItem = {
   weight: 2,
   gearBonus: 8,
   itemType: "Armor",
+};
+
+const CHAINMAIL: CanonicalItem = {
+  key: "chainmail",
+  name: "Chainmail",
+  weight: 2,
+  gearBonus: 6,
+  itemType: "Armor",
+  properties: ["Chainmail"],
 };
 
 const SHORTBOW: CanonicalItem = {
@@ -158,13 +191,23 @@ const TORCH: CanonicalItem = {
   itemType: "Generic",
 };
 
+const LAMP_OIL: CanonicalItem = {
+  key: "lamp oil",
+  name: "Lamp Oil",
+  weight: 0.2,
+  itemType: "Generic",
+};
+
 const CATALOG: CanonicalItem[] = [
+  CHAINMAIL,
+  FLAMING_LONGSWORD,
   GREATSWORD,
   LEATHER_ARMOR,
   LIGHT_CROSSBOW,
   PLATE_ARMOR,
   SHORTBOW,
   SHORTSWORD,
+  LONGSWORD,
   STAFF,
   STUDDED_LEATHER_CAP,
   WOODEN_CLUB,
@@ -173,6 +216,7 @@ const CATALOG: CanonicalItem[] = [
   SMALL_SHIELD,
   ARROW_IRON_HEAD,
   ARROW_WOODEN_HEAD,
+  LAMP_OIL,
   TORCH,
 ];
 

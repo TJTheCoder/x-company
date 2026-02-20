@@ -16,6 +16,7 @@ export type CombatProps = {
   onQueueMeleeAction?: (action: PendingMeleeAction) => void;
   onQueueReactionRoll?: (roll: PendingReactionRoll) => void;
   onResolveMeleeAttack?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
+  onApplyStartOfTurnEffects?: (tokenId: string) => void | Promise<void>;
   pendingArmorPrompt?: PendingArmorPrompt | null;
   onConsumeArmorPrompt?: (promptId: string) => void;
   onArmorPromptPass?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
@@ -81,6 +82,8 @@ export type InitiativeEntry = {
   taunted_anger_by_id?: string | null;
   taunted_anger_by_name?: string | null;
   taunted_distract_value?: number | null;
+  used_item_flags?: string[] | null;
+  flame_intensity?: number | null;
   feint_pending_roll?: number | null;
   feint_pending_name?: string | null;
   dead?: boolean;
@@ -507,6 +510,10 @@ export function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undef
           typeof e.taunted_anger_by_name === "string" ? e.taunted_anger_by_name : null,
         taunted_distract_value:
           typeof e.taunted_distract_value === "number" ? e.taunted_distract_value : null,
+        used_item_flags: Array.isArray(e.used_item_flags)
+          ? e.used_item_flags.filter((v): v is string => typeof v === "string")
+          : null,
+        flame_intensity: typeof e.flame_intensity === "number" ? Math.max(0, Math.trunc(e.flame_intensity)) : null,
         feint_pending_roll: typeof e.feint_pending_roll === "number" ? e.feint_pending_roll : null,
         feint_pending_name: typeof e.feint_pending_name === "string" ? e.feint_pending_name : null,
         dead: Boolean(e.dead),

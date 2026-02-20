@@ -48,6 +48,7 @@ export type EquipmentSlots = {
   helmet: string | null;
   left: string | null;
   right: string | null;
+  armor_ask?: boolean;
 };
 
 export type TalentProgress = {
@@ -84,6 +85,7 @@ export type InventoryItem = {
 export type PendingMeleeAction = {
   id: string;
   attackerCharacterId: string;
+  attackerName?: string;
   targetCharacterId: string;
   targetName: string;
   weaponItemId?: string | null;
@@ -96,6 +98,7 @@ export type PendingMeleeAction = {
     | "Shoot"
     | "Grapple Attack"
     | "Retreat"
+    | "Flee"
     | "Shove"
     | "Disarm"
     | "Grapple"
@@ -103,12 +106,16 @@ export type PendingMeleeAction = {
     | "Break Free"
     | "Feint"
     | "Coup de Grace"
-    | "Crawl";
+    | "Crawl"
+    | "Heal"
+    | "Taunt (Anger)"
+    | "Taunt (Distract)";
   rollAttribute?: keyof Attributes;
   rollSkill?: string;
   requiredSuccesses?: number;
   swingBonusDamage?: number;
   bonusDice?: number;
+  healAttribute?: keyof Attributes;
   disarmTargetItemId?: string | null;
   disarmTargetItemName?: string | null;
   disarmZoneId?: number | null;
@@ -121,6 +128,7 @@ export type PendingMeleeAction = {
 export type ResolvedMeleeAttack = {
   id: string;
   attackerCharacterId: string;
+  attackerName?: string;
   targetCharacterId: string;
   weaponName: string;
   weaponBaseDamage: number;
@@ -131,6 +139,7 @@ export type ResolvedMeleeAttack = {
     | "Shoot"
     | "Grapple Attack"
     | "Retreat"
+    | "Flee"
     | "Shove"
     | "Disarm"
     | "Grapple"
@@ -138,10 +147,14 @@ export type ResolvedMeleeAttack = {
     | "Break Free"
     | "Feint"
     | "Coup de Grace"
-    | "Crawl";
+    | "Crawl"
+    | "Heal"
+    | "Taunt (Anger)"
+    | "Taunt (Distract)";
   totalSuccesses: number;
   requiredSuccesses?: number;
   swingBonusDamage?: number;
+  healAttribute?: keyof Attributes;
   disarmTargetItemId?: string | null;
   disarmZoneId?: number | null;
   destinationX?: number;
@@ -149,29 +162,64 @@ export type ResolvedMeleeAttack = {
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
   skipReaction?: boolean;
+  armorUsed?: { helmet?: boolean; armor?: boolean };
+  armorSkipped?: boolean;
 };
 
 export type PendingReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "dodge-stand" | "dodge-prone" | "parry";
+  mode: "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
   bonusDice: number;
+  fixedAttributeDice?: number;
+  fixedSkillDice?: number;
   gearItemId?: string | null;
+  armorSlot?: "armor" | "helmet";
   applyProne?: boolean;
-  attack: ResolvedMeleeAttack;
+  attack?: ResolvedMeleeAttack;
+  taunt?: {
+    mode: "anger" | "distract";
+    attackerCharacterId: string;
+    attackerName: string;
+    targetCharacterId: string;
+    successes: number;
+  };
 };
 
 export type ResolvedReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "dodge-stand" | "dodge-prone" | "parry";
+  mode: "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
+  armorSlot?: "armor" | "helmet";
   applyProne?: boolean;
+  attack?: ResolvedMeleeAttack;
+  taunt?: {
+    mode: "anger" | "distract";
+    attackerCharacterId: string;
+    attackerName: string;
+    targetCharacterId: string;
+    successes: number;
+  };
+};
+
+export type PendingArmorPrompt = {
+  id: string;
+  targetCharacterId: string;
   attack: ResolvedMeleeAttack;
+  helmetItemId?: string | null;
+  helmetName?: string | null;
+  helmetDice?: number;
+  armorItemId?: string | null;
+  armorName?: string | null;
+  armorDice?: number;
+  armorUsed?: { helmet?: boolean; armor?: boolean };
 };
 
 type WagonData = {
@@ -206,6 +254,7 @@ export default function Dashboard() {
   const [meleeRollReturnToCombat, setMeleeRollReturnToCombat] = useState(false);
   const [pendingReactionRoll, setPendingReactionRoll] = useState<PendingReactionRoll | null>(null);
   const [reactionRollReturnToCombat, setReactionRollReturnToCombat] = useState(false);
+  const [pendingArmorPrompt, setPendingArmorPrompt] = useState<PendingArmorPrompt | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -551,6 +600,17 @@ export default function Dashboard() {
     setPendingReactionRoll((prev) => (prev?.id === rollId ? null : prev));
   };
 
+  const clearPendingArmorPrompt = (promptId: string) => {
+    setPendingArmorPrompt((prev) => (prev?.id === promptId ? null : prev));
+  };
+
+  const handleArmorPromptPass = async (attack: ResolvedMeleeAttack) => {
+    await resolveMeleeAttack({
+      ...attack,
+      armorSkipped: true,
+    });
+  };
+
   const onMeleeRollCleared = () => {
     if (!meleeRollReturnToCombat) return;
     setActiveTab("combat");
@@ -563,9 +623,67 @@ export default function Dashboard() {
     setReactionRollReturnToCombat(false);
   };
 
+  const rollD6Pool = (count: number): number[] =>
+    Array.from({ length: Math.max(0, count) }, () => Math.floor(Math.random() * 6) + 1);
+
+  const applyTauntToCombatState = async (opts: {
+    targetCharacterId: string;
+    mode: "anger" | "distract";
+    remainingSuccesses: number;
+    attackerCharacterId: string;
+    attackerName: string;
+  }) => {
+    if (opts.remainingSuccesses <= 0) return;
+    const supabase = createClient();
+    const { data: combatState, error: combatError } = await supabase
+      .from("combat_state")
+      .select("initiative_entries")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: Array<Record<string, unknown>> | null;
+      }>();
+    if (combatError) {
+      console.error("Failed to load combat state for taunt:", combatError);
+      return;
+    }
+    const entries = Array.isArray(combatState?.initiative_entries) ? combatState!.initiative_entries : [];
+    if (entries.length === 0) return;
+
+    const nextEntries = entries.map((entry) => {
+      const participantId = String(entry.participant_id ?? "");
+      if (
+        participantId !== opts.targetCharacterId &&
+        participantId !== `player:${opts.targetCharacterId}`
+      ) {
+        return entry;
+      }
+      if (opts.mode === "distract") {
+        const existing = Math.max(0, Number(entry.taunted_distract_value ?? 0));
+        const nextValue = Math.max(existing, opts.remainingSuccesses);
+        return {
+          ...entry,
+          taunted_distract_value: nextValue,
+        };
+      }
+      return {
+        ...entry,
+        taunted_anger_by_id: opts.attackerCharacterId,
+        taunted_anger_by_name: opts.attackerName,
+      };
+    });
+
+    const { error: updateError } = await supabase
+      .from("combat_state")
+      .update({ initiative_entries: nextEntries })
+      .eq("id", 1);
+    if (updateError) {
+      console.error("Failed to apply taunt:", updateError);
+    }
+  };
+
   const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
     const successes = Math.max(0, attack.totalSuccesses);
-    const requiredSuccesses = Math.max(0, attack.requiredSuccesses ?? 1);
+    const requiredSuccesses = Math.max(1, attack.requiredSuccesses ?? 1);
     const supabase = createClient();
     const didSucceed = successes >= requiredSuccesses;
     const reactionEligibleManeuvers = new Set<ResolvedMeleeAttack["maneuver"]>([
@@ -593,33 +711,247 @@ export default function Dashboard() {
       const successes = dice.filter((d) => d === 6).length;
       return { dice, successes };
     };
-    const armorDiceForCharacter = (target: {
-      inventory?: InventoryItem[] | null;
-      equipment_slots?: { armor?: string | null; helmet?: string | null };
-    }): number => {
-      const inventory = target.inventory || [];
-      const slots = target.equipment_slots || { armor: null, helmet: null };
+    const findEquippedArmor = (
+      inventory: InventoryItem[],
+      slots?: { armor?: string | null; helmet?: string | null }
+    ) => {
+      const resolvedSlots = slots || { armor: null, helmet: null };
       const matchesSlot = (slotValue: string | null | undefined, item: InventoryItem) =>
         slotValue && (slotValue === item.id || slotValue === item.name);
-      const armor = inventory.find((item) => item.item_type === "Armor" && matchesSlot(slots.armor, item));
-      const helmet = inventory.find((item) => item.item_type === "Helmet" && matchesSlot(slots.helmet, item));
-      return Math.max(0, armor?.gearBonus ?? 0) + Math.max(0, helmet?.gearBonus ?? 0);
+      const armor = inventory.find((item) => item.item_type === "Armor" && matchesSlot(resolvedSlots.armor, item)) || null;
+      const helmet =
+        inventory.find((item) => item.item_type === "Helmet" && matchesSlot(resolvedSlots.helmet, item)) || null;
+      return { armor, helmet };
     };
-    const armorDiceForMonster = (snapshot: { natural_armor?: number; gear?: InventoryItem[]; equipment_slots?: any }) => {
+    const armorPartsForCharacter = (target: {
+      inventory?: InventoryItem[] | null;
+      equipment_slots?: { armor?: string | null; helmet?: string | null; armor_ask?: boolean } | null;
+    }) => {
+      const inventory = target.inventory || [];
+      const slots = target.equipment_slots || { armor: null, helmet: null, armor_ask: true };
+      const { armor, helmet } = findEquippedArmor(inventory, slots);
+      return {
+        armor,
+        helmet,
+        armorDice: Math.max(0, armor?.gearBonus ?? 0),
+        helmetDice: Math.max(0, helmet?.gearBonus ?? 0),
+        ask: slots.armor_ask !== false,
+      };
+    };
+    const armorPartsForMonster = (snapshot: {
+      natural_armor?: number;
+      gear?: InventoryItem[];
+      equipment_slots?: any;
+    }) => {
       const gear = snapshot.gear || [];
       const slots = snapshot.equipment_slots || { armor: null, helmet: null };
-      const matchesSlot = (slotValue: string | null | undefined, item: InventoryItem) =>
-        slotValue && (slotValue === item.id || slotValue === item.name);
-      const armor = gear.find((item) => item.item_type === "Armor" && matchesSlot(slots.armor, item));
-      const helmet = gear.find((item) => item.item_type === "Helmet" && matchesSlot(slots.helmet, item));
-      const gearDice = Math.max(0, armor?.gearBonus ?? 0) + Math.max(0, helmet?.gearBonus ?? 0);
-      const natural = Math.max(0, snapshot.natural_armor ?? 0);
-      return gearDice + natural;
+      const { armor, helmet } = findEquippedArmor(gear, slots);
+      return {
+        armor,
+        helmet,
+        armorDice: Math.max(0, armor?.gearBonus ?? 0) + Math.max(0, snapshot.natural_armor ?? 0),
+        helmetDice: Math.max(0, helmet?.gearBonus ?? 0),
+      };
     };
     const shouldOfferReaction =
       !attack.skipReaction &&
       successes > 0 &&
       reactionEligibleManeuvers.has(attack.maneuver);
+
+    if (attack.maneuver === "Heal") {
+      const healAttribute = attack.healAttribute;
+      if (!healAttribute) return;
+      const healAmount = Math.max(0, successes);
+      if (healAmount <= 0) return;
+
+      if (attack.targetCharacterId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: Record<string, unknown> | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              monster_snapshot?: Record<string, unknown> | null;
+            }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) console.error("Failed to load combat state for heal:", combatError);
+          return;
+        }
+
+        const entry = (combatState.initiative_entries || []).find(
+          (item) => item.participant_id === attack.targetCharacterId
+        );
+        const snapshot =
+          (entry?.monster_snapshot as Record<string, number> | null | undefined) ||
+          (combatState.initiative_monsters || []).find((m) => m.id === attack.targetCharacterId)
+            ?.monster_snapshot;
+        if (!snapshot) return;
+
+        const attrKey = healAttribute.toLowerCase();
+        const currentValue = Math.max(0, Number(snapshot[attrKey] ?? 0));
+        const baseMax =
+          healAttribute === "STR" || healAttribute === "AGL"
+            ? Math.max(0, Number(snapshot.physical ?? 0) * 2)
+            : Math.max(0, Number(snapshot.mental ?? 0) * 2);
+        const maxValue = Math.max(baseMax, currentValue);
+        const nextValue = Math.min(maxValue, currentValue + healAmount);
+
+        const nextMonsters = (combatState.initiative_monsters || []).map((monster) => {
+          if (monster.id !== attack.targetCharacterId || !monster.monster_snapshot) return monster;
+          return {
+            ...monster,
+            monster_snapshot: {
+              ...monster.monster_snapshot,
+              [attrKey]: nextValue,
+            },
+          };
+        });
+
+        const nextEntries = (combatState.initiative_entries || []).map((item) => {
+          if (item.participant_id !== attack.targetCharacterId || !item.monster_snapshot) return item;
+          return {
+            ...item,
+            monster_snapshot: {
+              ...(item.monster_snapshot as Record<string, number>),
+              [attrKey]: nextValue,
+            },
+          };
+        });
+
+        const { error: updateError } = await supabase
+          .from("combat_state")
+          .update({
+            initiative_monsters: nextMonsters,
+            initiative_entries: nextEntries,
+          })
+          .eq("id", 1);
+        if (updateError) {
+          console.error("Failed to apply monster heal:", updateError);
+        }
+        return;
+      }
+
+      const { data: target, error: targetError } = await supabase
+        .from("characters")
+        .select("id, attributes, max_attributes")
+        .eq("id", attack.targetCharacterId)
+        .maybeSingle<{ id: string; attributes: Attributes; max_attributes?: Attributes }>();
+      if (targetError || !target) {
+        if (targetError) console.error("Failed to load heal target:", targetError);
+        return;
+      }
+
+      const maxAttributes = target.max_attributes || target.attributes;
+      const currentValue = Math.max(0, target.attributes[healAttribute] ?? 0);
+      const maxValue = Math.max(0, maxAttributes[healAttribute] ?? 0);
+      const nextValue = Math.min(maxValue, currentValue + healAmount);
+      const nextAttributes: Attributes = {
+        ...target.attributes,
+        [healAttribute]: nextValue,
+      };
+
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update({ attributes: nextAttributes })
+        .eq("id", attack.targetCharacterId);
+      if (updateError) {
+        console.error("Failed to apply heal:", updateError);
+        return;
+      }
+      if (character?.id === attack.targetCharacterId) {
+        updateCharacter({ attributes: nextAttributes });
+      }
+      return;
+    }
+
+    if (attack.maneuver === "Taunt (Anger)" || attack.maneuver === "Taunt (Distract)") {
+      const tauntMode: "anger" | "distract" =
+        attack.maneuver === "Taunt (Anger)" ? "anger" : "distract";
+      const tauntSuccesses = Math.max(1, successes);
+      const attackerName = attack.attackerName ?? attack.attackerCharacterId;
+      const tauntPayload = {
+        mode: tauntMode,
+        attackerCharacterId: attack.attackerCharacterId,
+        attackerName,
+        targetCharacterId: attack.targetCharacterId,
+        successes: tauntSuccesses,
+      };
+
+      if (attack.targetCharacterId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_entries: Array<{
+              participant_id: string;
+              monster_snapshot?: { wit?: number | null; special?: number | null } | null;
+            }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) console.error("Failed to load taunt target:", combatError);
+          return;
+        }
+        const entry = (combatState.initiative_entries || []).find(
+          (item) => item.participant_id === attack.targetCharacterId
+        );
+        const snapshot = entry?.monster_snapshot;
+        const witValue = Math.max(0, Number(snapshot?.wit ?? 0));
+        const specialValue = Math.max(0, Number(snapshot?.special ?? 0));
+        if (witValue > 0) {
+          const insightSuccesses =
+            rollD6Pool(witValue).filter((d) => d === 6).length +
+            rollD6Pool(specialValue).filter((d) => d === 6).length;
+          const remaining = Math.max(0, tauntSuccesses - insightSuccesses);
+          await applyTauntToCombatState({
+            ...tauntPayload,
+            remainingSuccesses: remaining,
+          });
+        } else {
+          await applyTauntToCombatState({
+            ...tauntPayload,
+            remainingSuccesses: tauntSuccesses,
+          });
+        }
+        return;
+      }
+
+      const { data: target, error: targetError } = await supabase
+        .from("characters")
+        .select("id, attributes")
+        .eq("id", attack.targetCharacterId)
+        .maybeSingle<{ id: string; attributes: Attributes | null }>();
+      if (targetError || !target) {
+        if (targetError) console.error("Failed to load taunt target:", targetError);
+        return;
+      }
+      const witValue = Math.max(0, target.attributes?.WIT ?? 0);
+      if (witValue > 0) {
+        queueReactionRoll({
+          id: `insight:${attack.id}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+          reactionId: `insight:${attack.id}`,
+          targetCharacterId: attack.targetCharacterId,
+          mode: "insight",
+          rollType: "insight",
+          rollAttribute: "WIT",
+          rollSkill: "INSIGHT",
+          bonusDice: 0,
+          taunt: tauntPayload,
+        });
+      } else {
+        await applyTauntToCombatState({
+          ...tauntPayload,
+          remainingSuccesses: tauntSuccesses,
+        });
+      }
+      return;
+    }
 
     if (shouldOfferReaction) {
       const { data: combatState } = await supabase
@@ -721,6 +1053,61 @@ export default function Dashboard() {
       const { error: pruneError } = await supabase.rpc("combat_prune_fully_broken_engagements");
       if (pruneError) {
         console.error("Failed to prune broken/dead-only engagements:", pruneError);
+      }
+    };
+
+    const removeParticipantFromCombat = async (tokenId: string) => {
+      const { data: combatState, error: combatError } = await supabase
+        .from("combat_state")
+        .select("initiative_entries, initiative_current_index, initiative_monsters, token_positions, engagements")
+        .eq("id", 1)
+        .maybeSingle<{
+          initiative_entries: Array<{ participant_id: string }> | null;
+          initiative_current_index: number | null;
+          initiative_monsters: Array<{ id: string }> | null;
+          token_positions: Array<{ character_id: string }> | null;
+          engagements: Array<{ a: string; b: string }> | null;
+        }>();
+      if (combatError || !combatState) {
+        if (combatError) console.error("Failed to load combat state for flee:", combatError);
+        return;
+      }
+
+      const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+      const tokens = Array.isArray(combatState.token_positions) ? combatState.token_positions : [];
+      const edges = Array.isArray(combatState.engagements) ? combatState.engagements : [];
+      const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+      const isMonster = tokenId.startsWith("monster:");
+      const participantId = isMonster ? tokenId : `player:${tokenId}`;
+      const removedEntryIndex = entries.findIndex((entry) => entry.participant_id === participantId);
+      const nextEntries = entries.filter((entry) => entry.participant_id !== participantId);
+      const nextTokens = tokens.filter((token) => token.character_id !== tokenId);
+      const nextEdges = edges.filter((edge) => edge.a !== tokenId && edge.b !== tokenId);
+      const nextMonsters = isMonster ? monsters.filter((monster) => monster.id !== tokenId) : monsters;
+
+      let nextCurrent = combatState.initiative_current_index;
+      if (nextEntries.length === 0) {
+        nextCurrent = null;
+      } else if (nextCurrent !== null) {
+        if (removedEntryIndex === nextCurrent) {
+          nextCurrent = nextCurrent >= nextEntries.length ? 0 : nextCurrent;
+        } else if (removedEntryIndex >= 0 && removedEntryIndex < nextCurrent) {
+          nextCurrent = nextCurrent - 1;
+        }
+      }
+
+      const { error: updateError } = await supabase
+        .from("combat_state")
+        .update({
+          initiative_entries: nextEntries,
+          initiative_current_index: nextCurrent,
+          initiative_monsters: nextMonsters,
+          token_positions: nextTokens,
+          engagements: nextEdges,
+        })
+        .eq("id", 1);
+      if (updateError) {
+        console.error("Failed to remove participant from combat:", updateError);
       }
     };
 
@@ -926,6 +1313,12 @@ export default function Dashboard() {
       return;
     }
 
+    if (attack.maneuver === "Flee") {
+      if (!didSucceed) return;
+      await removeParticipantFromCombat(attack.attackerCharacterId);
+      return;
+    }
+
     if (attack.maneuver === "Shove") {
       const { error: shoveError } = await supabase.rpc("combat_resolve_shove", {
         p_actor_token_id: attack.attackerCharacterId,
@@ -1054,9 +1447,114 @@ export default function Dashboard() {
 
     if (successes <= 0) return;
 
+    const armorUsed = {
+      ...(attack.armorUsed || {}),
+    };
+    const armorSkipped = Boolean(attack.armorSkipped);
+    let remainingSuccesses = successes;
+
+    if (!armorSkipped && remainingSuccesses > 0) {
+      if (attack.targetCharacterId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: {
+                natural_armor?: number;
+                gear?: InventoryItem[];
+                equipment_slots?: { armor?: string | null; helmet?: string | null };
+              } | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              monster_snapshot?: {
+                natural_armor?: number;
+                gear?: InventoryItem[];
+                equipment_slots?: { armor?: string | null; helmet?: string | null };
+              } | null;
+            }> | null;
+          }>();
+        if (!combatError && combatState) {
+          const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+          const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+          const targetMonster = monsters.find((monster) => monster.id === attack.targetCharacterId);
+          const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
+          const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
+          if (snapshot) {
+            const { armorDice, helmetDice } = armorPartsForMonster(snapshot);
+            if (!armorUsed.helmet && helmetDice > 0) {
+              const armorRoll = rollArmorDice(helmetDice);
+              remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
+              armorUsed.helmet = true;
+            }
+            if (remainingSuccesses > 0 && !armorUsed.armor && armorDice > 0) {
+              const armorRoll = rollArmorDice(armorDice);
+              remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
+              armorUsed.armor = true;
+            }
+          }
+        }
+      } else {
+        const { data: target } = await supabase
+          .from("characters")
+          .select("id, inventory, equipment_slots")
+          .eq("id", attack.targetCharacterId)
+          .maybeSingle<{
+            id: string;
+            inventory?: InventoryItem[] | null;
+            equipment_slots?: { armor?: string | null; helmet?: string | null; armor_ask?: boolean } | null;
+          }>();
+        if (target) {
+          const { armor, helmet, armorDice, helmetDice, ask } = armorPartsForCharacter(target);
+          const canHelmet = helmetDice > 0 && !armorUsed.helmet;
+          const canArmor = armorDice > 0 && !armorUsed.armor;
+          if (canHelmet || canArmor) {
+            const shouldPrompt = ask && character?.id === attack.targetCharacterId;
+            if (shouldPrompt) {
+              if (!pendingArmorPrompt || pendingArmorPrompt.attack.id !== attack.id) {
+                setPendingArmorPrompt({
+                  id: `armor-prompt:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+                  targetCharacterId: attack.targetCharacterId,
+                  attack: {
+                    ...attack,
+                    totalSuccesses: remainingSuccesses,
+                    armorUsed,
+                  },
+                  helmetItemId: helmet?.id ?? null,
+                  helmetName: helmet?.name ?? null,
+                  helmetDice,
+                  armorItemId: armor?.id ?? null,
+                  armorName: armor?.name ?? null,
+                  armorDice,
+                  armorUsed,
+                });
+              }
+              return;
+            }
+
+            if (canHelmet) {
+              const armorRoll = rollArmorDice(helmetDice);
+              remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
+              armorUsed.helmet = true;
+            }
+            if (remainingSuccesses > 0 && canArmor) {
+              const armorRoll = rollArmorDice(armorDice);
+              remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
+              armorUsed.armor = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (remainingSuccesses <= 0) return;
+
     const damage =
       Math.max(0, attack.weaponBaseDamage) +
-      Math.max(0, successes - 1) +
+      Math.max(0, remainingSuccesses - 1) +
       Math.max(0, attack.swingBonusDamage ?? 0);
     if (damage <= 0) return;
 
@@ -1099,14 +1597,7 @@ export default function Dashboard() {
       const targetMonster = monsters.find((monster) => monster.id === attack.targetCharacterId);
       const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
       const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
-      let mitigatedDamage = damage;
-      if (snapshot) {
-        const armorDice = armorDiceForMonster(snapshot);
-        if (armorDice > 0) {
-          const armorRoll = rollArmorDice(armorDice);
-          mitigatedDamage = Math.max(0, damage - armorRoll.successes);
-        }
-      }
+      const mitigatedDamage = damage;
       if (mitigatedDamage <= 0) return;
 
       const nextMonsters = monsters.map((monster) => {
@@ -1169,11 +1660,7 @@ export default function Dashboard() {
     if (!target) return;
 
     let mitigatedDamage = damage;
-    const armorDice = armorDiceForCharacter(target);
-    if (armorDice > 0) {
-      const armorRoll = rollArmorDice(armorDice);
-      mitigatedDamage = Math.max(0, damage - armorRoll.successes);
-    }
+    mitigatedDamage = damage;
     if (mitigatedDamage <= 0) return;
 
     const nextAttributes: Attributes = {
@@ -1232,12 +1719,39 @@ export default function Dashboard() {
 
   const resolveReactionRoll = async (roll: ResolvedReactionRoll) => {
     const supabase = createClient();
+    if (roll.rollType === "insight") {
+      const taunt = roll.taunt;
+      if (!taunt) return;
+      const tauntSuccesses = Math.max(1, taunt.successes);
+      const remaining = Math.max(0, tauntSuccesses - Math.max(0, roll.totalSuccesses));
+      await applyTauntToCombatState({
+        targetCharacterId: taunt.targetCharacterId,
+        mode: taunt.mode,
+        remainingSuccesses: remaining,
+        attackerCharacterId: taunt.attackerCharacterId,
+        attackerName: taunt.attackerName,
+      });
+      return;
+    }
+    if (!roll.attack) return;
     const reducedSuccesses = Math.max(0, roll.attack.totalSuccesses - Math.max(0, roll.totalSuccesses));
     const finalAttack: ResolvedMeleeAttack = {
       ...roll.attack,
       totalSuccesses: reducedSuccesses,
       skipReaction: true,
     };
+
+    if (roll.rollType === "armor") {
+      const armorUsed = {
+        ...(roll.attack.armorUsed || {}),
+        ...(roll.armorSlot ? { [roll.armorSlot]: true } : {}),
+      };
+      await resolveMeleeAttack({
+        ...finalAttack,
+        armorUsed,
+      });
+      return;
+    }
 
     const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
       p_actor_token_id: roll.targetCharacterId,
@@ -1564,6 +2078,9 @@ export default function Dashboard() {
               onQueueMeleeAction={queueMeleeAction}
               onQueueReactionRoll={queueReactionRoll}
               onResolveMeleeAttack={resolveMeleeAttack}
+              pendingArmorPrompt={pendingArmorPrompt}
+              onConsumeArmorPrompt={clearPendingArmorPrompt}
+              onArmorPromptPass={handleArmorPromptPass}
             />
           )}
           {activeTab === "monsters" && (

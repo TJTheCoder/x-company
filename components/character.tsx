@@ -93,6 +93,12 @@ type ActiveReactionRoll = PendingReactionRoll & {
   attr: keyof Attributes;
 };
 
+const skillAttributeFor = (skillName: string | null | undefined): keyof Attributes | null => {
+  if (!skillName) return null;
+  const skill = allSkills.find((entry) => entry.name === skillName);
+  return skill ? skill.attribute : null;
+};
+
 export default function Character({
   character,
   updateCharacter,
@@ -204,6 +210,7 @@ export default function Character({
     void onResolveMeleeAttack({
       id: pending.id,
       attackerCharacterId: pending.attackerCharacterId,
+      attackerName: pending.attackerName,
       targetCharacterId: pending.targetCharacterId,
       weaponName: pending.weaponName,
       weaponBaseDamage: pending.weaponBaseDamage,
@@ -211,10 +218,13 @@ export default function Character({
       totalSuccesses: totalSuccessesFromRoll(roll),
       requiredSuccesses: pending.requiredSuccesses,
       swingBonusDamage: pending.swingBonusDamage,
+      healAttribute: pending.healAttribute,
       disarmTargetItemId: pending.disarmTargetItemId,
       disarmZoneId: pending.disarmZoneId,
       destinationX: pending.destinationX,
       destinationY: pending.destinationY,
+      shootTargetZoneId: pending.shootTargetZoneId,
+      shootAmmoItem: pending.shootAmmoItem,
     });
     onMeleeRollCleared();
   };
@@ -230,9 +240,12 @@ export default function Character({
       reactionId: pending.reactionId,
       targetCharacterId: pending.targetCharacterId,
       mode: pending.mode,
+      rollType: pending.rollType,
       totalSuccesses: totalSuccessesFromRoll(roll),
+      armorSlot: pending.armorSlot,
       applyProne: pending.applyProne,
       attack: pending.attack,
+      taunt: pending.taunt,
     });
     onReactionRollCleared();
   };
@@ -637,6 +650,14 @@ export default function Character({
       return;
     }
 
+    const skillAttribute = skillAttributeFor(rollSkill);
+    if (skillAttribute && (character.attributes?.[skillAttribute] ?? 0) <= 0) {
+      onConsumePendingMeleeAction(pendingMeleeAction.id);
+      handledPendingMeleeActionIdRef.current = pendingMeleeAction.id;
+      onMeleeRollCleared();
+      return;
+    }
+
     clearPreviousRoll(rollAttribute);
     if (hasRollFor(rollAttribute)) {
       clearRollAndResolveSpirit(rollAttribute);
@@ -663,7 +684,7 @@ export default function Character({
         gearDice: Array.from({ length: gearCount }, () => Math.floor(Math.random() * 6) + 1),
         poolUsed: gearCount > 0 ? "all" : "attribute+skill",
         hasBeenPushed: false,
-        requiredSuccesses: Math.max(0, pendingMeleeAction.requiredSuccesses ?? 1),
+        requiredSuccesses: Math.max(1, pendingMeleeAction.requiredSuccesses ?? 1),
         gearItemId: weapon?.id,
       },
     }));
@@ -689,6 +710,26 @@ export default function Character({
       return;
     }
 
+    const skillAttribute = skillAttributeFor(rollSkill);
+    if (pendingReactionRoll.rollType !== "armor" && skillAttribute && (character.attributes?.[skillAttribute] ?? 0) <= 0) {
+      onConsumePendingReactionRoll(pendingReactionRoll.id);
+      handledPendingReactionRollIdRef.current = pendingReactionRoll.id;
+      void onResolveReactionRoll({
+        id: pendingReactionRoll.id,
+        reactionId: pendingReactionRoll.reactionId,
+        targetCharacterId: pendingReactionRoll.targetCharacterId,
+        mode: pendingReactionRoll.mode,
+        rollType: pendingReactionRoll.rollType,
+        totalSuccesses: 0,
+        armorSlot: pendingReactionRoll.armorSlot,
+        applyProne: pendingReactionRoll.applyProne,
+        attack: pendingReactionRoll.attack,
+        taunt: pendingReactionRoll.taunt,
+      });
+      onReactionRollCleared();
+      return;
+    }
+
     clearPreviousRoll(rollAttribute);
     if (hasRollFor(rollAttribute)) {
       clearRollAndResolveSpirit(rollAttribute);
@@ -700,10 +741,16 @@ export default function Character({
     setBonusDice(`${pendingReactionRoll.bonusDice ?? 0}`);
     setActiveReactionRoll({ ...pendingReactionRoll, attr: rollAttribute });
 
-    const attrCount = character.attributes[rollAttribute] ?? 0;
-    const signedSkillCount = (character.skills[rollSkill] ?? 0) + (pendingReactionRoll.bonusDice ?? 0);
+    const attrCount =
+      pendingReactionRoll.fixedAttributeDice !== undefined
+        ? Math.max(0, pendingReactionRoll.fixedAttributeDice)
+        : character.attributes[rollAttribute] ?? 0;
+    const hasFixedSkill = pendingReactionRoll.fixedSkillDice !== undefined;
+    const signedSkillCount = hasFixedSkill
+      ? Math.max(0, pendingReactionRoll.fixedSkillDice as number)
+      : (character.skills[rollSkill] ?? 0) + (pendingReactionRoll.bonusDice ?? 0);
     const skillCount = Math.abs(signedSkillCount);
-    const skillIsNegative = signedSkillCount < 0;
+    const skillIsNegative = hasFixedSkill ? false : signedSkillCount < 0;
     const gearCount = usesGear ? Math.max(0, gearItem?.gearBonus ?? 0) : 0;
 
     setRollStates((prev) => ({
@@ -715,7 +762,7 @@ export default function Character({
         gearDice: Array.from({ length: gearCount }, () => Math.floor(Math.random() * 6) + 1),
         poolUsed: gearCount > 0 ? "all" : "attribute+skill",
         hasBeenPushed: false,
-        requiredSuccesses: 0,
+        requiredSuccesses: 1,
         gearItemId: gearItem?.id,
       },
     }));

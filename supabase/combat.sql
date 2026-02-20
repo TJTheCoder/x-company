@@ -5,6 +5,7 @@ create table if not exists public.combat_state (
   id int primary key check (id = 1),
   map_url text null,
   zone_lines jsonb not null default '[]'::jsonb,
+  zone_cover jsonb not null default '[]'::jsonb,
   token_positions jsonb not null default '[]'::jsonb,
   engagements jsonb not null default '[]'::jsonb,
   zone_loot jsonb not null default '[]'::jsonb,
@@ -34,6 +35,7 @@ create table if not exists public.monsters (
 );
 
 alter table public.combat_state add column if not exists zone_lines jsonb not null default '[]'::jsonb;
+alter table public.combat_state add column if not exists zone_cover jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists token_positions jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists engagements jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists zone_loot jsonb not null default '[]'::jsonb;
@@ -138,9 +140,9 @@ for delete to authenticated
 using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
 
 insert into public.combat_state (
-  id, map_url, zone_lines, token_positions, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, pending_reactions, updated_by_email
+  id, map_url, zone_lines, zone_cover, token_positions, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, pending_reactions, updated_by_email
 )
-values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, '[]'::jsonb, null)
+values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, '[]'::jsonb, null)
 on conflict (id) do nothing;
 
 create or replace function public.combat_upsert_player_token(
@@ -626,6 +628,10 @@ begin
     raise exception 'Only the active player can pass';
   end if;
 
+  v_current := jsonb_set(v_current, '{taunted_anger_by_id}', 'null'::jsonb, true);
+  v_current := jsonb_set(v_current, '{taunted_anger_by_name}', 'null'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
+
   v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
 
   if v_next_idx = 0 and v_count > 0 then
@@ -639,6 +645,7 @@ begin
   else
     update public.combat_state
     set initiative_current_index = v_next_idx,
+        initiative_entries = v_entries,
         updated_by_email = v_email
     where id = 1;
   end if;
@@ -707,6 +714,8 @@ begin
     raise exception 'Action already used';
   end if;
 
+  v_current := jsonb_set(v_current, '{taunted_anger_by_id}', 'null'::jsonb, true);
+  v_current := jsonb_set(v_current, '{taunted_anger_by_name}', 'null'::jsonb, true);
   v_current := jsonb_set(v_current, array[v_key], 'false'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
   v_after_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
@@ -801,6 +810,8 @@ begin
     raise exception 'No fast or slow action available';
   end if;
 
+  v_current := jsonb_set(v_current, '{taunted_anger_by_id}', 'null'::jsonb, true);
+  v_current := jsonb_set(v_current, '{taunted_anger_by_name}', 'null'::jsonb, true);
   v_current := jsonb_set(v_current, array[v_key], 'false'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
   v_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
@@ -836,6 +847,204 @@ end;
 $$;
 
 grant execute on function public.combat_use_fast_or_slow() to authenticated;
+
+create or replace function public.combat_clear_taunt_anger(
+  p_actor_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    return;
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    return;
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can update taunt state';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can update taunt state';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{taunted_anger_by_id}', 'null'::jsonb, true);
+  v_entry := jsonb_set(v_entry, '{taunted_anger_by_name}', 'null'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_clear_taunt_anger(text) to authenticated;
+
+create or replace function public.combat_consume_taunt_distract(
+  p_actor_token_id text
+)
+returns int
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_count int;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_penalty int := 0;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select initiative_entries
+  into v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if v_entries is null then
+    v_entries := '[]'::jsonb;
+  end if;
+  v_count := jsonb_array_length(v_entries);
+  if v_count = 0 then
+    return 0;
+  end if;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    return 0;
+  end if;
+
+  v_entry_kind := coalesce(v_entry->>'kind', '');
+  v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+
+  if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only player characters can update taunt state';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can update taunt state';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only update your own character';
+    end if;
+  end if;
+
+  begin
+    v_penalty := greatest(0, coalesce((v_entry->>'taunted_distract_value')::int, 0));
+  exception when others then
+    v_penalty := 0;
+  end;
+
+  if v_penalty <= 0 then
+    return 0;
+  end if;
+
+  v_entry := jsonb_set(v_entry, '{taunted_distract_value}', 'null'::jsonb, true);
+  v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
+
+  return v_penalty;
+end;
+$$;
+
+grant execute on function public.combat_consume_taunt_distract(text) to authenticated;
 
 create or replace function public.combat_enqueue_reaction(
   p_reaction jsonb

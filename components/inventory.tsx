@@ -39,6 +39,8 @@ type InventoryProps = {
   onDrawGearFinished: () => void;
 };
 
+type EquippableSlotKey = "armor" | "helmet" | "left" | "right";
+
 export default function Inventory({
   character,
   updateCharacter,
@@ -70,11 +72,13 @@ export default function Inventory({
     helmet: null,
     left: null,
     right: null,
+    armor_ask: true,
   };
   const equipmentSlots: EquipmentSlots = {
     ...defaultSlots,
     ...(character?.equipment_slots || {}),
   };
+  const armorAsk = equipmentSlots.armor_ask !== false;
   const equippedItemIds = new Set(
     [equipmentSlots.armor, equipmentSlots.helmet, equipmentSlots.left, equipmentSlots.right].filter(
       (value): value is string => !!value
@@ -90,6 +94,13 @@ export default function Inventory({
     if (next.left && !ids.has(next.left)) next.left = null;
     if (next.right && !ids.has(next.right)) next.right = null;
     return next;
+  };
+
+  const toggleArmorAsk = async () => {
+    const nextSlots = { ...equipmentSlots, armor_ask: !armorAsk };
+    const updates = { equipment_slots: nextSlots };
+    updateCharacter(updates);
+    await saveCharacter(updates);
   };
 
   const getSlotItem = (slot: keyof EquipmentSlots): InventoryItem | null => {
@@ -189,7 +200,7 @@ export default function Inventory({
     }
   };
 
-  const clearSlot = (slot: keyof EquipmentSlots) => {
+  const clearSlot = (slot: EquippableSlotKey) => {
     const nextSlots: EquipmentSlots = { ...equipmentSlots };
     if (slot === "left" || slot === "right") {
       const value = nextSlots[slot];
@@ -207,7 +218,7 @@ export default function Inventory({
     saveCharacter(updates);
   };
 
-  const onSlotDrop = (slot: keyof EquipmentSlots, event: React.DragEvent<HTMLDivElement>) => {
+  const onSlotDrop = (slot: EquippableSlotKey, event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     const itemId = event.dataTransfer.getData("application/x-inventory-item-id");
     if (!itemId) return;
@@ -635,6 +646,17 @@ export default function Inventory({
                 </div>
               ) : (
                 <div className="text-sm text-amber-200/50">Empty</div>
+              )}
+              {(slot === "armor" || slot === "helmet") && (
+                <label className="mt-2 flex items-center gap-2 text-xs text-amber-200/80">
+                  <input
+                    type="checkbox"
+                    checked={armorAsk}
+                    onChange={toggleArmorAsk}
+                    className="h-3.5 w-3.5 rounded border-amber-400/60 bg-gray-900 text-amber-400 focus:ring-amber-500"
+                  />
+                  Ask
+                </label>
               )}
             </div>
           );

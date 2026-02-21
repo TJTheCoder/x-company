@@ -248,6 +248,7 @@ export default function Character({
       destinationY: pending.destinationY,
       shootTargetZoneId: pending.shootTargetZoneId,
       shootAmmoItem: pending.shootAmmoItem,
+      rangeAtAttack: pending.rangeAtAttack,
     });
     onMeleeRollCleared();
   };
@@ -650,6 +651,7 @@ export default function Character({
               swingBonusDamage: pendingAttack.swingBonusDamage,
               disarmTargetItemId: pendingAttack.disarmTargetItemId,
               disarmZoneId: pendingAttack.disarmZoneId,
+              rangeAtAttack: pendingAttack.rangeAtAttack,
             } satisfies ResolvedMeleeAttack),
           );
         } catch {

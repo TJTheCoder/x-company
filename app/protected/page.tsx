@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { normalizeInventoryItems } from "@/lib/item-catalog";
+import { applyGearDamageToItem, normalizeInventoryItems } from "@/lib/item-catalog";
+import artsCatalogData from "../../data/arts.json";
 import Character from "../../components/character";
 import Inventory from "../../components/inventory";
 import Arts from "../../components/arts";
@@ -125,6 +126,7 @@ export type PendingMeleeAction = {
   destinationY?: number;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
 };
 
 export type ResolvedMeleeAttack = {
@@ -164,9 +166,11 @@ export type ResolvedMeleeAttack = {
   destinationY?: number;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   skipReaction?: boolean;
   armorUsed?: { helmet?: boolean; armor?: boolean };
   armorSkipped?: boolean;
+  sunderResolved?: boolean;
 };
 
 export type PendingReactionRoll = {
@@ -225,6 +229,42 @@ export type PendingArmorPrompt = {
   armorUsed?: { helmet?: boolean; armor?: boolean };
 };
 
+export type PendingSunderPrompt = {
+  id: string;
+  attackerCharacterId: string;
+  attack: ResolvedMeleeAttack;
+  options: Array<{
+    itemId: string;
+    itemName: string;
+    slot: "left" | "right" | "armor" | "helmet";
+    targetIsMonster: boolean;
+  }>;
+};
+
+export type PendingArtRoll = {
+  id: string;
+  actorCharacterId: string;
+  artId: string;
+  displayName?: string;
+  sunder?: {
+    attack: ResolvedMeleeAttack;
+    targetItemId: string;
+    targetItemName: string;
+    targetIsMonster: boolean;
+  };
+};
+
+export type ResolvedArtRoll = {
+  pendingRollId?: string;
+  artId: string;
+  artName: string;
+  successes: number;
+  scaling: number;
+  spiritGenerated: number;
+  activated: boolean;
+  context?: PendingArtRoll;
+};
+
 type WagonData = {
   wagon1: InventoryItem[];
   wagon2: InventoryItem[];
@@ -240,6 +280,36 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 const FLAME_MAX_INTENSITY = 9;
 const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
+const artsCatalog = artsCatalogData as Art[];
+
+type ParsedArtCost = {
+  minSuccesses: number;
+  hasScaling: boolean;
+  scaleStep: number;
+};
+
+const parseArtCost = (cost: string): ParsedArtCost => {
+  const normalized = cost.replace(/\s+/g, "").toUpperCase();
+
+  if (/^\d+$/.test(normalized)) {
+    return { minSuccesses: parseInt(normalized, 10), hasScaling: false, scaleStep: 0 };
+  }
+
+  const xOnly = normalized.match(/^(\d*)X$/);
+  if (xOnly) {
+    const coeff = xOnly[1] ? parseInt(xOnly[1], 10) : 1;
+    return { minSuccesses: 0, hasScaling: true, scaleStep: Math.max(1, coeff) };
+  }
+
+  const withPlus = normalized.match(/^(\d+)\+(\d*)X$/);
+  if (withPlus) {
+    const min = parseInt(withPlus[1], 10);
+    const coeff = withPlus[2] ? parseInt(withPlus[2], 10) : 1;
+    return { minSuccesses: min, hasScaling: true, scaleStep: Math.max(1, coeff) };
+  }
+
+  return { minSuccesses: 0, hasScaling: false, scaleStep: 0 };
+};
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<
@@ -260,6 +330,9 @@ export default function Dashboard() {
   const [pendingReactionRoll, setPendingReactionRoll] = useState<PendingReactionRoll | null>(null);
   const [reactionRollReturnToCombat, setReactionRollReturnToCombat] = useState(false);
   const [pendingArmorPrompt, setPendingArmorPrompt] = useState<PendingArmorPrompt | null>(null);
+  const [pendingSunderPrompt, setPendingSunderPrompt] = useState<PendingSunderPrompt | null>(null);
+  const [pendingArtRoll, setPendingArtRoll] = useState<PendingArtRoll | null>(null);
+  const [artRollReturnToCombat, setArtRollReturnToCombat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -597,6 +670,12 @@ export default function Dashboard() {
     setActiveTab("character");
   };
 
+  const queueArtRoll = (roll: PendingArtRoll) => {
+    setPendingArtRoll(roll);
+    setArtRollReturnToCombat(true);
+    setActiveTab("arts");
+  };
+
   const clearPendingMeleeAction = (actionId: string) => {
     setPendingMeleeAction((prev) => (prev?.id === actionId ? null : prev));
   };
@@ -607,6 +686,14 @@ export default function Dashboard() {
 
   const clearPendingArmorPrompt = (promptId: string) => {
     setPendingArmorPrompt((prev) => (prev?.id === promptId ? null : prev));
+  };
+
+  const clearPendingSunderPrompt = (promptId: string) => {
+    setPendingSunderPrompt((prev) => (prev?.id === promptId ? null : prev));
+  };
+
+  const clearPendingArtRoll = (rollId: string) => {
+    setPendingArtRoll((prev) => (prev?.id === rollId ? null : prev));
   };
 
   const handleArmorPromptPass = async (attack: ResolvedMeleeAttack) => {
@@ -626,6 +713,12 @@ export default function Dashboard() {
     if (!reactionRollReturnToCombat) return;
     setActiveTab("combat");
     setReactionRollReturnToCombat(false);
+  };
+
+  const onArtRollCleared = () => {
+    if (!artRollReturnToCombat) return;
+    setActiveTab("combat");
+    setArtRollReturnToCombat(false);
   };
 
   const rollD6Pool = (count: number): number[] =>
@@ -1083,6 +1176,41 @@ export default function Dashboard() {
         (attributes.EMP ?? 0) <= 0
       );
     };
+    const hasArtId = (artId: string, source: {
+      known_art_ids?: string[] | null;
+      equipped_art_ids?: string[] | null;
+      arts?: Art[] | null;
+      equipped_arts?: Art[] | null;
+    } | null | undefined): boolean => {
+      if (!source) return false;
+      if ((source.known_art_ids || []).includes(artId)) return true;
+      if ((source.equipped_art_ids || []).includes(artId)) return true;
+      if ((source.arts || []).some((art) => art?.id === artId)) return true;
+      if ((source.equipped_arts || []).some((art) => art?.id === artId)) return true;
+      return false;
+    };
+    const equippedSunderTargets = (
+      items: InventoryItem[],
+      slots?: EquipmentSlots | null
+    ): Array<{ itemId: string; itemName: string; slot: "left" | "right" | "armor" | "helmet" }> => {
+      const slotValues = slots || { left: null, right: null, armor: null, helmet: null };
+      const out: Array<{ itemId: string; itemName: string; slot: "left" | "right" | "armor" | "helmet" }> = [];
+      const seen = new Set<string>();
+      const addSlotItem = (slot: "left" | "right" | "armor" | "helmet") => {
+        const value = slotValues[slot];
+        if (!value) return;
+        const item = items.find((entry) => entry.id === value || entry.name === value);
+        if (!item || !item.id || seen.has(item.id)) return;
+        if (Math.max(0, Math.trunc(item.gearBonus ?? 0)) <= 0) return;
+        seen.add(item.id);
+        out.push({ itemId: item.id, itemName: item.name, slot });
+      };
+      addSlotItem("left");
+      addSlotItem("right");
+      addSlotItem("armor");
+      addSlotItem("helmet");
+      return out;
+    };
     const rollArmorDice = (count: number): { dice: number[]; successes: number } => {
       const dice = Array.from({ length: Math.max(0, count) }, () => Math.floor(Math.random() * 6) + 1);
       const successes = dice.filter((d) => d === 6).length;
@@ -1534,6 +1662,7 @@ export default function Dashboard() {
             destinationY: attack.destinationY ?? null,
             shootTargetZoneId: attack.shootTargetZoneId ?? null,
             shootAmmoItem: attack.shootAmmoItem ?? null,
+            rangeAtAttack: attack.rangeAtAttack ?? null,
             createdAt: new Date().toISOString(),
           };
           const { error: reactionError } = await supabase.rpc("combat_enqueue_reaction", {
@@ -1947,6 +2076,175 @@ export default function Dashboard() {
     }
 
     if (successes <= 0) return;
+    if (
+      !attack.sunderResolved &&
+      (attack.maneuver === "Slash" ||
+        attack.maneuver === "Stab" ||
+        attack.maneuver === "Strike" ||
+        attack.maneuver === "Shoot") &&
+      attack.rangeAtAttack === "Near"
+    ) {
+      const sunderArt = artsCatalog.find((art) => art.id === "art-sunder") || null;
+      const sunderCost = parseArtCost(sunderArt?.cost || "X");
+      const minSpirit = Math.max(0, sunderCost.minSuccesses);
+      const { data: combatState, error: combatError } = await supabase
+        .from("combat_state")
+        .select("initiative_entries, initiative_monsters")
+        .eq("id", 1)
+        .maybeSingle<{
+          initiative_entries: Array<{
+            participant_id: string;
+            kind?: "player" | "monster";
+            fast_available?: boolean | null;
+            prone?: boolean | null;
+            covered?: boolean | null;
+            dead?: boolean | null;
+            grappled_by_id?: string | null;
+            clung_onto_by_id?: string | null;
+            clung_onto_by_ids?: string[] | null;
+            monster_snapshot?: {
+              str?: number | null;
+              agl?: number | null;
+              wit?: number | null;
+              emp?: number | null;
+              dead?: boolean | null;
+              spirits_current?: number | null;
+              starting_spirits?: number | null;
+              arts?: Art[] | null;
+              gear?: InventoryItem[] | null;
+              equipment_slots?: EquipmentSlots | null;
+            } | null;
+          }> | null;
+          initiative_monsters: Array<{
+            id: string;
+            monster_snapshot?: {
+              gear?: InventoryItem[] | null;
+              equipment_slots?: EquipmentSlots | null;
+            } | null;
+          }> | null;
+        }>();
+      if (!combatError && combatState) {
+        const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+        const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+        const attackerEntry =
+          entries.find(
+            (entry) =>
+              entry.participant_id === attack.attackerCharacterId ||
+              entry.participant_id === `player:${attack.attackerCharacterId}`
+          ) || null;
+        const targetEntry =
+          entries.find(
+            (entry) =>
+              entry.participant_id === attack.targetCharacterId ||
+              entry.participant_id === `player:${attack.targetCharacterId}`
+          ) || null;
+
+        if (attackerEntry && targetEntry) {
+          const attackerIsMonster =
+            attack.attackerCharacterId.startsWith("monster:") || attackerEntry.kind === "monster";
+          const attackerHeld =
+            Boolean(attackerEntry.grappled_by_id) ||
+            Boolean(attackerEntry.clung_onto_by_id) ||
+            Boolean((attackerEntry.clung_onto_by_ids || []).length > 0);
+          const attackerCanAct =
+            attackerEntry.fast_available !== false &&
+            !Boolean(attackerEntry.prone) &&
+            !Boolean(attackerEntry.covered) &&
+            !Boolean(attackerEntry.dead) &&
+            !attackerHeld;
+
+          let attackerHasArt = false;
+          let attackerSpirits = 0;
+          let attackerBroken = false;
+          if (attackerIsMonster) {
+            const snapshot = attackerEntry.monster_snapshot || null;
+            attackerHasArt = hasArtId("art-sunder", { arts: snapshot?.arts || [] });
+            attackerSpirits = Math.max(
+              0,
+              Number(snapshot?.spirits_current ?? snapshot?.starting_spirits ?? 0)
+            );
+            attackerBroken =
+              Boolean(snapshot?.dead) ||
+              (snapshot?.str ?? 1) <= 0 ||
+              (snapshot?.agl ?? 1) <= 0 ||
+              (snapshot?.wit ?? 1) <= 0 ||
+              (snapshot?.emp ?? 1) <= 0;
+          } else {
+            const { data: attackerCharacter } = await supabase
+              .from("characters")
+              .select("id, spirits, dead, attributes, known_art_ids, equipped_art_ids, arts, equipped_arts")
+              .eq("id", attack.attackerCharacterId)
+              .maybeSingle<{
+                id: string;
+                spirits: number;
+                dead?: boolean | null;
+                attributes?: Attributes | null;
+                known_art_ids?: string[] | null;
+                equipped_art_ids?: string[] | null;
+                arts?: Art[] | null;
+                equipped_arts?: Art[] | null;
+              }>();
+            attackerHasArt = hasArtId("art-sunder", attackerCharacter);
+            attackerSpirits = Math.max(0, Number(attackerCharacter?.spirits ?? 0));
+            attackerBroken = Boolean(attackerCharacter?.dead) || isBroken(attackerCharacter?.attributes);
+          }
+
+          if (attackerCanAct && !attackerBroken && attackerHasArt && attackerSpirits >= minSpirit) {
+            let options: Array<{
+              itemId: string;
+              itemName: string;
+              slot: "left" | "right" | "armor" | "helmet";
+              targetIsMonster: boolean;
+            }> = [];
+            const targetIsMonster =
+              attack.targetCharacterId.startsWith("monster:") || targetEntry.kind === "monster";
+            if (targetIsMonster) {
+              const targetMonster = monsters.find((m) => m.id === attack.targetCharacterId);
+              const snapshot =
+                targetEntry.monster_snapshot || targetMonster?.monster_snapshot || null;
+              options = equippedSunderTargets(
+                (snapshot?.gear || []) as InventoryItem[],
+                (snapshot?.equipment_slots || {
+                  left: null,
+                  right: null,
+                  armor: null,
+                  helmet: null,
+                }) as EquipmentSlots
+              ).map((item) => ({ ...item, targetIsMonster: true }));
+            } else {
+              const { data: targetCharacter } = await supabase
+                .from("characters")
+                .select("id, inventory, equipment_slots")
+                .eq("id", attack.targetCharacterId)
+                .maybeSingle<{
+                  id: string;
+                  inventory?: InventoryItem[] | null;
+                  equipment_slots?: EquipmentSlots | null;
+                }>();
+              options = equippedSunderTargets(
+                targetCharacter?.inventory || [],
+                targetCharacter?.equipment_slots || { left: null, right: null, armor: null, helmet: null }
+              ).map((item) => ({ ...item, targetIsMonster: false }));
+            }
+
+            if (options.length > 0) {
+              setPendingSunderPrompt({
+                id: `sunder-prompt:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+                attackerCharacterId: attack.attackerCharacterId,
+                attack: {
+                  ...attack,
+                  skipReaction: true,
+                },
+                options,
+              });
+              return;
+            }
+          }
+        }
+      } else if (combatError) {
+        console.error("Failed to load combat state for sunder prompt:", combatError);
+      }
+    }
 
     const armorUsed = {
       ...(attack.armorUsed || {}),
@@ -2251,9 +2549,6 @@ export default function Dashboard() {
 
       const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
       const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
-      const targetMonster = monsters.find((monster) => monster.id === attack.targetCharacterId);
-      const targetEntry = entries.find((entry) => entry.participant_id === attack.targetCharacterId);
-      const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
       const mitigatedDamage = damage;
       if (mitigatedDamage <= 0) return;
 
@@ -2465,6 +2760,185 @@ export default function Dashboard() {
     }
 
     await resolveMeleeAttack(finalAttack);
+  };
+
+  const resolveArtRoll = async (roll: ResolvedArtRoll) => {
+    const context = roll.context;
+    if (!context?.sunder) return;
+    const sunderContext = context.sunder;
+    const sunderDamage = Math.max(0, roll.scaling);
+    const supabase = createClient();
+
+    const clearDestroyedItemSlots = (
+      slots: EquipmentSlots | null | undefined,
+      targetItemId: string,
+      targetItemName: string
+    ): EquipmentSlots => {
+      const current = slots || { left: null, right: null, armor: null, helmet: null };
+      const matches = (slotValue: string | null | undefined) =>
+        Boolean(slotValue && (slotValue === targetItemId || slotValue === targetItemName));
+      return {
+        ...current,
+        left: matches(current.left) ? null : current.left,
+        right: matches(current.right) ? null : current.right,
+        armor: matches(current.armor) ? null : current.armor,
+        helmet: matches(current.helmet) ? null : current.helmet,
+      };
+    };
+
+    if (sunderDamage > 0) {
+      if (sunderContext.targetIsMonster) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{ id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+            initiative_entries: Array<{ participant_id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) {
+            console.error("Failed to load combat state for sunder:", combatError);
+          }
+        } else {
+          const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+          const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+          const targetEntry = entries.find(
+            (entry) => entry.participant_id === sunderContext.attack.targetCharacterId
+          );
+          const targetMonster = monsters.find(
+            (monster) => monster.id === sunderContext.attack.targetCharacterId
+          );
+          const snapshot = (targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null) as
+            | {
+                gear?: InventoryItem[];
+                equipment_slots?: EquipmentSlots;
+              }
+            | null;
+          if (snapshot) {
+            const sourceGear = snapshot.gear || [];
+            const nextGear = applyGearDamageToItem(sourceGear, sunderContext.targetItemId, sunderDamage);
+            const destroyed = !nextGear.some((item) => item.id === sunderContext.targetItemId);
+            const nextSlots = destroyed
+              ? clearDestroyedItemSlots(
+                  snapshot.equipment_slots || { left: null, right: null, armor: null, helmet: null },
+                  sunderContext.targetItemId,
+                  sunderContext.targetItemName
+                )
+              : snapshot.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+
+            const nextMonsters = monsters.map((monster) => {
+              if (monster.id !== sunderContext.attack.targetCharacterId) return monster;
+              return {
+                ...monster,
+                monster_snapshot: {
+                  ...(monster.monster_snapshot || {}),
+                  gear: nextGear,
+                  equipment_slots: nextSlots,
+                },
+              };
+            });
+            const nextEntries = entries.map((entry) => {
+              if (entry.participant_id !== sunderContext.attack.targetCharacterId) return entry;
+              return {
+                ...entry,
+                monster_snapshot: {
+                  ...(entry.monster_snapshot || {}),
+                  gear: nextGear,
+                  equipment_slots: nextSlots,
+                },
+              };
+            });
+            const { error: updateError } = await supabase
+              .from("combat_state")
+              .update({
+                initiative_monsters: nextMonsters,
+                initiative_entries: nextEntries,
+              })
+              .eq("id", 1);
+            if (updateError) {
+              console.error("Failed to apply sunder to monster gear:", updateError);
+            }
+          }
+        }
+      } else {
+        const { data: target, error: targetError } = await supabase
+          .from("characters")
+          .select("id, inventory, equipment_slots")
+          .eq("id", sunderContext.attack.targetCharacterId)
+          .maybeSingle<{
+            id: string;
+            inventory?: InventoryItem[] | null;
+            equipment_slots?: EquipmentSlots | null;
+          }>();
+        if (targetError || !target) {
+          if (targetError) {
+            console.error("Failed to load target for sunder:", targetError);
+          }
+        } else {
+          const sourceInventory = target.inventory || [];
+          const nextInventory = applyGearDamageToItem(sourceInventory, sunderContext.targetItemId, sunderDamage);
+          const destroyed = !nextInventory.some((item) => item.id === sunderContext.targetItemId);
+          const nextSlots = destroyed
+            ? clearDestroyedItemSlots(
+                target.equipment_slots || { left: null, right: null, armor: null, helmet: null },
+                sunderContext.targetItemId,
+                sunderContext.targetItemName
+              )
+            : target.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+          const { error: updateError } = await supabase
+            .from("characters")
+            .update({ inventory: nextInventory, equipment_slots: nextSlots })
+            .eq("id", sunderContext.attack.targetCharacterId);
+          if (updateError) {
+            console.error("Failed to apply sunder to character gear:", updateError);
+          } else if (character?.id === sunderContext.attack.targetCharacterId) {
+            updateCharacter({ inventory: nextInventory, equipment_slots: nextSlots });
+          }
+        }
+      }
+    }
+
+    await resolveMeleeAttack({
+      ...sunderContext.attack,
+      sunderResolved: true,
+      skipReaction: true,
+    });
+  };
+
+  const handleSunderPromptPass = async (promptId: string) => {
+    const prompt = pendingSunderPrompt;
+    clearPendingSunderPrompt(promptId);
+    if (!prompt || prompt.id !== promptId) return;
+    await resolveMeleeAttack({
+      ...prompt.attack,
+      sunderResolved: true,
+      skipReaction: true,
+    });
+  };
+
+  const handleSunderPromptRoll = async (promptId: string, targetItemId: string) => {
+    const prompt = pendingSunderPrompt;
+    if (!prompt || prompt.id !== promptId) return;
+    const selected = prompt.options.find((opt) => opt.itemId === targetItemId);
+    if (!selected) return;
+    clearPendingSunderPrompt(promptId);
+    queueArtRoll({
+      id: `art-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      actorCharacterId: prompt.attackerCharacterId,
+      artId: "art-sunder",
+      displayName: `Sunder (${selected.itemName})`,
+      sunder: {
+        attack: {
+          ...prompt.attack,
+          sunderResolved: true,
+          skipReaction: true,
+        },
+        targetItemId: selected.itemId,
+        targetItemName: selected.itemName,
+        targetIsMonster: selected.targetIsMonster,
+      },
+    });
   };
 
   if (showCharacterSelect) {
@@ -2749,6 +3223,10 @@ export default function Dashboard() {
               character={character}
               updateCharacter={updateCharacter}
               saveCharacter={saveCharacter}
+              pendingArtRoll={pendingArtRoll}
+              onConsumePendingArtRoll={clearPendingArtRoll}
+              onResolveArtRoll={resolveArtRoll}
+              onArtRollCleared={onArtRollCleared}
             />
           )}
           {activeTab === "talents" && (
@@ -2769,6 +3247,10 @@ export default function Dashboard() {
               pendingArmorPrompt={pendingArmorPrompt}
               onConsumeArmorPrompt={clearPendingArmorPrompt}
               onArmorPromptPass={handleArmorPromptPass}
+              pendingSunderPrompt={pendingSunderPrompt}
+              onConsumeSunderPrompt={clearPendingSunderPrompt}
+              onSunderPromptPass={handleSunderPromptPass}
+              onSunderPromptRoll={handleSunderPromptRoll}
             />
           )}
           {activeTab === "monsters" && (

@@ -1,6 +1,7 @@
 import type {
   CharacterType,
   InventoryItem,
+  PendingSunderPrompt,
   PendingArmorPrompt,
   PendingMeleeAction,
   PendingReactionRoll,
@@ -20,6 +21,10 @@ export type CombatProps = {
   pendingArmorPrompt?: PendingArmorPrompt | null;
   onConsumeArmorPrompt?: (promptId: string) => void;
   onArmorPromptPass?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
+  pendingSunderPrompt?: PendingSunderPrompt | null;
+  onConsumeSunderPrompt?: (promptId: string) => void;
+  onSunderPromptPass?: (promptId: string) => void | Promise<void>;
+  onSunderPromptRoll?: (promptId: string, targetItemId: string) => void | Promise<void>;
 };
 
 export type ZonePoint = {
@@ -159,6 +164,7 @@ export type PendingReaction = {
   destinationY?: number | null;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   createdAt?: string | null;
 };
 
@@ -628,6 +634,14 @@ export function normalizePendingReactions(raw: PendingReaction[] | null | undefi
       shootTargetZoneId: typeof v.shootTargetZoneId === "number" ? v.shootTargetZoneId : null,
       shootAmmoItem:
         v.shootAmmoItem && typeof v.shootAmmoItem === "object" ? (v.shootAmmoItem as InventoryItem) : null,
+      rangeAtAttack:
+        v.rangeAtAttack === "Engaged" ||
+        v.rangeAtAttack === "Near" ||
+        v.rangeAtAttack === "Close" ||
+        v.rangeAtAttack === "Long" ||
+        v.rangeAtAttack === "Distant"
+          ? v.rangeAtAttack
+          : null,
       createdAt: typeof v.createdAt === "string" ? v.createdAt : null,
     });
   }

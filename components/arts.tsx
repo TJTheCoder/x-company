@@ -1,13 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Art, CharacterType } from "../app/protected/page";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Art, CharacterType, PendingArtRoll, ResolvedArtRoll } from "../app/protected/page";
 import artsCatalogData from "../data/arts.json";
 
 type ArtsProps = {
   character: CharacterType | null;
   updateCharacter: (updates: Partial<CharacterType>) => void;
   saveCharacter: (updates: Partial<CharacterType>) => void;
+  pendingArtRoll?: PendingArtRoll | null;
+  onConsumePendingArtRoll?: (rollId: string) => void;
+  onResolveArtRoll?: (roll: ResolvedArtRoll) => void | Promise<void>;
+  onArtRollCleared?: () => void;
 };
 
 type ParsedCost = {
@@ -17,6 +21,7 @@ type ParsedCost = {
 };
 
 type ArtRollResult = {
+  artId: string;
   artName: string;
   dice: number[];
   successes: number;
@@ -27,6 +32,8 @@ type ArtRollResult = {
   spiritBefore: number;
   spiritAfter: number;
   minRequired: number;
+  pendingRollId?: string;
+  pendingContext?: PendingArtRoll;
 };
 
 const DEFAULT_ART_IDS = ["art-true-sense", "art-sunder"];
@@ -66,8 +73,17 @@ const parseCost = (cost: string): ParsedCost => {
   return { minSuccesses: 0, hasScaling: false, scaleStep: 0 };
 };
 
-export default function Arts({ character, updateCharacter, saveCharacter }: ArtsProps) {
+export default function Arts({
+  character,
+  updateCharacter,
+  saveCharacter,
+  pendingArtRoll,
+  onConsumePendingArtRoll,
+  onResolveArtRoll,
+  onArtRollCleared,
+}: ArtsProps) {
   const [result, setResult] = useState<ArtRollResult | null>(null);
+  const handledPendingRollIdRef = useRef<string | null>(null);
 
   const catalogById = useMemo(() => {
     const map = new Map<string, Art>();
@@ -105,11 +121,8 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
     );
   };
 
-  if (!character) {
-    return <p className="text-amber-300 text-center">No character found for your account.</p>;
-  }
-
   const incrementSpirit = () => {
+    if (!character) return;
     const updates = {
       spirits: (character.spirits ?? 0) + 1,
     };
@@ -118,6 +131,7 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
   };
 
   const decrementSpirit = () => {
+    if (!character) return;
     const currentValue = character.spirits ?? 0;
     if (currentValue <= 0) return;
     const updates = {
@@ -127,11 +141,13 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
     saveCharacter(updates);
   };
 
-  const handleArtClick = (art: Art) => {
+  const handleArtClick = (art: Art, pending?: { rollId?: string; context?: PendingArtRoll; displayName?: string }) => {
+    if (!character) return;
     const spiritBefore = Math.max(0, character.spirits ?? 0);
     if (spiritBefore <= 0) {
       setResult({
-        artName: art.name,
+        artId: art.id,
+        artName: pending?.displayName || art.name,
         dice: [],
         successes: 0,
         ones: 0,
@@ -141,6 +157,8 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
         spiritBefore,
         spiritAfter: 0,
         minRequired: parseCost(art.cost).minSuccesses,
+        pendingRollId: pending?.rollId,
+        pendingContext: pending?.context,
       });
       return;
     }
@@ -159,9 +177,10 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
     const scaling = parsedCost.hasScaling
       ? Math.floor(remainingAfterMin / parsedCost.scaleStep)
       : 0;
-    const spiritFromLeftover = parsedCost.hasScaling
-      ? remainingAfterMin % parsedCost.scaleStep
-      : remainingAfterMin;
+    const spiritFromLeftover = Math.max(
+      0,
+      successes - parsedCost.minSuccesses - (parsedCost.hasScaling ? parsedCost.scaleStep : 0)
+    );
     const spiritAfter = postDamageSpirit + spiritFromLeftover;
 
     const updates = { spirits: spiritAfter };
@@ -169,7 +188,8 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
     saveCharacter(updates);
 
     setResult({
-      artName: art.name,
+      artId: art.id,
+      artName: pending?.displayName || art.name,
       dice: pushedRoll,
       successes,
       ones,
@@ -179,8 +199,58 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
       spiritBefore,
       spiritAfter,
       minRequired: parsedCost.minSuccesses,
+      pendingRollId: pending?.rollId,
+      pendingContext: pending?.context,
     });
   };
+
+  const clearSpiritRoll = () => {
+    const current = result;
+    setResult(null);
+    if (!current?.pendingRollId) return;
+    void onResolveArtRoll?.({
+      pendingRollId: current.pendingRollId,
+      artId: current.artId,
+      artName: current.artName,
+      successes: current.successes,
+      scaling: current.scaling,
+      spiritGenerated: current.spiritGenerated,
+      activated: current.activated,
+      context: current.pendingContext,
+    });
+    onArtRollCleared?.();
+  };
+
+  useEffect(() => {
+    if (!character || !pendingArtRoll) return;
+    if (pendingArtRoll.actorCharacterId !== character.id) return;
+    if (handledPendingRollIdRef.current === pendingArtRoll.id) return;
+    const art = catalogById.get(pendingArtRoll.artId);
+    if (!art) {
+      onConsumePendingArtRoll?.(pendingArtRoll.id);
+      handledPendingRollIdRef.current = pendingArtRoll.id;
+      onArtRollCleared?.();
+      return;
+    }
+    handleArtClick(art, {
+      rollId: pendingArtRoll.id,
+      context: pendingArtRoll,
+      displayName: pendingArtRoll.displayName,
+    });
+    onConsumePendingArtRoll?.(pendingArtRoll.id);
+    handledPendingRollIdRef.current = pendingArtRoll.id;
+  }, [
+    character,
+    pendingArtRoll,
+    catalogById,
+    handleArtClick,
+    onConsumePendingArtRoll,
+    onArtRollCleared,
+  ]);
+
+  if (!character) {
+    return <p className="text-amber-300 text-center">No character found for your account.</p>;
+  }
 
   return (
     <div className="space-y-4">
@@ -238,9 +308,17 @@ export default function Arts({ character, updateCharacter, saveCharacter }: Arts
         <div className="rounded-xl border border-amber-600/40 bg-gray-900/70 p-4 text-amber-100">
           <div className="flex items-center justify-between">
             <p className="font-bold text-amber-300">Rolling: Spirit ({result.artName})</p>
-            <p className={`font-semibold ${result.activated ? "text-green-300" : "text-red-300"}`}>
-              {result.activated ? "Success" : "Failure"}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className={`font-semibold ${result.activated ? "text-green-300" : "text-red-300"}`}>
+                {result.activated ? "Success" : "Failure"}
+              </p>
+              <button
+                onClick={clearSpiritRoll}
+                className="rounded bg-gray-700 px-2 py-1 text-xs font-semibold text-amber-100 hover:bg-gray-600"
+              >
+                Clear Roll
+              </button>
+            </div>
           </div>
           <p className="text-sm mt-1">Successes: {result.successes} | Needed: {result.minRequired}</p>
           <p className="text-sm">Scaling: {result.scaling} | Excess: {result.spiritGenerated}</p>

@@ -146,6 +146,10 @@ export default function Combat({
   pendingArmorPrompt,
   onConsumeArmorPrompt,
   onArmorPromptPass,
+  pendingSunderPrompt,
+  onConsumeSunderPrompt,
+  onSunderPromptPass,
+  onSunderPromptRoll,
 }: CombatProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [zoneLines, setZoneLines] = useState<ZoneStroke[]>([]);
@@ -770,6 +774,19 @@ export default function Combat({
   const armorPromptCanHelmet = Boolean(armorPrompt?.helmetItemId) && armorPromptHelmetDice > 0 && !armorPromptUsed.helmet;
   const armorPromptCanArmor = Boolean(armorPrompt?.armorItemId) && armorPromptArmorDice > 0 && !armorPromptUsed.armor;
   const shouldShowArmorPrompt = combatMode && Boolean(armorPrompt) && (armorPromptCanHelmet || armorPromptCanArmor);
+  const sunderPrompt = useMemo(() => {
+    if (!pendingSunderPrompt) return null;
+    const attackerId = pendingSunderPrompt.attackerCharacterId;
+    const attackerIsMonster = attackerId.startsWith("monster:");
+    if (attackerIsMonster && isDmViewer) return pendingSunderPrompt;
+    if (!attackerIsMonster && attackerId === currentUserTokenId) return pendingSunderPrompt;
+    return null;
+  }, [pendingSunderPrompt, isDmViewer, currentUserTokenId]);
+  const shouldShowSunderPrompt =
+    combatMode &&
+    Boolean(sunderPrompt) &&
+    Array.isArray(sunderPrompt?.options) &&
+    sunderPrompt!.options.length > 0;
   const handleArmorPromptPass = useCallback(async () => {
     if (!armorPrompt) return;
     onConsumeArmorPrompt?.(armorPrompt.id);
@@ -804,6 +821,19 @@ export default function Combat({
     },
     [armorPrompt, onQueueReactionRoll, onConsumeArmorPrompt]
   );
+  const handleSunderPromptPass = useCallback(async () => {
+    if (!sunderPrompt) return;
+    onConsumeSunderPrompt?.(sunderPrompt.id);
+    await onSunderPromptPass?.(sunderPrompt.id);
+  }, [sunderPrompt, onConsumeSunderPrompt, onSunderPromptPass]);
+  const handleSunderPromptRoll = useCallback(
+    async (targetItemId: string) => {
+      if (!sunderPrompt) return;
+      onConsumeSunderPrompt?.(sunderPrompt.id);
+      await onSunderPromptRoll?.(sunderPrompt.id, targetItemId);
+    },
+    [sunderPrompt, onConsumeSunderPrompt, onSunderPromptRoll]
+  );
   const resolvePendingReaction = useCallback(
     async (
       mode: "pass" | "dodge-stand" | "dodge-prone" | "parry",
@@ -827,6 +857,7 @@ export default function Combat({
         destinationY: pendingReaction.destinationY ?? undefined,
         shootTargetZoneId: pendingReaction.shootTargetZoneId ?? null,
         shootAmmoItem: pendingReaction.shootAmmoItem ?? null,
+        rangeAtAttack: pendingReaction.rangeAtAttack ?? null,
         skipReaction: true,
       };
 
@@ -4157,6 +4188,7 @@ export default function Combat({
         requiredSuccesses: 1,
         swingBonusDamage,
         bonusDice: proneBonusDice + tauntPenalty,
+        rangeAtAttack: selectedRange,
       });
       setSelectedTokenId(null);
     } else {
@@ -4195,6 +4227,7 @@ export default function Combat({
         totalSuccesses: successes,
         requiredSuccesses: 1,
         swingBonusDamage,
+        rangeAtAttack: selectedRange,
       });
     }
   };
@@ -5034,6 +5067,7 @@ export default function Combat({
         bonusDice: totalBonusDice,
         shootTargetZoneId: option.targetZoneId,
         shootAmmoItem: currentReadied.ammoItem,
+        rangeAtAttack: selectedRange,
       });
       setSelectedTokenId(null);
       return;
@@ -5076,6 +5110,7 @@ export default function Combat({
       requiredSuccesses: 1,
       shootTargetZoneId: option.targetZoneId,
       shootAmmoItem: currentReadied.ammoItem,
+      rangeAtAttack: selectedRange,
     });
   };
 
@@ -5786,6 +5821,39 @@ export default function Combat({
 
   return (
     <>
+      {shouldShowSunderPrompt && sunderPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+          <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-amber-300">Art Reaction Available</h3>
+                <p className="text-sm text-amber-200/80">
+                  Incoming: {sunderPrompt.attack.maneuver} ({sunderPrompt.attack.weaponName})
+                </p>
+                <p className="text-xs text-amber-200/70">Successes: {sunderPrompt.attack.totalSuccesses}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 gap-2">
+              {sunderPrompt.options.map((option) => (
+                <button
+                  key={`sunder-${option.itemId}-${option.slot}`}
+                  onClick={() => void handleSunderPromptRoll(option.itemId)}
+                  className="w-full rounded bg-gradient-to-r from-orange-700 to-gray-100 px-3 py-2 text-sm font-semibold text-gray-900 hover:from-orange-600 hover:to-white"
+                >
+                  {`Sunder (${option.itemName})`}
+                </button>
+              ))}
+              <button
+                onClick={() => void handleSunderPromptPass()}
+                className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
+              >
+                Pass
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {shouldShowArmorPrompt && armorPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">

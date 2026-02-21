@@ -1,5 +1,6 @@
 import { getRepoStatsCaption } from "@/lib/repo-stats";
 
-export function RepoStatsFooterText() {
-  return <>{getRepoStatsCaption()}</>;
+export async function RepoStatsFooterText() {
+  const caption = await getRepoStatsCaption();
+  return <>{caption}</>;
 }

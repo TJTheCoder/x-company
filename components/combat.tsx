@@ -1244,10 +1244,15 @@ export default function Combat({
   }, [renderedTokens, canPlaceTokenFor, isDmUser, initiativeEntries]);
 
   const isMyTurn = useMemo(() => {
+    const attackerTurnLockedByReaction =
+      combatMode &&
+      Boolean(actorTokenId) &&
+      pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId);
     if (!currentEntry || !userEmail) return false;
+    if (attackerTurnLockedByReaction) return false;
     if (isDmUser) return true;
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
-  }, [currentEntry, isDmUser, userEmail]);
+  }, [currentEntry, isDmUser, userEmail, combatMode, actorTokenId, pendingReactions]);
   const rangeBetweenTokens = useCallback(
     (sourceTokenId: string | null | undefined, targetTokenId: string | null | undefined): CombatRange | null => {
       if (!sourceTokenId || !targetTokenId || sourceTokenId === targetTokenId) return null;
@@ -1749,9 +1754,16 @@ export default function Combat({
 
   const canPass = useMemo(() => {
     if (!currentEntry || !userEmail) return false;
+    if (
+      combatMode &&
+      actorTokenId &&
+      pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId)
+    ) {
+      return false;
+    }
     if (isDmUser) return true;
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
-  }, [currentEntry, userEmail, isDmUser]);
+  }, [currentEntry, userEmail, isDmUser, combatMode, actorTokenId, pendingReactions]);
   const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {
     if (!currentEntry) return null;
     if (currentEntry.kind === "player") {

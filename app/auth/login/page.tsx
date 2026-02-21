@@ -34,7 +34,7 @@ export default function Page() {
 
       {/* Footer */}
       <footer className="absolute bottom-0 left-0 w-full flex items-center justify-center py-6 border-t border-amber-600/20 backdrop-blur-sm">
-        <p className="text-amber-300/50 text-sm"><RepoStatsFooterText /></p>
+        <p className="text-amber-300/50 text-sm"><Suspense fallback={"0 lines across 0 hours!"}><RepoStatsFooterText /></Suspense></p>
       </footer>
     </main>
   );

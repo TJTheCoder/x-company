@@ -16,7 +16,9 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
       </div>
 
       <footer className="w-full py-6 border-t border-amber-600/20 text-center text-amber-300">
-        <RepoStatsFooterText />
+        <Suspense fallback={"0 lines across 0 hours!"}>
+          <RepoStatsFooterText />
+        </Suspense>
       </footer>
     </div>
   );

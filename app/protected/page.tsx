@@ -2082,7 +2082,7 @@ export default function Dashboard() {
         attack.maneuver === "Stab" ||
         attack.maneuver === "Strike" ||
         attack.maneuver === "Shoot") &&
-      attack.rangeAtAttack === "Near"
+      (attack.rangeAtAttack === "Near" || attack.rangeAtAttack === "Engaged")
     ) {
       const sunderArt = artsCatalog.find((art) => art.id === "art-sunder") || null;
       const sunderCost = parseArtCost(sunderArt?.cost || "X");
@@ -2152,7 +2152,6 @@ export default function Dashboard() {
             !Boolean(attackerEntry.covered) &&
             !Boolean(attackerEntry.dead) &&
             !attackerHeld;
-
           let attackerHasArt = false;
           let attackerSpirits = 0;
           let attackerBroken = false;
@@ -2172,7 +2171,7 @@ export default function Dashboard() {
           } else {
             const { data: attackerCharacter } = await supabase
               .from("characters")
-              .select("id, spirits, dead, attributes, known_art_ids, equipped_art_ids, arts, equipped_arts")
+              .select("id, spirits, dead, attributes, known_art_ids, equipped_art_ids")
               .eq("id", attack.attackerCharacterId)
               .maybeSingle<{
                 id: string;
@@ -2181,8 +2180,6 @@ export default function Dashboard() {
                 attributes?: Attributes | null;
                 known_art_ids?: string[] | null;
                 equipped_art_ids?: string[] | null;
-                arts?: Art[] | null;
-                equipped_arts?: Art[] | null;
               }>();
             attackerHasArt = hasArtId("art-sunder", attackerCharacter);
             attackerSpirits = Math.max(0, Number(attackerCharacter?.spirits ?? 0));

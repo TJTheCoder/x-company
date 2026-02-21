@@ -167,7 +167,7 @@ async function computeCaption(): Promise<string> {
   const winner = compareRepoStats(localStats, remoteStats) >= 0 ? localStats : remoteStats;
 
   if (localStats && compareRepoStats(localStats, remoteStats) >= 0) {
-    void upsertSupabaseStats(localStats);
+    await upsertSupabaseStats(localStats);
   }
 
   if (!winner) return ZERO_CAPTION;

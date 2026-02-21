@@ -13,6 +13,8 @@ import Combat from "../../components/combat";
 import Poll from "../../components/poll";
 import Kogra from "../../components/kogra";
 import Monsters from "../../components/monsters";
+import Glossary from "../../components/glossary";
+import MapBoard from "../../components/map-board";
 
 type Attributes = {
   STR: number;
@@ -27,6 +29,7 @@ export type CharacterType = {
   email: string;
   age: number;
   gender: string;
+  xp?: number;
   attributes: Attributes;
   max_attributes: Attributes;
   skills: Record<string, number>;
@@ -313,7 +316,17 @@ const parseArtCost = (cost: string): ParsedArtCost => {
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<
-    "character" | "inventory" | "arts" | "talents" | "wagon" | "combat" | "monsters" | "poll" | "kogra"
+    | "character"
+    | "inventory"
+    | "arts"
+    | "talents"
+    | "wagon"
+    | "combat"
+    | "monsters"
+    | "poll"
+    | "kogra"
+    | "glossary"
+    | "map"
   >("character");
   const [character, setCharacter] = useState<CharacterType | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -3136,6 +3149,26 @@ export default function Dashboard() {
               Poll
             </button>
             <button
+              onClick={() => setActiveTab("glossary")}
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
+                activeTab === "glossary"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Glossary
+            </button>
+            <button
+              onClick={() => setActiveTab("map")}
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
+                activeTab === "map"
+                  ? "bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-gray-900 shadow-lg"
+                  : "bg-gray-800 text-amber-200 hover:bg-gray-700"
+              }`}
+            >
+              Map
+            </button>
+            <button
               onClick={() => setActiveTab("kogra")}
               className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-all ${
                 activeTab === "kogra"
@@ -3259,12 +3292,25 @@ export default function Dashboard() {
             <Poll
               character={character}
               allCharacters={allCharacters}
+              isDM={effectiveIsAdmin}
             />
           )}
           {activeTab === "kogra" && (
             <Kogra
               character={character}
               userEmail={effectiveUserEmail}
+            />
+          )}
+          {activeTab === "glossary" && (
+            <Glossary
+              isDM={effectiveIsAdmin}
+              userEmail={effectiveUserEmail}
+            />
+          )}
+          {activeTab === "map" && (
+            <MapBoard
+              isDM={effectiveIsAdmin}
+              onPollCreated={() => setActiveTab("poll")}
             />
           )}
         </div>

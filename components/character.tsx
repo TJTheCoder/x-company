@@ -844,7 +844,7 @@ export default function Character({
           </h2>
           <div className="flex items-center justify-center gap-2 mt-1">
             <p className="text-amber-200">
-              Age: {character.age} | Gender: {character.gender} | Spirits: {character.spirits}
+              Age: {character.age} | Gender: {character.gender} | XP: {character.xp ?? 6} | Spirits: {character.spirits}
             </p>
             <button
               onClick={decrementSpirit}

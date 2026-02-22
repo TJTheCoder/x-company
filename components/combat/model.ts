@@ -127,6 +127,7 @@ export type CombatStateRow = {
   zone_lines: (ZoneStroke | LegacyZoneLine)[] | null;
   zone_cover: number[] | null;
   token_positions: TokenPosition[] | null;
+  token_elevations: TokenElevation[] | null;
   engagements: EngagementEdge[] | null;
   combat_mode: boolean | null;
   initiative_monsters: InitiativeMonster[] | null;
@@ -145,6 +146,7 @@ export type CombatStateMutationRow = {
   engagements: EngagementEdge[] | null;
   zone_loot: ZoneLootDrop[] | null;
   zone_cover?: number[] | null;
+  token_elevations?: TokenElevation[] | null;
 };
 
 export type PendingReaction = {
@@ -174,12 +176,18 @@ export type TokenPosition = {
   y: number;
 };
 
+export type TokenElevation = {
+  character_id: string;
+  elevation: number;
+};
+
 export type RenderedToken = TokenPosition & {
   type: "player" | "monster";
   name: string;
   email: string | null;
   icon_url: string | null;
   tooltip: string;
+  elevation: number;
   dead?: boolean;
   physicallyBroken?: boolean;
   mentallyBroken?: boolean;
@@ -546,6 +554,20 @@ export function normalizeTokenPositions(raw: TokenPosition[] | null | undefined)
     .filter((value): value is TokenPosition => !!value);
 }
 
+export function normalizeTokenElevations(raw: TokenElevation[] | null | undefined): TokenElevation[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((value) => {
+      if (!value || typeof value !== "object") return null;
+      const v = value as Partial<TokenElevation>;
+      if (typeof v.character_id !== "string" || !v.character_id.trim()) return null;
+      if (typeof v.elevation !== "number" || !Number.isFinite(v.elevation)) return null;
+      const elevation = Math.max(0, Math.trunc(v.elevation));
+      return { character_id: v.character_id, elevation };
+    })
+    .filter((value): value is TokenElevation => !!value);
+}
+
 export function normalizeEngagements(raw: EngagementEdge[] | null | undefined): EngagementEdge[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -655,6 +677,25 @@ export type ZoneRegionMap = {
 };
 
 export type CombatRange = "Engaged" | "Near" | "Close" | "Long" | "Distant";
+
+export function rangeFromZoneDistance(distance: number | null): CombatRange | null {
+  if (distance === null || distance < 0 || !Number.isFinite(distance)) return null;
+  if (distance === 0) return "Near";
+  if (distance === 1) return "Close";
+  if (distance <= 4) return "Long";
+  return "Distant";
+}
+
+export function rangeFromLateralAndVerticalDistance(
+  lateralDistance: number | null,
+  verticalDistance: number | null
+): CombatRange | null {
+  if (lateralDistance === null || verticalDistance === null) return null;
+  const lateral = Math.max(0, lateralDistance);
+  const vertical = Math.max(0, verticalDistance);
+  const effective = Math.max(lateral, vertical);
+  return rangeFromZoneDistance(effective);
+}
 
 export function buildZoneRegionMap(strokes: ZoneStroke[], width = 320, height = 320): ZoneRegionMap | null {
   if (typeof document === "undefined") return null;

@@ -7,6 +7,7 @@ create table if not exists public.combat_state (
   zone_lines jsonb not null default '[]'::jsonb,
   zone_cover jsonb not null default '[]'::jsonb,
   token_positions jsonb not null default '[]'::jsonb,
+  token_elevations jsonb not null default '[]'::jsonb,
   engagements jsonb not null default '[]'::jsonb,
   zone_loot jsonb not null default '[]'::jsonb,
   combat_mode boolean not null default false,
@@ -37,6 +38,7 @@ create table if not exists public.monsters (
 alter table public.combat_state add column if not exists zone_lines jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists zone_cover jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists token_positions jsonb not null default '[]'::jsonb;
+alter table public.combat_state add column if not exists token_elevations jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists engagements jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists zone_loot jsonb not null default '[]'::jsonb;
 alter table public.combat_state add column if not exists combat_mode boolean not null default false;
@@ -142,9 +144,9 @@ for delete to authenticated
 using (auth.jwt() ->> 'email' = 'drocasma9@gmail.com');
 
 insert into public.combat_state (
-  id, map_url, zone_lines, zone_cover, token_positions, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, pending_reactions, updated_by_email
+  id, map_url, zone_lines, zone_cover, token_positions, token_elevations, engagements, zone_loot, combat_mode, initiative_monsters, initiative_entries, initiative_current_index, pending_reactions, updated_by_email
 )
-values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, '[]'::jsonb, null)
+values (1, null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, '[]'::jsonb, '[]'::jsonb, null, '[]'::jsonb, null)
 on conflict (id) do nothing;
 
 create or replace function public.combat_upsert_player_token(
@@ -162,6 +164,7 @@ declare
   v_is_dm boolean := v_email = 'drocasma9@gmail.com';
   v_owner_email text;
   v_tokens jsonb;
+  v_elevations jsonb;
   v_entries jsonb;
   v_actor_entry jsonb;
   v_actor_idx int;
@@ -189,8 +192,8 @@ begin
     raise exception 'You can only place your own token';
   end if;
 
-  select coalesce(token_positions, '[]'::jsonb), coalesce(initiative_entries, '[]'::jsonb)
-  into v_tokens, v_entries
+  select coalesce(token_positions, '[]'::jsonb), coalesce(token_elevations, '[]'::jsonb), coalesce(initiative_entries, '[]'::jsonb)
+  into v_tokens, v_elevations, v_entries
   from public.combat_state
   where id = 1
   for update;
@@ -258,6 +261,20 @@ begin
       'y', p_y
     )
   );
+  v_elevations := coalesce(
+    (
+      select jsonb_agg(e.value)
+      from jsonb_array_elements(v_elevations) as e(value)
+      where coalesce(e.value->>'character_id', '') <> p_character_id::text
+    ),
+    '[]'::jsonb
+  );
+  v_elevations := v_elevations || jsonb_build_array(
+    jsonb_build_object(
+      'character_id', p_character_id::text,
+      'elevation', 0
+    )
+  );
 
   foreach v_attached_token_id in array v_attached_token_ids loop
     v_tokens := coalesce(
@@ -276,10 +293,25 @@ begin
         'y', p_y
       )
     );
+    v_elevations := coalesce(
+      (
+        select jsonb_agg(e.value)
+        from jsonb_array_elements(v_elevations) as e(value)
+        where coalesce(e.value->>'character_id', '') <> v_attached_token_id
+      ),
+      '[]'::jsonb
+    );
+    v_elevations := v_elevations || jsonb_build_array(
+      jsonb_build_object(
+        'character_id', v_attached_token_id,
+        'elevation', 0
+      )
+    );
   end loop;
 
   update public.combat_state
   set token_positions = v_tokens,
+      token_elevations = v_elevations,
       updated_by_email = v_email
   where id = 1;
 end;
@@ -1755,12 +1787,15 @@ declare
   v_entries jsonb;
   v_edges jsonb;
   v_tokens jsonb;
+  v_elevations jsonb;
   v_mode boolean;
   v_actor_entry jsonb;
   v_actor_entry_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
   v_actor_is_monster boolean;
+  v_actor_elevation int := 0;
+  v_other_elevation int := 0;
   v_other_token text;
   v_attached_token_ids text[] := array[]::text[];
   v_attached_token_id text;
@@ -1778,8 +1813,9 @@ begin
   select combat_mode,
          initiative_entries,
          coalesce(engagements, '[]'::jsonb),
-         coalesce(token_positions, '[]'::jsonb)
-  into v_mode, v_entries, v_edges, v_tokens
+         coalesce(token_positions, '[]'::jsonb),
+         coalesce(token_elevations, '[]'::jsonb)
+  into v_mode, v_entries, v_edges, v_tokens, v_elevations
   from public.combat_state
   where id = 1
   for update;
@@ -1804,6 +1840,17 @@ begin
     raise exception 'Can only crawl while prone';
   end if;
 
+  begin
+    select coalesce((e.value->>'elevation')::int, 0)
+    into v_actor_elevation
+    from jsonb_array_elements(v_elevations) as e(value)
+    where e.value->>'character_id' = p_actor_token_id
+    limit 1;
+  exception when others then
+    v_actor_elevation := 0;
+  end;
+  v_actor_elevation := greatest(0, coalesce(v_actor_elevation, 0));
+
   v_actor_is_monster := p_actor_token_id like 'monster:%';
   for v_other_token in
     select case
@@ -1817,7 +1864,19 @@ begin
       continue;
     end if;
     if (v_other_token like 'monster:%') <> v_actor_is_monster then
-      raise exception 'Cannot crawl while engaged with an enemy';
+      begin
+        select coalesce((e.value->>'elevation')::int, 0)
+        into v_other_elevation
+        from jsonb_array_elements(v_elevations) as e(value)
+        where e.value->>'character_id' = v_other_token
+        limit 1;
+      exception when others then
+        v_other_elevation := 0;
+      end;
+      v_other_elevation := greatest(0, coalesce(v_other_elevation, 0));
+      if v_other_elevation = v_actor_elevation then
+        raise exception 'Cannot crawl while engaged with an enemy';
+      end if;
     end if;
   end loop;
 
@@ -2095,8 +2154,12 @@ declare
   v_mode boolean;
   v_edges jsonb;
   v_tokens jsonb;
+  v_elevations jsonb;
   v_actor_exists boolean;
   v_target_exists boolean;
+  v_actor_elevation int := 0;
+  v_target_elevation int := 0;
+  v_member_elevation int := 0;
   v_component text[];
   v_changed boolean;
   e record;
@@ -2125,8 +2188,8 @@ begin
     raise exception 'Cannot engage yourself';
   end if;
 
-  select combat_mode, initiative_entries, initiative_current_index, coalesce(engagements, '[]'::jsonb), coalesce(token_positions, '[]'::jsonb)
-  into v_mode, v_entries, v_idx, v_edges, v_tokens
+  select combat_mode, initiative_entries, initiative_current_index, coalesce(engagements, '[]'::jsonb), coalesce(token_positions, '[]'::jsonb), coalesce(token_elevations, '[]'::jsonb)
+  into v_mode, v_entries, v_idx, v_edges, v_tokens, v_elevations
   from public.combat_state
   where id = 1
   for update;
@@ -2169,6 +2232,30 @@ begin
   ) into v_target_exists;
   if not v_target_exists then
     raise exception 'Target token not found';
+  end if;
+
+  begin
+    select coalesce((e.value->>'elevation')::int, 0)
+    into v_actor_elevation
+    from jsonb_array_elements(v_elevations) as e(value)
+    where e.value->>'character_id' = p_actor_token_id
+    limit 1;
+  exception when others then
+    v_actor_elevation := 0;
+  end;
+  begin
+    select coalesce((e.value->>'elevation')::int, 0)
+    into v_target_elevation
+    from jsonb_array_elements(v_elevations) as e(value)
+    where e.value->>'character_id' = p_target_token_id
+    limit 1;
+  exception when others then
+    v_target_elevation := 0;
+  end;
+  v_actor_elevation := greatest(0, coalesce(v_actor_elevation, 0));
+  v_target_elevation := greatest(0, coalesce(v_target_elevation, 0));
+  if v_actor_elevation <> v_target_elevation then
+    raise exception 'Cannot engage targets at different elevations';
   end if;
 
   if not v_is_dm then
@@ -2273,6 +2360,20 @@ begin
       continue;
     end if;
 
+    begin
+      select coalesce((e.value->>'elevation')::int, 0)
+      into v_member_elevation
+      from jsonb_array_elements(v_elevations) as e(value)
+      where e.value->>'character_id' = v_member
+      limit 1;
+    exception when others then
+      v_member_elevation := 0;
+    end;
+    v_member_elevation := greatest(0, coalesce(v_member_elevation, 0));
+    if v_member_elevation <> v_actor_elevation then
+      continue;
+    end if;
+
     v_a := least(p_actor_token_id, v_member);
     v_b := greatest(p_actor_token_id, v_member);
 
@@ -2317,10 +2418,13 @@ declare
   v_current_email text;
   v_edges jsonb;
   v_tokens jsonb;
+  v_elevations jsonb;
   v_mode boolean;
   v_actor_uuid uuid;
   v_actor_owner_email text;
   v_actor_is_monster boolean;
+  v_actor_elevation int := 0;
+  v_other_elevation int := 0;
   v_other_token text;
   v_actor_entry jsonb;
   v_actor_entry_idx int;
@@ -2343,8 +2447,9 @@ begin
          initiative_entries,
          initiative_current_index,
          coalesce(engagements, '[]'::jsonb),
-         coalesce(token_positions, '[]'::jsonb)
-  into v_mode, v_entries, v_idx, v_edges, v_tokens
+         coalesce(token_positions, '[]'::jsonb),
+         coalesce(token_elevations, '[]'::jsonb)
+  into v_mode, v_entries, v_idx, v_edges, v_tokens, v_elevations
   from public.combat_state
   where id = 1
   for update;
@@ -2457,6 +2562,17 @@ begin
     raise exception 'Actor token not found';
   end if;
 
+  begin
+    select coalesce((e.value->>'elevation')::int, 0)
+    into v_actor_elevation
+    from jsonb_array_elements(v_elevations) as e(value)
+    where e.value->>'character_id' = p_actor_token_id
+    limit 1;
+  exception when others then
+    v_actor_elevation := 0;
+  end;
+  v_actor_elevation := greatest(0, coalesce(v_actor_elevation, 0));
+
   -- Cannot run while engaged with any enemy.
   for v_other_token in
     select case
@@ -2471,7 +2587,19 @@ begin
     end if;
 
     if (v_other_token like 'monster:%') <> v_actor_is_monster then
-      raise exception 'Cannot run while engaged with an enemy';
+      begin
+        select coalesce((e.value->>'elevation')::int, 0)
+        into v_other_elevation
+        from jsonb_array_elements(v_elevations) as e(value)
+        where e.value->>'character_id' = v_other_token
+        limit 1;
+      exception when others then
+        v_other_elevation := 0;
+      end;
+      v_other_elevation := greatest(0, coalesce(v_other_elevation, 0));
+      if v_other_elevation = v_actor_elevation then
+        raise exception 'Cannot run while engaged with an enemy';
+      end if;
     end if;
   end loop;
 
@@ -2535,6 +2663,148 @@ end;
 $$;
 
 grant execute on function public.combat_run_token(text, double precision, double precision) to authenticated;
+
+create or replace function public.combat_fly_token(
+  p_actor_token_id text,
+  p_x double precision,
+  p_y double precision,
+  p_elevation_delta int
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_entries jsonb;
+  v_elevations jsonb;
+  v_actor_entry jsonb;
+  v_actor_idx int;
+  v_current_elevation int := 0;
+  v_next_elevation int := 0;
+  v_attached_token_ids text[] := array[]::text[];
+  v_attached_token_id text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  if p_x < 0 or p_x > 1 or p_y < 0 or p_y > 1 then
+    raise exception 'Token position must be normalized between 0 and 1';
+  end if;
+
+  if p_elevation_delta is null or p_elevation_delta not in (-1, 1) then
+    raise exception 'Fly elevation delta must be -1 or 1';
+  end if;
+
+  select coalesce(token_elevations, '[]'::jsonb), coalesce(initiative_entries, '[]'::jsonb)
+  into v_elevations, v_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  select e.ord - 1, e.entry
+  into v_actor_idx, v_actor_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_actor_idx is null then
+    raise exception 'Actor participant not found';
+  end if;
+
+  begin
+    select coalesce((e.value->>'elevation')::int, 0)
+    into v_current_elevation
+    from jsonb_array_elements(v_elevations) as e(value)
+    where e.value->>'character_id' = p_actor_token_id
+    limit 1;
+  exception when others then
+    v_current_elevation := 0;
+  end;
+  v_current_elevation := greatest(0, coalesce(v_current_elevation, 0));
+  v_next_elevation := v_current_elevation + p_elevation_delta;
+  if v_next_elevation < 0 then
+    raise exception 'Cannot fly below elevation 0';
+  end if;
+
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+  end if;
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappled_by_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+  end if;
+  v_attached_token_id := nullif(coalesce(v_actor_entry->>'clung_onto_by_id', ''), '');
+  if v_attached_token_id is not null and not (v_attached_token_id = any(v_attached_token_ids)) then
+    v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+  end if;
+  for v_attached_token_id in
+    select jsonb_array_elements_text(
+      case
+        when jsonb_typeof(v_actor_entry->'clung_onto_by_ids') = 'array' then v_actor_entry->'clung_onto_by_ids'
+        else '[]'::jsonb
+      end
+    )
+  loop
+    if v_attached_token_id is not null and btrim(v_attached_token_id) <> '' and not (v_attached_token_id = any(v_attached_token_ids)) then
+      v_attached_token_ids := array_append(v_attached_token_ids, v_attached_token_id);
+    end if;
+  end loop;
+  if array_length(v_attached_token_ids, 1) is not null then
+    v_attached_token_ids := array_remove(v_attached_token_ids, p_actor_token_id);
+  end if;
+
+  perform public.combat_run_token(p_actor_token_id, p_x, p_y);
+
+  select coalesce(token_elevations, '[]'::jsonb)
+  into v_elevations
+  from public.combat_state
+  where id = 1
+  for update;
+
+  v_elevations := coalesce(
+    (
+      select jsonb_agg(e.value)
+      from jsonb_array_elements(v_elevations) as e(value)
+      where coalesce(e.value->>'character_id', '') <> p_actor_token_id
+        and not (coalesce(e.value->>'character_id', '') = any(v_attached_token_ids))
+    ),
+    '[]'::jsonb
+  );
+
+  v_elevations := v_elevations || jsonb_build_array(
+    jsonb_build_object(
+      'character_id', p_actor_token_id,
+      'elevation', v_next_elevation
+    )
+  );
+
+  foreach v_attached_token_id in array v_attached_token_ids loop
+    v_elevations := v_elevations || jsonb_build_array(
+      jsonb_build_object(
+        'character_id', v_attached_token_id,
+        'elevation', v_next_elevation
+      )
+    );
+  end loop;
+
+  update public.combat_state
+  set token_elevations = v_elevations,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_fly_token(text, double precision, double precision, int) to authenticated;
 
 create or replace function public.combat_set_swing_weapon(
   p_weapon_item_id text,

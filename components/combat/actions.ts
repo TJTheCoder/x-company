@@ -3,6 +3,7 @@ import type {
   EngagementEdge,
   InitiativeEntry,
   InitiativeMonster,
+  TokenElevation,
   ZoneLootDrop,
 } from "./model";
 
@@ -21,6 +22,7 @@ type SaveInitiativeState = (
   monsters?: InitiativeMonster[],
   engagementEdges?: EngagementEdge[],
   tokens?: null,
+  elevations?: TokenElevation[] | null,
   loot?: ZoneLootDrop[]
 ) => Promise<void>;
 
@@ -132,6 +134,7 @@ export async function clearTauntAngerForTokenAction(params: {
     latest.freshMonsters,
     latest.freshEngagements,
     null,
+    null,
     latest.freshLoot
   );
   return true;
@@ -190,6 +193,7 @@ export async function consumeTauntPenaltyForTokenAction(params: {
           combatMode,
           latest.freshMonsters,
           latest.freshEngagements,
+          null,
           null,
           latest.freshLoot
         );

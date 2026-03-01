@@ -1,10 +1,12 @@
 import type {
   CharacterType,
   InventoryItem,
-  PendingSunderPrompt,
+  PendingArtRoll,
+  PendingArtPrompt,
   PendingArmorPrompt,
   PendingMeleeAction,
   PendingReactionRoll,
+  ResolvedArtRoll,
   ResolvedMeleeAttack,
 } from "@/app/protected/page";
 import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
@@ -21,10 +23,14 @@ export type CombatProps = {
   pendingArmorPrompt?: PendingArmorPrompt | null;
   onConsumeArmorPrompt?: (promptId: string) => void;
   onArmorPromptPass?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
-  pendingSunderPrompt?: PendingSunderPrompt | null;
-  onConsumeSunderPrompt?: (promptId: string) => void;
-  onSunderPromptPass?: (promptId: string) => void | Promise<void>;
-  onSunderPromptRoll?: (promptId: string, targetItemId: string) => void | Promise<void>;
+  pendingArtPrompt?: PendingArtPrompt | null;
+  onConsumeArtPrompt?: (promptId: string) => void;
+  onArtPromptPass?: (promptId: string) => void | Promise<void>;
+  onArtPromptRoll?: (promptId: string, optionId: string) => void | Promise<void>;
+  pendingArtRoll?: PendingArtRoll | null;
+  onConsumePendingArtRoll?: (rollId: string) => void;
+  onResolveArtRoll?: (roll: ResolvedArtRoll) => void | Promise<void>;
+  onArtRollCleared?: () => void;
 };
 
 export type ZonePoint = {
@@ -90,6 +96,8 @@ export type InitiativeEntry = {
   taunted_distract_value?: number | null;
   used_item_flags?: string[] | null;
   flame_intensity?: number | null;
+  falling_zones?: number | null;
+  blitzed?: boolean;
   feint_pending_roll?: number | null;
   feint_pending_name?: string | null;
   dead?: boolean;
@@ -207,9 +215,12 @@ export type ImageRect = {
 export type MonsterRollResult = {
   actionLabel: string;
   attributeDice: number[];
+  attributeLabel?: string;
   skillDice: number[];
+  skillLabel?: string;
   skillIsNegative?: boolean;
   gearDice: number[];
+  gearLabel?: string;
   successes: number;
 };
 
@@ -298,8 +309,8 @@ export function normalizeZoneLines(raw: (ZoneStroke | LegacyZoneLine)[] | null |
     .filter((entry): entry is ZoneStroke => !!entry);
 }
 
-export function rollUnique(set: Set<string>): number {
-  const base = Math.floor(Math.random() * 10);
+export function rollUniqueFromBase(set: Set<string>, baseRoll: number): number {
+  const base = Math.max(0, Math.min(9, Math.trunc(baseRoll)));
   let frac = "";
   let key = `${base}`;
 
@@ -310,6 +321,20 @@ export function rollUnique(set: Set<string>): number {
 
   set.add(key);
   return Number(key);
+}
+
+export function rollUnique(set: Set<string>): number {
+  return rollUniqueFromBase(set, Math.floor(Math.random() * 10));
+}
+
+export function rollHighestOfD10Unique(set: Set<string>, diceCount: number): number {
+  const count = Math.max(1, Math.trunc(diceCount));
+  let best = 0;
+  for (let i = 0; i < count; i++) {
+    const roll = Math.floor(Math.random() * 10);
+    if (i === 0 || roll > best) best = roll;
+  }
+  return rollUniqueFromBase(set, best);
 }
 
 export function formatRoll(value: number): string {
@@ -532,6 +557,9 @@ export function normalizeInitiativeEntries(raw: InitiativeEntry[] | null | undef
           ? e.used_item_flags.filter((v): v is string => typeof v === "string")
           : null,
         flame_intensity: typeof e.flame_intensity === "number" ? Math.max(0, Math.trunc(e.flame_intensity)) : null,
+        falling_zones:
+          typeof e.falling_zones === "number" ? Math.max(0, Math.trunc(e.falling_zones)) : null,
+        blitzed: Boolean(e.blitzed),
         feint_pending_roll: typeof e.feint_pending_roll === "number" ? e.feint_pending_roll : null,
         feint_pending_name: typeof e.feint_pending_name === "string" ? e.feint_pending_name : null,
         dead: Boolean(e.dead),

@@ -6,6 +6,7 @@ import type { InventoryItem, ResolvedMeleeAttack } from "@/app/protected/page";
 import { addItemToInventory, isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
 import { buildMonsterSnapshot, formatMonsterTooltip } from "@/lib/monsters";
 import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
+import artsCatalogData from "../data/arts.json";
 import * as combatModel from "./combat/model";
 import * as combatActions from "./combat/actions";
 
@@ -36,6 +37,8 @@ const {
   normalizeEmail,
   normalizeZoneLines,
   rollUnique,
+  rollUniqueFromBase,
+  rollHighestOfD10Unique,
   formatRoll,
   rollSortValue,
   buildZoneTintDataUrl,
@@ -77,6 +80,43 @@ const FLAMING_LONGSWORD_PROPERTY = "flaming longsword";
 const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
 const LAMP_OIL_KEY = "lamp oil";
 const FAST_FOOTWORK_TALENT_ID = "talent-fast-footwork";
+const LIGHTNING_FAST_TALENT_ID = "talent-lightning-fast";
+const FIRST_MONSTER_TRAIT = "first";
+const BLITZ_MONSTER_TRAIT = "blitz";
+const artsCatalog = artsCatalogData as Array<{
+  id: string;
+  name: string;
+  cost: string;
+}>;
+
+type ParsedArtCost = {
+  minSuccesses: number;
+  hasScaling: boolean;
+  scaleStep: number;
+};
+
+const parseArtCost = (cost: string): ParsedArtCost => {
+  const normalized = cost.replace(/\s+/g, "").toUpperCase();
+
+  if (/^\d+$/.test(normalized)) {
+    return { minSuccesses: parseInt(normalized, 10), hasScaling: false, scaleStep: 0 };
+  }
+
+  const xOnly = normalized.match(/^(\d*)X$/);
+  if (xOnly) {
+    const coeff = xOnly[1] ? parseInt(xOnly[1], 10) : 1;
+    return { minSuccesses: 0, hasScaling: true, scaleStep: Math.max(1, coeff) };
+  }
+
+  const withPlus = normalized.match(/^(\d+)\+(\d*)X$/);
+  if (withPlus) {
+    const min = parseInt(withPlus[1], 10);
+    const coeff = withPlus[2] ? parseInt(withPlus[2], 10) : 1;
+    return { minSuccesses: min, hasScaling: true, scaleStep: Math.max(1, coeff) };
+  }
+
+  return { minSuccesses: 0, hasScaling: false, scaleStep: 0 };
+};
 
 type GroupedItemDisplay = {
   key: string;
@@ -137,6 +177,19 @@ const hasTalentLevelAtLeast = (
   return Math.max(mapLevel, listLevel) >= minLevel;
 };
 
+const lightningFastInitiativeRollCount = (character: CharacterLite | null | undefined): number => {
+  if (hasTalentLevelAtLeast(character, LIGHTNING_FAST_TALENT_ID, 3)) return 4;
+  if (hasTalentLevelAtLeast(character, LIGHTNING_FAST_TALENT_ID, 2)) return 3;
+  if (hasTalentLevelAtLeast(character, LIGHTNING_FAST_TALENT_ID, 1)) return 2;
+  return 1;
+};
+
+const monsterHasTrait = (snapshot: MonsterSnapshot | null | undefined, traitName: string): boolean => {
+  const normalized = traitName.trim().toLowerCase();
+  if (!normalized) return false;
+  return (snapshot?.traits || []).some((trait) => trait.trim().toLowerCase() === normalized);
+};
+
 export default function Combat({
   isDM,
   userEmail,
@@ -149,10 +202,14 @@ export default function Combat({
   pendingArmorPrompt,
   onConsumeArmorPrompt,
   onArmorPromptPass,
-  pendingSunderPrompt,
-  onConsumeSunderPrompt,
-  onSunderPromptPass,
-  onSunderPromptRoll,
+  pendingArtPrompt,
+  onConsumeArtPrompt,
+  onArtPromptPass,
+  onArtPromptRoll,
+  pendingArtRoll,
+  onConsumePendingArtRoll,
+  onResolveArtRoll,
+  onArtRollCleared,
 }: CombatProps) {
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [zoneLines, setZoneLines] = useState<ZoneStroke[]>([]);
@@ -191,6 +248,7 @@ export default function Combat({
   const [imageRect, setImageRect] = useState<ImageRect | null>(null);
   const isSyncingRef = useRef(false);
   const handledInvalidReadiedRef = useRef<string | null>(null);
+  const handledPendingMonsterArtRollIdRef = useRef<string | null>(null);
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -278,6 +336,31 @@ export default function Combat({
     }
     return map;
   }, [tokenPositions]);
+  const initiativeEntryByTokenId = useMemo(() => {
+    const map = new Map<string, InitiativeEntry>();
+    for (const entry of initiativeEntries) {
+      const tokenId = entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
+      if (!tokenId) continue;
+      map.set(tokenId, entry);
+    }
+    return map;
+  }, [initiativeEntries]);
+  const combatSideOfToken = useCallback(
+    (tokenId: string): combatModel.TokenSide => {
+      if (!tokenId) return "player";
+      const normalized = tokenId.replace(/^player:/, "");
+      const entry = initiativeEntryByTokenId.get(normalized) || null;
+      if (entry?.kind === "monster") {
+        return monsterHasTrait(entry.monster_snapshot, "ally") ? "player" : "monster";
+      }
+      if (normalized.startsWith("monster:")) {
+        const snapshot = monsterByParticipantId.get(normalized)?.monster_snapshot || null;
+        return monsterHasTrait(snapshot, "ally") ? "player" : "monster";
+      }
+      return tokenSideOf(normalized);
+    },
+    [initiativeEntryByTokenId, monsterByParticipantId]
+  );
   const tokenElevationByCharacterId = useMemo(() => {
     const map = new Map<string, number>();
     for (const token of tokenElevations) {
@@ -468,33 +551,22 @@ export default function Combat({
     return zoneIdAtPoint(zoneRegionMap, actorToken);
   }, [actorTokenId, tokenByCharacterId, zoneRegionMap]);
   const actorZoneHasCover = actorZoneId !== null && zoneCoverIds.includes(actorZoneId);
-  const isActorEnemyEngaged = useMemo(() => {
-    if (!actorTokenId) return false;
-    const actorSide = tokenSideOf(actorTokenId);
-    for (const token of tokenPositions) {
-      if (token.character_id === actorTokenId) continue;
-      if (tokenSideOf(token.character_id) === actorSide) continue;
-      if (areTokensEngagedAtSameElevation(actorTokenId, token.character_id)) return true;
-    }
-    return false;
-  }, [actorTokenId, tokenPositions, areTokensEngagedAtSameElevation]);
   const isTokenEnemyEngaged = useCallback(
     (tokenId: string | null | undefined): boolean => {
       if (!tokenId) return false;
-      const tokenSide = tokenSideOf(tokenId);
+      const tokenSide = combatSideOfToken(tokenId);
       for (const token of tokenPositions) {
         if (token.character_id === tokenId) continue;
-        if (tokenSideOf(token.character_id) === tokenSide) continue;
+        if (combatSideOfToken(token.character_id) === tokenSide) continue;
         if (areTokensEngagedAtSameElevation(tokenId, token.character_id)) return true;
       }
       return false;
     },
-    [tokenPositions, areTokensEngagedAtSameElevation]
+    [tokenPositions, areTokensEngagedAtSameElevation, combatSideOfToken]
   );
   const actorHasFlightTrait = useMemo(() => {
     if (currentEntry?.kind !== "monster") return false;
-    const traits = currentEntry.monster_snapshot?.traits || [];
-    return traits.some((trait) => trait.trim().toLowerCase() === "flight");
+    return monsterHasTrait(currentEntry.monster_snapshot, "flight");
   }, [currentEntry]);
   const closestEnemyRange = useMemo<CombatRange | null>(() => {
     if (!actorTokenId) return null;
@@ -506,7 +578,7 @@ export default function Combat({
     let closestEffective: number | null = null;
     for (const token of tokenPositions) {
       if (token.character_id === actorTokenId) continue;
-      if (tokenSideOf(token.character_id) === tokenSideOf(actorTokenId)) continue;
+      if (combatSideOfToken(token.character_id) === combatSideOfToken(actorTokenId)) continue;
       const targetZone = zoneIdAtPoint(zoneRegionMap, token);
       if (targetZone === null) continue;
       const lateralDistance = shortestZoneDistance(actorZone, targetZone, zoneAdjacency);
@@ -518,7 +590,7 @@ export default function Combat({
       }
     }
     return rangeFromLateralAndVerticalDistance(closestEffective, 0);
-  }, [actorTokenId, tokenByCharacterId, tokenPositions, zoneAdjacency, zoneRegionMap, tokenElevationForTokenId]);
+  }, [actorTokenId, tokenByCharacterId, tokenPositions, zoneAdjacency, zoneRegionMap, tokenElevationForTokenId, combatSideOfToken]);
   const fleeRangeBonus = useMemo(() => {
     if (closestEnemyRange === "Near") return -1;
     if (closestEnemyRange === "Long") return 1;
@@ -556,7 +628,7 @@ export default function Combat({
   const isActorAlliedOnlyEngagement = useMemo(() => {
     if (!actorTokenId) return false;
     if (!engagements.some((edge) => edge.a === actorTokenId || edge.b === actorTokenId)) return false;
-    const actorSide = tokenSideOf(actorTokenId);
+    const actorSide = combatSideOfToken(actorTokenId);
 
     const component = new Set<string>([actorTokenId]);
     const queue: string[] = [actorTokenId];
@@ -571,10 +643,10 @@ export default function Combat({
     }
 
     for (const tokenId of component) {
-      if (tokenSideOf(tokenId) !== actorSide) return false;
+      if (combatSideOfToken(tokenId) !== actorSide) return false;
     }
     return true;
-  }, [actorTokenId, engagements]);
+  }, [actorTokenId, engagements, combatSideOfToken]);
   const isFreeRetreatAvailable = isActorSoleUnbrokenInEngagement || isActorAlliedOnlyEngagement;
   const isActorProne = Boolean(currentEntry?.prone);
   const actorGrapplingTargetId = currentEntry?.grappling_target_id ?? null;
@@ -811,19 +883,19 @@ export default function Combat({
   const armorPromptCanHelmet = Boolean(armorPrompt?.helmetItemId) && armorPromptHelmetDice > 0 && !armorPromptUsed.helmet;
   const armorPromptCanArmor = Boolean(armorPrompt?.armorItemId) && armorPromptArmorDice > 0 && !armorPromptUsed.armor;
   const shouldShowArmorPrompt = combatMode && Boolean(armorPrompt) && (armorPromptCanHelmet || armorPromptCanArmor);
-  const sunderPrompt = useMemo(() => {
-    if (!pendingSunderPrompt) return null;
-    const attackerId = pendingSunderPrompt.attackerCharacterId;
+  const artPrompt = useMemo(() => {
+    if (!pendingArtPrompt) return null;
+    const attackerId = pendingArtPrompt.attackerCharacterId;
     const attackerIsMonster = attackerId.startsWith("monster:");
-    if (attackerIsMonster && isDmViewer) return pendingSunderPrompt;
-    if (!attackerIsMonster && attackerId === currentUserTokenId) return pendingSunderPrompt;
+    if (attackerIsMonster && isDmViewer) return pendingArtPrompt;
+    if (!attackerIsMonster && attackerId === currentUserTokenId) return pendingArtPrompt;
     return null;
-  }, [pendingSunderPrompt, isDmViewer, currentUserTokenId]);
-  const shouldShowSunderPrompt =
+  }, [pendingArtPrompt, isDmViewer, currentUserTokenId]);
+  const shouldShowArtPrompt =
     combatMode &&
-    Boolean(sunderPrompt) &&
-    Array.isArray(sunderPrompt?.options) &&
-    sunderPrompt!.options.length > 0;
+    Boolean(artPrompt) &&
+    Array.isArray(artPrompt?.options) &&
+    artPrompt!.options.length > 0;
   const handleArmorPromptPass = useCallback(async () => {
     if (!armorPrompt) return;
     onConsumeArmorPrompt?.(armorPrompt.id);
@@ -858,18 +930,18 @@ export default function Combat({
     },
     [armorPrompt, onQueueReactionRoll, onConsumeArmorPrompt]
   );
-  const handleSunderPromptPass = useCallback(async () => {
-    if (!sunderPrompt) return;
-    onConsumeSunderPrompt?.(sunderPrompt.id);
-    await onSunderPromptPass?.(sunderPrompt.id);
-  }, [sunderPrompt, onConsumeSunderPrompt, onSunderPromptPass]);
-  const handleSunderPromptRoll = useCallback(
-    async (targetItemId: string) => {
-      if (!sunderPrompt) return;
-      onConsumeSunderPrompt?.(sunderPrompt.id);
-      await onSunderPromptRoll?.(sunderPrompt.id, targetItemId);
+  const handleArtPromptPass = useCallback(async () => {
+    if (!artPrompt) return;
+    onConsumeArtPrompt?.(artPrompt.id);
+    await onArtPromptPass?.(artPrompt.id);
+  }, [artPrompt, onConsumeArtPrompt, onArtPromptPass]);
+  const handleArtPromptRoll = useCallback(
+    async (optionId: string) => {
+      if (!artPrompt) return;
+      onConsumeArtPrompt?.(artPrompt.id);
+      await onArtPromptRoll?.(artPrompt.id, optionId);
     },
-    [sunderPrompt, onConsumeSunderPrompt, onSunderPromptRoll]
+    [artPrompt, onConsumeArtPrompt, onArtPromptRoll]
   );
   const resolvePendingReaction = useCallback(
     async (
@@ -1098,6 +1170,30 @@ export default function Combat({
     }
     return 1;
   }, [currentEntry]);
+  const actorCanMoveWhileGrappling = useMemo(() => {
+    if (!isActorGrappling || !actorGrapplingTargetId) return false;
+    return actorSize > sizeForTokenId(actorGrapplingTargetId);
+  }, [isActorGrappling, actorGrapplingTargetId, actorSize, sizeForTokenId]);
+  const actorMovementLockedByHold =
+    isActorGrappled || isActorClinging || (isActorGrappling && !actorCanMoveWhileGrappling);
+  const isActorEnemyEngagedForMovement = useMemo(() => {
+    if (!actorTokenId) return false;
+    const actorSide = combatSideOfToken(actorTokenId);
+    for (const token of tokenPositions) {
+      if (token.character_id === actorTokenId) continue;
+      if (combatSideOfToken(token.character_id) === actorSide) continue;
+      if (actorCanMoveWhileGrappling && token.character_id === actorGrapplingTargetId) continue;
+      if (areTokensEngagedAtSameElevation(actorTokenId, token.character_id)) return true;
+    }
+    return false;
+  }, [
+    actorTokenId,
+    tokenPositions,
+    areTokensEngagedAtSameElevation,
+    actorCanMoveWhileGrappling,
+    actorGrapplingTargetId,
+    combatSideOfToken,
+  ]);
   const selectedTargetSize = useMemo(() => {
     if (!selectedTokenId) return null;
     if (selectedTokenId.startsWith("monster:")) {
@@ -1221,6 +1317,12 @@ export default function Combat({
           }
           if ((entry?.flame_intensity ?? 0) > 0) {
             flags.push(`Flame ${Math.max(0, Math.trunc(entry?.flame_intensity ?? 0))}`);
+          }
+          if ((entry?.falling_zones ?? 0) > 0) {
+            flags.push(`Falling ${Math.max(0, Math.trunc(entry?.falling_zones ?? 0))}`);
+          }
+          if (entry?.blitzed) {
+            flags.push("Blitzed");
           }
           for (const usedFlag of entry?.used_item_flags || []) {
             if (usedFlag) flags.push(usedFlag);
@@ -1475,7 +1577,7 @@ export default function Combat({
     if (!isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
-    if (isActorProne || actorHardLockedByHold) return false;
+    if (isActorProne || actorMovementLockedByHold) return false;
     if (isActorEngaged) return false;
 
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -1486,15 +1588,15 @@ export default function Combat({
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, tokenElevationForTokenId]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, tokenElevationForTokenId]);
   const canUseRunFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (!actorRestrictedToRun && (isActorProne || actorHardLockedByHold)) return false;
+    if (!actorRestrictedToRun && (isActorProne || actorMovementLockedByHold)) return false;
     if (isActorCovered) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
@@ -1502,7 +1604,7 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorCovered, actorTauntAngerRestricted]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorCovered, actorTauntAngerRestricted]);
   const selectedFlyMode = useMemo<{ point: ZonePoint; movesZone: boolean } | null>(() => {
     if (!actorTokenId) return null;
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -1529,23 +1631,23 @@ export default function Combat({
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (!actorRestrictedToRun && (isActorProne || actorHardLockedByHold)) return false;
+    if (!actorRestrictedToRun && (isActorProne || actorMovementLockedByHold)) return false;
     if (isActorCovered) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
     return true;
-  }, [actorHasFlightTrait, combatMode, actorTokenId, isMyTurn, selectedFlyMode, actorTauntAngerRestricted, actorDead, actorRestrictedToCrawl, currentEntry, actorRestrictedToRun, isActorProne, actorHardLockedByHold, isActorCovered, isActorEnemyEngaged]);
+  }, [actorHasFlightTrait, combatMode, actorTokenId, isMyTurn, selectedFlyMode, actorTauntAngerRestricted, actorDead, actorRestrictedToCrawl, currentEntry, actorRestrictedToRun, isActorProne, actorMovementLockedByHold, isActorCovered, isActorEnemyEngagedForMovement]);
   const canUseFlyDownFromSelection = canUseFlyFromSelection && actorElevation > 0;
   const canUseFleeFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !currentEntry || !isMyTurn) return false;
     if (!currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
-    if (!actorRestrictedToRun && (isActorProne || actorHardLockedByHold)) return false;
+    if (!actorRestrictedToRun && (isActorProne || actorMovementLockedByHold)) return false;
     if (isActorCovered) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
     if (!isSelectedSelf && !selectedZoneTarget) return false;
     return true;
-  }, [combatMode, actorTokenId, currentEntry, isMyTurn, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, isActorEnemyEngaged, isSelectedSelf, selectedZoneTarget, isActorCovered, actorTauntAngerRestricted]);
+  }, [combatMode, actorTokenId, currentEntry, isMyTurn, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorMovementLockedByHold, isActorEnemyEngagedForMovement, isSelectedSelf, selectedZoneTarget, isActorCovered, actorTauntAngerRestricted]);
   const canUseCrawlFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
@@ -1554,7 +1656,7 @@ export default function Combat({
     if (!currentEntry?.slow_available) return false;
     if (!isActorProne) return false;
     if (isActorCovered) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
@@ -1562,14 +1664,14 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, isMyTurn, actorDead, actorRestrictedToCrawl, currentEntry, isActorProne, isActorEnemyEngaged, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorCovered, actorTauntAngerRestricted, isSkillBlockedForToken]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, isMyTurn, actorDead, actorRestrictedToCrawl, currentEntry, isActorProne, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorCovered, actorTauntAngerRestricted, isSkillBlockedForToken]);
   const canEnterCoverFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !currentEntry || !isMyTurn) return false;
     if (!currentEntry.fast_available && !currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
-    if (isActorProne || actorHardLockedByHold) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorProne || actorMovementLockedByHold) return false;
+    if (isActorEnemyEngagedForMovement) return false;
     if (!actorZoneHasCover) return false;
     if (isActorCovered) return false;
     if (!isSelectedSelf && selectedZoneTarget?.zoneId !== actorZoneId) return false;
@@ -1583,8 +1685,8 @@ export default function Combat({
     actorRestrictedToCrawl,
     actorRestrictedToRun,
     isActorProne,
-    actorHardLockedByHold,
-    isActorEnemyEngaged,
+    actorMovementLockedByHold,
+    isActorEnemyEngagedForMovement,
     actorZoneHasCover,
     isActorCovered,
     isSelectedSelf,
@@ -1597,7 +1699,7 @@ export default function Combat({
     if (!currentEntry.fast_available && !currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
-    if (isActorProne || actorHardLockedByHold) return false;
+    if (isActorProne || actorMovementLockedByHold) return false;
     if (!isActorCovered) return false;
     if (!isSelectedSelf && selectedZoneTarget?.zoneId !== actorZoneId) return false;
     return true;
@@ -1610,7 +1712,7 @@ export default function Combat({
     actorRestrictedToCrawl,
     actorRestrictedToRun,
     isActorProne,
-    actorHardLockedByHold,
+    actorMovementLockedByHold,
     isActorCovered,
     isSelectedSelf,
     selectedZoneTarget,
@@ -1621,21 +1723,22 @@ export default function Combat({
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
-    if (isActorProne || actorHardLockedByHold) return false;
+    if (isActorProne || actorMovementLockedByHold) return false;
     if (!isFreeRetreatAvailable && !(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
     if (!isActorEngaged) return false;
     if (selectedTokenId === actorTokenId) return true;
     return areTokensEngagedAtSameElevation(actorTokenId, selectedTokenId);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEngaged, isFreeRetreatAvailable, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, areTokensEngagedAtSameElevation]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEngaged, isFreeRetreatAvailable, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, areTokensEngagedAtSameElevation]);
   const canUseGetUpFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!isActorProne) return false;
-    if (isActorGrappling || isActorClinging || isActorGrappled) return false;
+    if (isActorClinging || isActorGrappled) return false;
+    if (isActorGrappling && !actorCanMoveWhileGrappling) return false;
     if (selectedTokenId !== actorTokenId) return false;
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled, actorCanMoveWhileGrappling, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
   const canUseFeintFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
@@ -1688,6 +1791,140 @@ export default function Combat({
   useEffect(() => {
     setMonsterRollResult(null);
   }, [selectedTokenId, selectedZoneTarget?.zoneId, currentEntry?.participant_id]);
+
+  useEffect(() => {
+    if (!isDmUser) return;
+    if (!pendingArtRoll) return;
+    if (!pendingArtRoll.actorCharacterId.startsWith("monster:")) return;
+    if (!onResolveArtRoll) return;
+    if (handledPendingMonsterArtRollIdRef.current === pendingArtRoll.id) return;
+
+    const processMonsterArtRoll = async () => {
+      const actorTokenId = pendingArtRoll.actorCharacterId;
+      const art = artsCatalog.find((entry) => entry.id === pendingArtRoll.artId) || null;
+      const parsedCost = parseArtCost(art?.cost || "0");
+      const actorEntry =
+        initiativeEntries.find((entry) => entry.participant_id === actorTokenId) || null;
+      const actorMonster = initiativeMonsters.find((monster) => monster.id === actorTokenId) || null;
+      const snapshot = actorEntry?.monster_snapshot || actorMonster?.monster_snapshot || null;
+      const spiritBefore = Math.max(
+        0,
+        Number(snapshot?.spirits_current ?? snapshot?.starting_spirits ?? 0)
+      );
+
+      const firstRoll = Array.from(
+        { length: spiritBefore },
+        () => Math.floor(Math.random() * 6) + 1
+      );
+      const pushedRoll = firstRoll.map((die) =>
+        die === 1 || die === 6 ? die : Math.floor(Math.random() * 6) + 1
+      );
+      const successes = pushedRoll.filter((die) => die === 6).length;
+      const ones = pushedRoll.filter((die) => die === 1).length;
+      const activated = successes >= parsedCost.minSuccesses;
+      const postDamageSpirit = Math.max(0, spiritBefore - ones);
+      const remainingAfterMin = activated ? Math.max(0, successes - parsedCost.minSuccesses) : 0;
+      const scaling = parsedCost.hasScaling
+        ? Math.floor(remainingAfterMin / parsedCost.scaleStep)
+        : 0;
+      const spiritFromLeftover = Math.max(
+        0,
+        successes - parsedCost.minSuccesses - (parsedCost.hasScaling ? parsedCost.scaleStep : 0)
+      );
+      const spiritAfter = postDamageSpirit + spiritFromLeftover;
+
+      let nextEntries = initiativeEntries;
+      let nextMonsters = initiativeMonsters;
+      if (snapshot) {
+        nextEntries = initiativeEntries.map((entry) => {
+          if (entry.participant_id !== actorTokenId || !entry.monster_snapshot) return entry;
+          return {
+            ...entry,
+            monster_snapshot: {
+              ...entry.monster_snapshot,
+              spirits_current: spiritAfter,
+            },
+          };
+        });
+        nextMonsters = initiativeMonsters.map((monster) => {
+          if (monster.id !== actorTokenId || !monster.monster_snapshot) return monster;
+          return {
+            ...monster,
+            monster_snapshot: {
+              ...monster.monster_snapshot,
+              spirits_current: spiritAfter,
+            },
+          };
+        });
+
+        setInitiativeEntries(nextEntries);
+        setInitiativeMonsters(nextMonsters);
+
+        const supabase = createClient();
+        const { error: saveError } = await supabase
+          .from("combat_state")
+          .upsert(
+            {
+              id: 1,
+              combat_mode: combatMode,
+              initiative_entries: nextEntries,
+              initiative_current_index: initiativeCurrentIndex,
+              initiative_monsters: nextMonsters,
+              engagements,
+              zone_loot: zoneLoot,
+              zone_cover: zoneCoverIds,
+              updated_by_email: userEmail,
+            },
+            { onConflict: "id" }
+          );
+        if (saveError) {
+          setError(saveError.message);
+        }
+      }
+
+      setMonsterRollResult({
+        actionLabel: pendingArtRoll.displayName || art?.name || "Art",
+        attributeDice: pushedRoll,
+        attributeLabel: "Spirit Dice (Pushed)",
+        skillDice: firstRoll,
+        skillLabel: "Spirit Dice (Initial)",
+        skillIsNegative: false,
+        gearDice: [],
+        gearLabel: "Extra Dice",
+        successes,
+      });
+
+      onConsumePendingArtRoll?.(pendingArtRoll.id);
+      handledPendingMonsterArtRollIdRef.current = pendingArtRoll.id;
+      await onResolveArtRoll({
+        pendingRollId: pendingArtRoll.id,
+        artId: pendingArtRoll.artId,
+        artName: pendingArtRoll.displayName || art?.name || "Art",
+        successes,
+        scaling,
+        spiritGenerated: spiritFromLeftover,
+        activated,
+        context: pendingArtRoll,
+      });
+      onArtRollCleared?.();
+    };
+
+    void processMonsterArtRoll();
+  }, [
+    isDmUser,
+    pendingArtRoll,
+    onResolveArtRoll,
+    initiativeEntries,
+    initiativeMonsters,
+    initiativeCurrentIndex,
+    combatMode,
+    engagements,
+    zoneLoot,
+    zoneCoverIds,
+    userEmail,
+    onConsumePendingArtRoll,
+    onArtRollCleared,
+  ]);
 
   const selectedRange = useMemo<CombatRange | null>(() => {
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return null;
@@ -2999,11 +3236,12 @@ export default function Combat({
         name: player.name,
         user_email: player.email,
         icon_url: player.icon_url,
-        roll: rollUnique(used),
+        roll: rollHighestOfD10Unique(used, lightningFastInitiativeRollCount(player)),
         slow_available: true,
         fast_available: true,
         prone: false,
         covered: false,
+        blitzed: false,
         swing_weapon_item_id: null,
         swing_weapon_name: null,
         taunted_anger_by_id: null,
@@ -3049,10 +3287,20 @@ export default function Combat({
         },
       };
     });
+    const initiativeHasBlitz = nextMonsters.some((monster) =>
+      monsterHasTrait(monster.monster_snapshot, BLITZ_MONSTER_TRAIT)
+    );
 
     const monsterEntries = nextMonsters.map((monster) => {
       const snapshot = monster.monster_snapshot;
       const readied = monsterReadiedById.get(monster.id) || null;
+      const normalizedSnapshot = snapshot
+        ? {
+            ...snapshot,
+            gear: snapshot.gear || [],
+          }
+        : snapshot;
+      const isFirst = monsterHasTrait(normalizedSnapshot, FIRST_MONSTER_TRAIT);
       return {
         participant_id: monster.id,
         kind: "monster" as const,
@@ -3060,17 +3308,13 @@ export default function Combat({
         user_email: null,
         icon_url: monster.icon_url,
         monster_template_id: monster.template_id,
-        monster_snapshot: snapshot
-          ? {
-              ...snapshot,
-              gear: snapshot.gear || [],
-            }
-          : snapshot,
-        roll: rollUnique(used),
+        monster_snapshot: normalizedSnapshot,
+        roll: isFirst ? rollUniqueFromBase(used, 9) : rollUnique(used),
         slow_available: true,
         fast_available: true,
         prone: false,
         covered: false,
+        blitzed: false,
         swing_weapon_item_id: null,
         swing_weapon_name: null,
         taunted_anger_by_id: null,
@@ -3083,9 +3327,18 @@ export default function Combat({
       };
     });
 
-    const entries: InitiativeEntry[] = [...playerEntries, ...monsterEntries].sort(
+    const entries: InitiativeEntry[] = [...playerEntries, ...monsterEntries]
+      .map((entry) => {
+        if (!initiativeHasBlitz) return entry;
+        if (entry.kind !== "monster") return { ...entry, blitzed: true };
+        return {
+          ...entry,
+          blitzed: !monsterHasTrait(entry.monster_snapshot, BLITZ_MONSTER_TRAIT),
+        };
+      })
+      .sort(
       (a, b) => rollSortValue(b.roll) - rollSortValue(a.roll)
-    );
+      );
 
     const currentIndex = entries.length > 0 ? 0 : null;
     for (const p of updatedPlayers) {
@@ -3284,11 +3537,14 @@ export default function Combat({
         icon_url: deployedMonster.icon_url,
         monster_template_id: deployedMonster.template_id,
         monster_snapshot: deployedMonster.monster_snapshot,
-        roll: rollUnique(used),
+        roll: monsterHasTrait(deployedMonster.monster_snapshot, FIRST_MONSTER_TRAIT)
+          ? rollUniqueFromBase(used, 9)
+          : rollUnique(used),
         slow_available: true,
         fast_available: true,
         prone: false,
         covered: false,
+        blitzed: false,
         swing_weapon_item_id: null,
         swing_weapon_name: null,
         taunted_anger_by_id: null,
@@ -3429,6 +3685,7 @@ export default function Combat({
       fast_available: true,
       prone: false,
       covered: false,
+      blitzed: false,
       swing_weapon_item_id: null,
       swing_weapon_name: null,
       readied_weapon_item_id: null,
@@ -3459,7 +3716,7 @@ export default function Combat({
       const used = new Set(
         initiativeEntries.flatMap((entry) => (entry.roll === null ? [] : [formatRoll(entry.roll)]))
       );
-      newEntry.roll = rollUnique(used);
+      newEntry.roll = rollHighestOfD10Unique(used, lightningFastInitiativeRollCount(player));
       nextEntries = [...initiativeEntries, newEntry].sort((a, b) => rollSortValue(b.roll) - rollSortValue(a.roll));
       const currentParticipant = currentEntry?.participant_id ?? null;
       if (currentParticipant) {
@@ -5606,10 +5863,10 @@ export default function Combat({
     if (!actorTokenId || !combatMode || !isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
-    if (!actorRestrictedToRun && actorHardLockedByHold) return false;
+    if (!actorRestrictedToRun && actorMovementLockedByHold) return false;
     const actingParticipantId = currentEntry?.participant_id ?? null;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
 
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
@@ -5646,7 +5903,7 @@ export default function Combat({
     if (isSkillBlockedForToken(actorTokenId, "MOVE")) return false;
     if (!currentEntry?.slow_available) return false;
     if (!isActorProne) return false;
-    if (isActorEnemyEngaged) return false;
+    if (isActorEnemyEngagedForMovement) return false;
 
     const actorToken = tokenByCharacterId.get(actorTokenId);
     if (!actorToken) return false;
@@ -5861,7 +6118,7 @@ export default function Combat({
           isMyTurn &&
           !isActorEngaged &&
           !isActorProne &&
-          !actorHardLockedByHold &&
+          !actorMovementLockedByHold &&
           actorZone !== null &&
           actorZone === targetZone &&
           sameElevation
@@ -5981,31 +6238,35 @@ export default function Combat({
 
   return (
     <>
-      {shouldShowSunderPrompt && sunderPrompt && (
+      {shouldShowArtPrompt && artPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-amber-300">Art Reaction Available</h3>
                 <p className="text-sm text-amber-200/80">
-                  Incoming: {sunderPrompt.attack.maneuver} ({sunderPrompt.attack.weaponName})
+                  Incoming: {artPrompt.attack.maneuver} ({artPrompt.attack.weaponName})
                 </p>
-                <p className="text-xs text-amber-200/70">Successes: {sunderPrompt.attack.totalSuccesses}</p>
+                <p className="text-xs text-amber-200/70">Successes: {artPrompt.attack.totalSuccesses}</p>
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-2">
-              {sunderPrompt.options.map((option) => (
+              {artPrompt.options.map((option) => (
                 <button
-                  key={`sunder-${option.itemId}-${option.slot}`}
-                  onClick={() => void handleSunderPromptRoll(option.itemId)}
-                  className="w-full rounded bg-gradient-to-r from-orange-700 to-gray-100 px-3 py-2 text-sm font-semibold text-gray-900 hover:from-orange-600 hover:to-white"
+                  key={option.id}
+                  onClick={() => void handleArtPromptRoll(option.id)}
+                  className={`w-full rounded px-3 py-2 text-sm font-semibold transition-colors ${
+                    option.kind === "sunder" || option.kind === "lagging-blade"
+                      ? "bg-gradient-to-r from-orange-700 to-gray-100 text-gray-900 hover:from-orange-600 hover:to-white"
+                      : "bg-amber-600 text-gray-950 hover:bg-amber-500"
+                  }`}
                 >
-                  {`Sunder (${option.itemName})`}
+                  {option.label}
                 </button>
               ))}
               <button
-                onClick={() => void handleSunderPromptPass()}
+                onClick={() => void handleArtPromptPass()}
                 className="w-full rounded bg-gray-700 px-3 py-2 text-sm font-semibold text-amber-100 hover:bg-gray-600"
               >
                 Pass
@@ -6501,9 +6762,9 @@ export default function Combat({
               <p className="font-semibold text-green-300">Successes: {monsterRollResult.successes}</p>
             </div>
             <div className="mt-2 space-y-2 text-xs">
-              <p>Attribute Dice: {monsterRollResult.attributeDice.length > 0 ? monsterRollResult.attributeDice.join(", ") : "None"}</p>
-              <p>{monsterRollResult.skillIsNegative ? "Skill Dice (Negative): " : "Skill Dice: "}{monsterRollResult.skillDice.length > 0 ? monsterRollResult.skillDice.join(", ") : "None"}</p>
-              <p>Gear Dice: {monsterRollResult.gearDice.length > 0 ? monsterRollResult.gearDice.join(", ") : "None"}</p>
+              <p>{monsterRollResult.attributeLabel || "Attribute Dice"}: {monsterRollResult.attributeDice.length > 0 ? monsterRollResult.attributeDice.join(", ") : "None"}</p>
+              <p>{monsterRollResult.skillLabel || (monsterRollResult.skillIsNegative ? "Skill Dice (Negative)" : "Skill Dice")}: {monsterRollResult.skillDice.length > 0 ? monsterRollResult.skillDice.join(", ") : "None"}</p>
+              <p>{monsterRollResult.gearLabel || "Gear Dice"}: {monsterRollResult.gearDice.length > 0 ? monsterRollResult.gearDice.join(", ") : "None"}</p>
             </div>
           </div>
         )}

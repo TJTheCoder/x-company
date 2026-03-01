@@ -7,5 +7,14 @@
       "2": "You can Dodge once for free every round in combat. This does not count as an action.",
       "3": "You can Dodge once for free every round in combat. This does not count as an action."
     }
+  },
+  {
+    "id": "talent-lightning-fast",
+    "name": "Lightning Fast",
+    "effectsByLevel": {
+      "1": "You can roll twice instead of once when you roll initiative. You keep the highest roll.",
+      "2": "You can roll thrice instead of once when you roll initiative. You keep the highest roll.",
+      "3": "You can roll four times instead of once when you roll initiative. You keep the highest roll."
+    }
   }
 ]

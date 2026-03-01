@@ -392,6 +392,442 @@ begin
 end;
 $$;
 
+create or replace function public.combat_apply_falling(
+  p_turn_start_token_id text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_mode boolean;
+  v_entries jsonb;
+  v_monsters jsonb;
+  v_elevations jsonb;
+  v_email text := nullif(coalesce(auth.jwt() ->> 'email', ''), '');
+  v_turn_token_id text := nullif(btrim(coalesce(p_turn_start_token_id, '')), '');
+  v_entry record;
+  v_token_id text;
+  v_kind text;
+  v_prone boolean;
+  v_can_fly boolean;
+  v_elevation int := 0;
+  v_base_fall boolean := false;
+  v_base_map jsonb := '{}'::jsonb;
+  v_should_map jsonb := '{}'::jsonb;
+  v_known_tokens text[] := array[]::text[];
+  v_iter int;
+  v_changed_iter boolean;
+  v_clinging_target_id text;
+  v_grappled_by_id text;
+  v_current_should boolean;
+  v_next_should boolean;
+  v_existing_fall int := 0;
+  v_new_fall int := 0;
+  v_new_elevation int := 0;
+  v_should_step boolean;
+  v_is_turn_step boolean;
+  v_fall_dice int := 0;
+  v_fall_successes int := 0;
+  v_target_uuid uuid;
+  v_attrs jsonb;
+  v_str_before int := 0;
+  v_str_after int := 0;
+  v_snapshot jsonb;
+  v_changed boolean := false;
+begin
+  if v_turn_token_id is not null and left(v_turn_token_id, 7) = 'player:' then
+    v_turn_token_id := substr(v_turn_token_id, 8);
+  end if;
+
+  select combat_mode,
+         coalesce(initiative_entries, '[]'::jsonb),
+         coalesce(initiative_monsters, '[]'::jsonb),
+         coalesce(token_elevations, '[]'::jsonb)
+  into v_mode, v_entries, v_monsters, v_elevations
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if coalesce(v_mode, false) = false then
+    return;
+  end if;
+  if jsonb_array_length(v_entries) = 0 then
+    return;
+  end if;
+
+  -- Build initial falling state from local properties only.
+  for v_entry in
+    select e.ord - 1 as idx, e.entry
+    from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  loop
+    v_token_id := coalesce(v_entry.entry->>'participant_id', '');
+    if left(v_token_id, 7) = 'player:' then
+      v_token_id := substr(v_token_id, 8);
+    end if;
+    if v_token_id = '' then
+      continue;
+    end if;
+    if not (v_token_id = any(v_known_tokens)) then
+      v_known_tokens := array_append(v_known_tokens, v_token_id);
+    end if;
+
+    begin
+      select coalesce((el.value->>'elevation')::int, 0)
+      into v_elevation
+      from jsonb_array_elements(v_elevations) as el(value)
+      where el.value->>'character_id' = v_token_id
+      limit 1;
+    exception when others then
+      v_elevation := 0;
+    end;
+    v_elevation := greatest(0, coalesce(v_elevation, 0));
+
+    v_kind := coalesce(v_entry.entry->>'kind', '');
+    begin
+      v_prone := coalesce((v_entry.entry->>'prone')::boolean, false);
+    exception when others then
+      v_prone := false;
+    end;
+
+    v_can_fly := false;
+    if v_kind = 'monster' then
+      select exists (
+        select 1
+        from jsonb_array_elements_text(
+          case
+            when jsonb_typeof(v_entry.entry->'monster_snapshot'->'traits') = 'array'
+            then coalesce(v_entry.entry->'monster_snapshot'->'traits', '[]'::jsonb)
+            else '[]'::jsonb
+          end
+        ) as tr(value)
+        where lower(btrim(tr.value)) = 'flight'
+      )
+      into v_can_fly;
+    end if;
+
+    v_base_fall := v_elevation > 0 and ((not v_can_fly) or v_prone);
+    v_base_map := jsonb_set(v_base_map, array[v_token_id], to_jsonb(v_base_fall), true);
+    v_should_map := jsonb_set(v_should_map, array[v_token_id], to_jsonb(v_base_fall), true);
+  end loop;
+
+  -- Resolve relationship dependencies (cling and grapple suppression) to a fixed point.
+  for v_iter in 1..24 loop
+    v_changed_iter := false;
+    for v_entry in
+      select e.ord - 1 as idx, e.entry
+      from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+    loop
+      v_token_id := coalesce(v_entry.entry->>'participant_id', '');
+      if left(v_token_id, 7) = 'player:' then
+        v_token_id := substr(v_token_id, 8);
+      end if;
+      if v_token_id = '' then
+        continue;
+      end if;
+
+      begin
+        select coalesce((el.value->>'elevation')::int, 0)
+        into v_elevation
+        from jsonb_array_elements(v_elevations) as el(value)
+        where el.value->>'character_id' = v_token_id
+        limit 1;
+      exception when others then
+        v_elevation := 0;
+      end;
+      v_elevation := greatest(0, coalesce(v_elevation, 0));
+
+      v_current_should := coalesce((v_should_map->>v_token_id)::boolean, false);
+      if v_elevation <= 0 then
+        v_next_should := false;
+      else
+        v_next_should := coalesce((v_base_map->>v_token_id)::boolean, false);
+        v_clinging_target_id := nullif(coalesce(v_entry.entry->>'clinging_target_id', ''), '');
+        v_grappled_by_id := nullif(coalesce(v_entry.entry->>'grappled_by_id', ''), '');
+
+        if v_clinging_target_id is not null and v_clinging_target_id = any(v_known_tokens) then
+          v_next_should := coalesce((v_should_map->>v_clinging_target_id)::boolean, v_next_should);
+        elsif v_next_should and v_grappled_by_id is not null and v_grappled_by_id = any(v_known_tokens) then
+          if coalesce((v_should_map->>v_grappled_by_id)::boolean, true) = false then
+            v_next_should := false;
+          end if;
+        end if;
+      end if;
+
+      if v_next_should is distinct from v_current_should then
+        v_should_map := jsonb_set(v_should_map, array[v_token_id], to_jsonb(v_next_should), true);
+        v_changed_iter := true;
+      end if;
+    end loop;
+    exit when not v_changed_iter;
+  end loop;
+
+  -- Apply state transitions: clear/advance falling, move by one elevation, and resolve impact.
+  for v_entry in
+    select e.ord - 1 as idx, e.entry
+    from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  loop
+    v_token_id := coalesce(v_entry.entry->>'participant_id', '');
+    if left(v_token_id, 7) = 'player:' then
+      v_token_id := substr(v_token_id, 8);
+    end if;
+    if v_token_id = '' then
+      continue;
+    end if;
+
+    begin
+      select coalesce((el.value->>'elevation')::int, 0)
+      into v_elevation
+      from jsonb_array_elements(v_elevations) as el(value)
+      where el.value->>'character_id' = v_token_id
+      limit 1;
+    exception when others then
+      v_elevation := 0;
+    end;
+    v_elevation := greatest(0, coalesce(v_elevation, 0));
+
+    begin
+      v_existing_fall := greatest(0, coalesce((v_entry.entry->>'falling_zones')::int, 0));
+    exception when others then
+      v_existing_fall := 0;
+    end;
+
+    v_next_should := coalesce((v_should_map->>v_token_id)::boolean, false);
+    if v_elevation <= 0 or not v_next_should then
+      if v_existing_fall > 0 or (v_entry.entry ? 'falling_zones') then
+        v_entry.entry := jsonb_set(v_entry.entry, '{falling_zones}', 'null'::jsonb, true);
+        v_entries := jsonb_set(v_entries, array[v_entry.idx::text], v_entry.entry, false);
+        v_changed := true;
+      end if;
+      continue;
+    end if;
+
+    v_is_turn_step := v_turn_token_id is not null and v_turn_token_id = v_token_id;
+    v_should_step := (v_existing_fall = 0) or v_is_turn_step;
+    if not v_should_step then
+      continue;
+    end if;
+
+    v_new_fall := greatest(1, v_existing_fall + 1);
+    v_new_elevation := greatest(0, v_elevation - 1);
+    if v_new_elevation <> v_elevation then
+      v_elevations := coalesce(
+        (
+          select jsonb_agg(el.value)
+          from jsonb_array_elements(v_elevations) as el(value)
+          where coalesce(el.value->>'character_id', '') <> v_token_id
+        ),
+        '[]'::jsonb
+      );
+      v_elevations := v_elevations || jsonb_build_array(
+        jsonb_build_object(
+          'character_id', v_token_id,
+          'elevation', v_new_elevation
+        )
+      );
+      v_changed := true;
+    end if;
+
+    if v_new_elevation = 0 then
+      v_fall_dice := v_new_fall * 8;
+      v_fall_successes := 0;
+      if v_fall_dice > 0 then
+        select coalesce(count(*), 0)::int
+        into v_fall_successes
+        from generate_series(1, v_fall_dice) as g(i)
+        where (floor(random() * 6)::int + 1) = 6;
+      end if;
+
+      if v_fall_successes > 0 then
+        v_kind := coalesce(v_entry.entry->>'kind', '');
+        if v_kind = 'monster' then
+          v_snapshot := coalesce(v_entry.entry->'monster_snapshot', '{}'::jsonb);
+          begin
+            v_str_before := coalesce((v_snapshot->>'str')::int, 0);
+          exception when others then
+            v_str_before := 0;
+          end;
+          v_str_after := greatest(0, v_str_before - v_fall_successes);
+          v_snapshot := jsonb_set(v_snapshot, '{str}', to_jsonb(v_str_after), true);
+          v_entry.entry := jsonb_set(v_entry.entry, '{monster_snapshot}', v_snapshot, true);
+          v_entries := jsonb_set(v_entries, array[v_entry.idx::text], v_entry.entry, false);
+
+          v_monsters := coalesce(v_monsters, '[]'::jsonb);
+          select coalesce(
+            jsonb_agg(
+              case
+                when mon.value->>'id' = v_token_id
+                then jsonb_set(mon.value, '{monster_snapshot}', v_snapshot, true)
+                else mon.value
+              end
+            ),
+            '[]'::jsonb
+          )
+          into v_monsters
+          from jsonb_array_elements(v_monsters) as mon(value);
+          v_changed := true;
+        else
+          begin
+            v_target_uuid := v_token_id::uuid;
+            select coalesce(to_jsonb(attributes), '{}'::jsonb)
+            into v_attrs
+            from public.characters
+            where id = v_target_uuid
+            limit 1;
+
+            if v_attrs is not null then
+              begin
+                v_str_before := coalesce((v_attrs->>'STR')::int, 0);
+              exception when others then
+                v_str_before := 0;
+              end;
+              v_str_after := greatest(0, v_str_before - v_fall_successes);
+              v_attrs := jsonb_set(v_attrs, '{STR}', to_jsonb(v_str_after), true);
+              update public.characters
+              set attributes = v_attrs
+              where id = v_target_uuid;
+            end if;
+          exception when others then
+            null;
+          end;
+        end if;
+      end if;
+
+      v_entry.entry := jsonb_set(v_entry.entry, '{falling_zones}', 'null'::jsonb, true);
+    else
+      v_entry.entry := jsonb_set(v_entry.entry, '{falling_zones}', to_jsonb(v_new_fall), true);
+    end if;
+
+    v_entries := jsonb_set(v_entries, array[v_entry.idx::text], v_entry.entry, false);
+    v_changed := true;
+  end loop;
+
+  if not v_changed then
+    return;
+  end if;
+
+  update public.combat_state
+  set initiative_entries = v_entries,
+      initiative_monsters = v_monsters,
+      token_elevations = v_elevations,
+      updated_by_email = coalesce(v_email, updated_by_email)
+  where id = 1;
+
+  perform public.combat_prune_fully_broken_engagements();
+end;
+$$;
+
+grant execute on function public.combat_apply_falling(text) to authenticated;
+
+create or replace function public.combat_auto_pass_blitzed_turns()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_mode boolean;
+  v_entries jsonb;
+  v_idx int;
+  v_count int;
+  v_current jsonb;
+  v_is_blitzed boolean := false;
+  v_next_idx int;
+  v_next_entry jsonb;
+  v_next_token_id text;
+  v_reset_entries jsonb;
+  v_guard int := 0;
+begin
+  loop
+    select combat_mode, coalesce(initiative_entries, '[]'::jsonb), initiative_current_index
+    into v_mode, v_entries, v_idx
+    from public.combat_state
+    where id = 1
+    for update;
+
+    if coalesce(v_mode, false) = false then
+      return;
+    end if;
+
+    v_count := jsonb_array_length(v_entries);
+    if v_count = 0 then
+      return;
+    end if;
+
+    if v_idx is null or v_idx < 0 or v_idx >= v_count then
+      v_idx := 0;
+    end if;
+
+    v_current := v_entries -> v_idx;
+    begin
+      v_is_blitzed := coalesce((v_current->>'blitzed')::boolean, false);
+    exception when others then
+      v_is_blitzed := false;
+    end;
+    if not v_is_blitzed then
+      return;
+    end if;
+
+    -- Auto-pass this turn and clear Blitzed with no action consumption.
+    v_current := jsonb_set(v_current, '{blitzed}', 'false'::jsonb, true);
+    v_current := jsonb_set(v_current, '{taunted_anger_by_id}', 'null'::jsonb, true);
+    v_current := jsonb_set(v_current, '{taunted_anger_by_name}', 'null'::jsonb, true);
+    v_entries := jsonb_set(v_entries, array[v_idx::text], v_current, false);
+
+    v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+    v_next_entry := v_entries -> v_next_idx;
+    v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
+    v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+    v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
+
+    if v_next_idx = 0 and v_count > 0 then
+      v_reset_entries := public.combat_apply_round_transition(v_entries);
+      v_entries := v_reset_entries;
+    end if;
+
+    update public.combat_state
+    set initiative_current_index = v_next_idx,
+        initiative_entries = v_entries
+    where id = 1;
+
+    perform public.combat_apply_falling(v_next_token_id);
+
+    v_guard := v_guard + 1;
+    if v_guard >= 256 then
+      return;
+    end if;
+  end loop;
+end;
+$$;
+
+grant execute on function public.combat_auto_pass_blitzed_turns() to authenticated;
+
+create or replace function public.combat_apply_falling_after_state_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if pg_trigger_depth() > 1 then
+    return new;
+  end if;
+
+  if coalesce(new.combat_mode, false) = true then
+    perform public.combat_apply_falling(null);
+    perform public.combat_auto_pass_blitzed_turns();
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_combat_apply_falling_after_state_update on public.combat_state;
+create trigger trg_combat_apply_falling_after_state_update
+after update of initiative_entries, initiative_monsters, token_elevations, initiative_current_index, combat_mode on public.combat_state
+for each row execute function public.combat_apply_falling_after_state_update();
+
 create or replace function public.combat_prune_fully_broken_engagements()
 returns void
 language plpgsql
@@ -637,6 +1073,7 @@ declare
   v_current_email text;
   v_reset_entries jsonb;
   v_next_entry jsonb;
+  v_next_token_id text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -674,6 +1111,7 @@ begin
 
   v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
   v_next_entry := v_entries -> v_next_idx;
+  v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
   v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
@@ -692,6 +1130,8 @@ begin
         updated_by_email = v_email
     where id = 1;
   end if;
+
+  perform public.combat_apply_falling(v_next_token_id);
 end;
 $$;
 
@@ -717,6 +1157,7 @@ declare
   v_next_idx int;
   v_reset_entries jsonb;
   v_next_entry jsonb;
+  v_next_token_id text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -768,6 +1209,7 @@ begin
   if not v_after_fast and not v_after_slow then
     v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
     v_next_entry := v_entries -> v_next_idx;
+    v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
     v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
     v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
@@ -786,6 +1228,8 @@ begin
           updated_by_email = v_email
       where id = 1;
     end if;
+
+    perform public.combat_apply_falling(v_next_token_id);
   else
     update public.combat_state
     set initiative_entries = v_entries,
@@ -816,6 +1260,7 @@ declare
   v_next_idx int;
   v_reset_entries jsonb;
   v_next_entry jsonb;
+  v_next_token_id text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -868,6 +1313,7 @@ begin
   if not v_fast and not v_slow then
     v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
     v_next_entry := v_entries -> v_next_idx;
+    v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
     v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
     v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
@@ -886,6 +1332,8 @@ begin
           updated_by_email = v_email
       where id = 1;
     end if;
+
+    perform public.combat_apply_falling(v_next_token_id);
   else
     update public.combat_state
     set initiative_entries = v_entries,
@@ -1771,6 +2219,66 @@ $$;
 
 grant execute on function public.combat_apply_feint(text, text) to authenticated;
 
+create or replace function public.combat_token_side(
+  p_entries jsonb,
+  p_token_id text
+)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_token_id text := nullif(btrim(coalesce(p_token_id, '')), '');
+  v_entry jsonb;
+  v_kind text;
+begin
+  if v_token_id is null then
+    return 'player';
+  end if;
+  if left(v_token_id, 7) = 'player:' then
+    v_token_id := substr(v_token_id, 8);
+  end if;
+
+  select e.entry
+  into v_entry
+  from jsonb_array_elements(coalesce(p_entries, '[]'::jsonb)) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = v_token_id
+     or e.entry->>'participant_id' = ('player:' || v_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry is null then
+    if left(v_token_id, 8) = 'monster:' then
+      return 'monster';
+    end if;
+    return 'player';
+  end if;
+
+  v_kind := coalesce(v_entry->>'kind', '');
+  if v_kind = 'monster' then
+    if exists (
+      select 1
+      from jsonb_array_elements_text(
+        case
+          when jsonb_typeof(v_entry->'monster_snapshot'->'traits') = 'array'
+          then coalesce(v_entry->'monster_snapshot'->'traits', '[]'::jsonb)
+          else '[]'::jsonb
+        end
+      ) as tr(value)
+      where lower(btrim(tr.value)) = 'ally'
+    ) then
+      return 'player';
+    end if;
+    return 'monster';
+  end if;
+
+  return 'player';
+end;
+$$;
+
+grant execute on function public.combat_token_side(jsonb, text) to authenticated;
+
 create or replace function public.combat_crawl_token(
   p_actor_token_id text,
   p_x double precision,
@@ -1793,7 +2301,8 @@ declare
   v_actor_entry_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
-  v_actor_is_monster boolean;
+  v_actor_side text := 'player';
+  v_other_side text := 'player';
   v_actor_elevation int := 0;
   v_other_elevation int := 0;
   v_other_token text;
@@ -1851,7 +2360,7 @@ begin
   end;
   v_actor_elevation := greatest(0, coalesce(v_actor_elevation, 0));
 
-  v_actor_is_monster := p_actor_token_id like 'monster:%';
+  v_actor_side := public.combat_token_side(v_entries, p_actor_token_id);
   for v_other_token in
     select case
              when ed.value->>'a' = p_actor_token_id then ed.value->>'b'
@@ -1863,7 +2372,8 @@ begin
     if v_other_token is null then
       continue;
     end if;
-    if (v_other_token like 'monster:%') <> v_actor_is_monster then
+    v_other_side := public.combat_token_side(v_entries, v_other_token);
+    if v_other_side <> v_actor_side then
       begin
         select coalesce((e.value->>'elevation')::int, 0)
         into v_other_elevation
@@ -2422,12 +2932,18 @@ declare
   v_mode boolean;
   v_actor_uuid uuid;
   v_actor_owner_email text;
-  v_actor_is_monster boolean;
+  v_actor_side text := 'player';
+  v_other_side text := 'player';
   v_actor_elevation int := 0;
   v_other_elevation int := 0;
   v_other_token text;
   v_actor_entry jsonb;
   v_actor_entry_idx int;
+  v_grappling_target_id text;
+  v_grapple_target_entry jsonb;
+  v_actor_size int := 1;
+  v_grapple_target_size int := 1;
+  v_actor_can_run_with_grapple boolean := false;
   v_attached_token_ids text[] := array[]::text[];
   v_attached_token_id text;
 begin
@@ -2475,7 +2991,7 @@ begin
   v_current_kind := coalesce(v_current ->> 'kind', '');
   v_current_participant := coalesce(v_current ->> 'participant_id', '');
   v_current_email := nullif(coalesce(v_current ->> 'user_email', ''), '');
-  v_actor_is_monster := p_actor_token_id like 'monster:%';
+  v_actor_side := public.combat_token_side(v_entries, p_actor_token_id);
 
   select e.ord - 1, e.entry
   into v_actor_entry_idx, v_actor_entry
@@ -2491,6 +3007,27 @@ begin
 
   if nullif(coalesce(v_actor_entry->>'clinging_target_id', ''), '') is not null then
     raise exception 'Cannot run while clinging';
+  end if;
+
+  v_grappling_target_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
+  if v_grappling_target_id is not null then
+    if coalesce(v_actor_entry->>'kind', '') = 'monster' then
+      v_actor_size := coalesce((v_actor_entry->'monster_snapshot'->>'size')::int, 1);
+    end if;
+
+    select e.entry
+    into v_grapple_target_entry
+    from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+    where e.entry->>'participant_id' = v_grappling_target_id
+       or e.entry->>'participant_id' = ('player:' || v_grappling_target_id)
+    order by e.ord
+    limit 1;
+
+    if v_grapple_target_entry is not null and coalesce(v_grapple_target_entry->>'kind', '') = 'monster' then
+      v_grapple_target_size := coalesce((v_grapple_target_entry->'monster_snapshot'->>'size')::int, 1);
+    end if;
+
+    v_actor_can_run_with_grapple := v_actor_size > v_grapple_target_size;
   end if;
 
   v_attached_token_id := nullif(coalesce(v_actor_entry->>'grappling_target_id', ''), '');
@@ -2573,7 +3110,8 @@ begin
   end;
   v_actor_elevation := greatest(0, coalesce(v_actor_elevation, 0));
 
-  -- Cannot run while engaged with any enemy.
+  -- Cannot run while engaged with any enemy, except when the only enemy engagement
+  -- is the actor's grappled target and the actor is strictly larger.
   for v_other_token in
     select case
              when ed.value->>'a' = p_actor_token_id then ed.value->>'b'
@@ -2586,7 +3124,8 @@ begin
       continue;
     end if;
 
-    if (v_other_token like 'monster:%') <> v_actor_is_monster then
+    v_other_side := public.combat_token_side(v_entries, v_other_token);
+    if v_other_side <> v_actor_side then
       begin
         select coalesce((e.value->>'elevation')::int, 0)
         into v_other_elevation
@@ -2598,6 +3137,9 @@ begin
       end;
       v_other_elevation := greatest(0, coalesce(v_other_elevation, 0));
       if v_other_elevation = v_actor_elevation then
+        if v_actor_can_run_with_grapple and v_other_token = v_grappling_target_id then
+          continue;
+        end if;
         raise exception 'Cannot run while engaged with an enemy';
       end if;
     end if;
@@ -3596,6 +4138,10 @@ declare
   v_entry_email text;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_grappling_target_id text;
+  v_target_entry jsonb;
+  v_actor_size int := 1;
+  v_target_size int := 1;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -3630,10 +4176,31 @@ begin
     raise exception 'Actor participant not found';
   end if;
 
-  if nullif(coalesce(v_entry->>'grappling_target_id', ''), '') is not null
-     or nullif(coalesce(v_entry->>'clinging_target_id', ''), '') is not null
+  v_grappling_target_id := nullif(coalesce(v_entry->>'grappling_target_id', ''), '');
+  if nullif(coalesce(v_entry->>'clinging_target_id', ''), '') is not null
      or nullif(coalesce(v_entry->>'grappled_by_id', ''), '') is not null then
     raise exception 'Cannot get up while grappling, clinging, or grappled';
+  end if;
+  if v_grappling_target_id is not null then
+    if coalesce(v_entry->>'kind', '') = 'monster' then
+      v_actor_size := coalesce((v_entry->'monster_snapshot'->>'size')::int, 1);
+    end if;
+
+    select e.entry
+    into v_target_entry
+    from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+    where e.entry->>'participant_id' = v_grappling_target_id
+       or e.entry->>'participant_id' = ('player:' || v_grappling_target_id)
+    order by e.ord
+    limit 1;
+
+    if v_target_entry is not null and coalesce(v_target_entry->>'kind', '') = 'monster' then
+      v_target_size := coalesce((v_target_entry->'monster_snapshot'->>'size')::int, 1);
+    end if;
+
+    if v_actor_size <= v_target_size then
+      raise exception 'Cannot get up while grappling, clinging, or grappled';
+    end if;
   end if;
 
   v_entry_kind := coalesce(v_entry->>'kind', '');
@@ -4511,7 +5078,9 @@ begin
   if v_mode = 'grapple' then
     v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_id}', to_jsonb(p_target_token_id), true);
     v_actor_entry := jsonb_set(v_actor_entry, '{grappling_target_name}', to_jsonb(coalesce(v_target_entry->>'name', 'Target')), true);
-    v_actor_entry := jsonb_set(v_actor_entry, '{prone}', 'true'::jsonb, true);
+    if v_actor_size <= v_target_size then
+      v_actor_entry := jsonb_set(v_actor_entry, '{prone}', 'true'::jsonb, true);
+    end if;
 
     v_target_entry := jsonb_set(v_target_entry, '{grappled_by_id}', to_jsonb(p_actor_token_id), true);
     v_target_entry := jsonb_set(v_target_entry, '{grappled_by_name}', to_jsonb(coalesce(v_actor_entry->>'name', 'Actor')), true);

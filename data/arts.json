@@ -16,5 +16,14 @@
     "range": "Near",
     "cost": "X",
     "description": "You damage the target's equipment or held GEAR by X on a hit."
+  },
+  {
+    "id": "art-lagging-blade",
+    "name": "Lagging Blade",
+    "kind": "true",
+    "speed": "Fast",
+    "range": "Engaged",
+    "cost": "X",
+    "description": "You deal additional damage equal to your successes on a hit."
   }
 ]

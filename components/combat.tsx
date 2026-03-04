@@ -703,13 +703,39 @@ export default function Combat({
   const slashIncomingDamage = useMemo(() => {
     const record = findIncomingDamageFlag(actorUsedItemFlagList);
     if (!record) return null;
-    if (record.value.type !== "Slash" && record.value.type !== "Stab" && record.value.type !== "Strike") return null;
+    if (
+      record.value.type !== "Slash" &&
+      record.value.type !== "Stab" &&
+      record.value.type !== "Strike" &&
+      record.value.type !== "Grapple" &&
+      record.value.type !== "Cling" &&
+      record.value.type !== "Shove" &&
+      record.value.type !== "Disarm" &&
+      record.value.type !== "Feint"
+    ) {
+      return null;
+    }
     return record.value;
   }, [actorUsedItemFlagList]);
   const slashIncomingMeta = useMemo(() => {
     const record = findIncomingDamageMetaFlag(actorUsedItemFlagList);
     return record?.value ?? null;
   }, [actorUsedItemFlagList]);
+  const flowManeuverForIncomingType = useCallback(
+    (
+      type: string | null | undefined
+    ): "Slash" | "Stab" | "Strike" | "Grapple" | "Cling" | "Shove" | "Disarm" | "Feint" => {
+      if (type === "Stab") return "Stab";
+      if (type === "Strike") return "Strike";
+      if (type === "Grapple") return "Grapple";
+      if (type === "Cling") return "Cling";
+      if (type === "Shove") return "Shove";
+      if (type === "Disarm") return "Disarm";
+      if (type === "Feint") return "Feint";
+      return "Slash";
+    },
+    []
+  );
   const slashIncomingAttackerEntry = useMemo(
     () => findEntryForTokenId(slashIncomingMeta?.attackerTokenId ?? null),
     [findEntryForTokenId, slashIncomingMeta]
@@ -726,13 +752,21 @@ export default function Combat({
   const slashHasDodged = actorUsedItemFlags.has(DODGED_FLAG);
   const slashHasParried = actorUsedItemFlags.has(PARRIED_FLAG);
   const slashAttackerHasArtsChosen = slashIncomingAttackerFlags.has(ARTS_CHOSEN_FLAG);
+  const slashIncomingHasDamageTotal = slashIncomingDamage?.totalDamage !== null;
   const slashIncomingActive =
     combatMode &&
     Boolean(actorTokenId) &&
     Boolean(slashIncomingDamage && slashIncomingMeta) &&
-    Math.max(0, slashIncomingDamage?.totalDamage ?? 0) > 0;
+    (slashIncomingHasDamageTotal
+      ? Math.max(0, slashIncomingDamage?.totalDamage ?? 0) > 0
+      : Math.max(0, slashIncomingDamage?.successes ?? 0) > 0);
   const slashReactionPhase = slashIncomingActive && (!slashHasDodged || !slashHasParried);
-  const slashArmorPhase = slashIncomingActive && slashHasDodged && slashHasParried && slashAttackerHasArtsChosen;
+  const slashArmorPhase =
+    slashIncomingActive &&
+    slashIncomingHasDamageTotal &&
+    slashHasDodged &&
+    slashHasParried &&
+    slashAttackerHasArtsChosen;
   const slashCanControlPhase =
     slashIncomingActive &&
     Boolean(actorTokenId) &&
@@ -743,27 +777,24 @@ export default function Combat({
         ));
   const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
     if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
-    const maneuver =
-      slashIncomingDamage.type === "Stab"
-        ? "Stab"
-        : slashIncomingDamage.type === "Strike"
-          ? "Strike"
-          : "Slash";
+    const maneuver = flowManeuverForIncomingType(slashIncomingDamage.type);
     return {
       id: slashIncomingMeta.attackId,
       attackerCharacterId: slashIncomingMeta.attackerTokenId,
       targetCharacterId: actorTokenId,
       weaponName: slashIncomingMeta.weaponName || maneuver,
-      weaponBaseDamage: Math.max(0, slashIncomingDamage.totalDamage),
+      weaponBaseDamage: Math.max(0, slashIncomingDamage.totalDamage ?? 0),
       maneuver,
       totalSuccesses: Math.max(0, slashIncomingDamage.successes),
       requiredSuccesses: 1,
       swingBonusDamage: 0,
+      disarmTargetItemId: slashIncomingMeta.disarmTargetItemId ?? null,
+      disarmZoneId: slashIncomingMeta.disarmZoneId ?? null,
       rangeAtAttack: slashIncomingMeta.rangeAtAttack ?? null,
       skipReaction: true,
       slashFlow: true,
     };
-  }, [slashIncomingDamage, slashIncomingMeta, actorTokenId]);
+  }, [slashIncomingDamage, slashIncomingMeta, actorTokenId, flowManeuverForIncomingType]);
   const actorTauntAngerTargetEntry = useMemo(
     () => findEntryForTokenId(actorTauntedAngerById),
     [findEntryForTokenId, actorTauntedAngerById]
@@ -1254,12 +1285,7 @@ export default function Combat({
         }
 
         const sizeDelta = sizeForTokenId(actorTokenId) - sizeForTokenId(slashIncomingMeta?.attackerTokenId);
-        const incomingManeuver =
-          slashIncomingDamage?.type === "Stab"
-            ? "Stab"
-            : slashIncomingDamage?.type === "Strike"
-              ? "Strike"
-              : "Slash";
+        const incomingManeuver = flowManeuverForIncomingType(slashIncomingDamage?.type);
         const dodgeStandingBonus = incomingManeuver === "Slash" ? 0 : -2;
         const dodgeProneBonus = incomingManeuver === "Slash" ? 2 : 0;
         const maneuverBonus =
@@ -1547,6 +1573,7 @@ export default function Combat({
       sizeForTokenId,
       slashIncomingDamage,
       slashIncomingMeta,
+      flowManeuverForIncomingType,
       slashReactionTargetIsMonster,
       currentEntry,
       onResolveReactionRoll,
@@ -6783,26 +6810,24 @@ export default function Combat({
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
+                {/** Single label source keeps incoming maneuver names consistent across all flow types. */}
+                {(() => {
+                  const incomingManeuverLabel = flowManeuverForIncomingType(slashIncomingDamage?.type);
+                  return (
+                    <>
                 <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
                 <p className="text-sm text-amber-200/80">
                   Incoming:{" "}
                   {slashReactionPhase
-                    ? `${
-                        slashIncomingDamage?.type === "Stab"
-                          ? "Stab"
-                          : slashIncomingDamage?.type === "Strike"
-                            ? "Strike"
-                            : "Slash"
-                      } (${slashIncomingMeta?.weaponName || (slashIncomingDamage?.type === "Stab"
-                        ? "Stab"
-                        : slashIncomingDamage?.type === "Strike"
-                          ? "Strike"
-                          : "Slash")})`
+                    ? `${incomingManeuverLabel} (${slashIncomingMeta?.weaponName || incomingManeuverLabel})`
                     : `${pendingReaction?.maneuver || "Attack"} (${pendingReaction?.weaponName || "Weapon"})`}
                 </p>
                 <p className="text-xs text-amber-200/70">
                   Successes: {slashReactionPhase ? slashIncomingDamage?.successes ?? 0 : pendingReaction?.totalSuccesses ?? 0}
                 </p>
+                    </>
+                  );
+                })()}
               </div>
             </div>
 

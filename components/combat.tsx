@@ -418,7 +418,7 @@ export default function Combat({
     if (currentEntry.kind === "monster") return currentEntry.participant_id;
     return actorCharacter?.id ?? null;
   }, [currentEntry, actorCharacter]);
-  const currentUserTokenId = character?.id ?? null;
+  const currentUserTokenId = isDmUser ? null : character?.id ?? null;
   const actorTokenCharacter = actorTokenId ? characters.find((char) => char.id === actorTokenId) || null : null;
   const tokenStateById = useMemo(() => {
     const map = new Map<
@@ -707,6 +707,7 @@ export default function Combat({
       record.value.type !== "Slash" &&
       record.value.type !== "Stab" &&
       record.value.type !== "Strike" &&
+      record.value.type !== "Shoot" &&
       record.value.type !== "Flame" &&
       record.value.type !== "Grapple" &&
       record.value.type !== "Cling" &&
@@ -725,9 +726,10 @@ export default function Combat({
   const flowManeuverForIncomingType = useCallback(
     (
       type: string | null | undefined
-    ): "Slash" | "Stab" | "Strike" | "Flame" | "Grapple" | "Cling" | "Shove" | "Disarm" | "Feint" => {
+    ): "Slash" | "Stab" | "Strike" | "Shoot" | "Flame" | "Grapple" | "Cling" | "Shove" | "Disarm" | "Feint" => {
       if (type === "Stab") return "Stab";
       if (type === "Strike") return "Strike";
+      if (type === "Shoot") return "Shoot";
       if (type === "Flame") return "Flame";
       if (type === "Grapple") return "Grapple";
       if (type === "Cling") return "Cling";
@@ -774,9 +776,7 @@ export default function Combat({
     Boolean(actorTokenId) &&
     (currentEntry?.kind === "monster"
       ? isDmViewer
-      : Boolean(
-          (userEmail && normalizeEmail(currentEntry?.user_email || "") === normalizeEmail(userEmail)) || isDmUser
-        ));
+      : Boolean(userEmail && normalizeEmail(currentEntry?.user_email || "") === normalizeEmail(userEmail)));
   const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
     if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
     const maneuver = flowManeuverForIncomingType(slashIncomingDamage.type);
@@ -851,7 +851,9 @@ export default function Combat({
     !Boolean(reactionTargetEntry?.fast_footwork_dodge_used);
   const viewerCanControlReaction =
     Boolean(pendingReaction) &&
-    (reactionTargetIsMonster ? isDmViewer : Boolean(reactionTargetId && reactionTargetId === currentUserTokenId));
+    (reactionTargetIsMonster
+      ? isDmViewer
+      : Boolean(reactionTargetId && reactionTargetId === currentUserTokenId));
   const canReact =
     combatMode &&
     Boolean(pendingReaction) &&
@@ -1076,6 +1078,11 @@ export default function Combat({
     }
     return Math.max(0, Math.trunc(item.gearBonus ?? 0));
   };
+  const isChainmailArmorItem = (item: InventoryItem | null | undefined): boolean => {
+    if (!item || item.item_type !== "Armor") return false;
+    const props = Array.isArray(item.properties) ? item.properties : [];
+    return props.some((value) => String(value).trim().toLowerCase() === "chainmail");
+  };
   const slashArmorPrompt = useMemo(() => {
     if (!slashArmorPhase || !slashCanControlPhase || !actorTokenId || !currentEntry) return null;
     const attack = buildSlashFlowAttack();
@@ -1098,7 +1105,12 @@ export default function Combat({
       helmetItem = inventory.find((item) => item.item_type === "Helmet" && slotMatches(slots.helmet, item)) || null;
     }
 
-    const armorDice = effectiveProtectionDice(armorItem);
+    const applyChainmailPenalty = attack.maneuver === "Shoot";
+    const armorDiceBase = effectiveProtectionDice(armorItem);
+    const armorDice =
+      applyChainmailPenalty && isChainmailArmorItem(armorItem)
+        ? Math.max(0, armorDiceBase - 3)
+        : armorDiceBase;
     const helmetDice = effectiveProtectionDice(helmetItem);
     const armorUsed = armorItem ? actorUsedItemFlags.has(`Used (${armorItem.name})`) : true;
     const helmetUsed = helmetItem ? actorUsedItemFlags.has(`Used (${helmetItem.name})`) : true;
@@ -1223,6 +1235,7 @@ export default function Combat({
         bonusDice: 0,
         fixedAttributeDice: 0,
         fixedSkillDice: 0,
+        fixedGearDice: Math.max(0, isHelmet ? armorPromptHelmetDice : armorPromptArmorDice),
         gearItemId,
         armorSlot: slot,
         attack: activeArmorPrompt.attack,
@@ -1840,7 +1853,7 @@ export default function Combat({
       pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId);
     if (!currentEntry || !userEmail) return false;
     if (attackerTurnLockedByReaction) return false;
-    if (isDmUser) return true;
+    if (isDmUser) return currentEntry.kind === "monster";
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
   }, [currentEntry, isDmUser, userEmail, combatMode, actorTokenId, pendingReactions]);
   const rangeBetweenTokens = useCallback(
@@ -2513,7 +2526,7 @@ export default function Combat({
     ) {
       return false;
     }
-    if (isDmUser) return true;
+    if (isDmUser) return currentEntry.kind === "monster";
     return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
   }, [currentEntry, userEmail, isDmUser, combatMode, actorTokenId, pendingReactions]);
   const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {

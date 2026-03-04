@@ -800,7 +800,11 @@ export default function Character({
       : (character.skills[rollSkill] ?? 0) + (pendingReactionRoll.bonusDice ?? 0);
     const skillCount = Math.abs(signedSkillCount);
     const skillIsNegative = hasFixedSkill ? false : signedSkillCount < 0;
-    const gearCount = usesGear ? rollableGearBonus(gearItem) : 0;
+    const gearCount = usesGear
+      ? pendingReactionRoll.fixedGearDice !== undefined
+        ? Math.max(0, pendingReactionRoll.fixedGearDice)
+        : rollableGearBonus(gearItem)
+      : 0;
 
     setRollStates((prev) => ({
       ...prev,

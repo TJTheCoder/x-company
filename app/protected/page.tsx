@@ -203,6 +203,7 @@ export type PendingReactionRoll = {
   bonusDice: number;
   fixedAttributeDice?: number;
   fixedSkillDice?: number;
+  fixedGearDice?: number;
   gearItemId?: string | null;
   armorSlot?: "armor" | "helmet";
   applyProne?: boolean;
@@ -1303,6 +1304,7 @@ export default function Dashboard() {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Shoot"
     | "Flame"
     | "Grapple"
     | "Cling"
@@ -1316,6 +1318,7 @@ export default function Dashboard() {
     maneuver === "Slash" ||
     maneuver === "Stab" ||
     maneuver === "Strike" ||
+    maneuver === "Shoot" ||
     maneuver === "Flame" ||
     maneuver === "Grapple" ||
     maneuver === "Cling" ||
@@ -1333,6 +1336,8 @@ export default function Dashboard() {
       ? "Stab"
       : incoming.type === "Strike"
         ? "Strike"
+        : incoming.type === "Shoot"
+          ? "Shoot"
         : incoming.type === "Flame"
           ? "Flame"
         : incoming.type === "Grapple"

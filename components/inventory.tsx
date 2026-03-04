@@ -131,6 +131,7 @@ export default function Inventory({
     }
 
     if (!data?.combat_mode) return true;
+    if (drawGearReturnToCombat) return true;
 
     const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
     if (rpcError) {

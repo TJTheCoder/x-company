@@ -1773,7 +1773,9 @@ declare
   v_entry_email text;
   v_actor_uuid uuid;
   v_actor_owner_email text;
-  v_available boolean;
+  v_fast boolean;
+  v_slow boolean;
+  v_key text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -1835,12 +1837,17 @@ begin
     end if;
   end if;
 
-  v_available := coalesce((v_entry ->> 'fast_available')::boolean, true);
-  if not v_available then
-    raise exception 'No fast action available';
+  v_fast := coalesce((v_entry ->> 'fast_available')::boolean, true);
+  v_slow := coalesce((v_entry ->> 'slow_available')::boolean, true);
+  if v_fast then
+    v_key := 'fast_available';
+  elsif v_slow then
+    v_key := 'slow_available';
+  else
+    raise exception 'No fast or slow action available';
   end if;
 
-  v_entry := jsonb_set(v_entry, '{fast_available}', 'false'::jsonb, true);
+  v_entry := jsonb_set(v_entry, array[v_key], 'false'::jsonb, true);
   v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
 
   update public.combat_state

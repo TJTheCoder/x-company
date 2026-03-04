@@ -827,7 +827,9 @@ export default function Combat({
     );
   }, [initiativeEntries, reactionTargetId]);
   const reactionTargetState = reactionTargetId ? tokenStateById.get(reactionTargetId) || null : null;
-  const reactionTargetFastAvailable = reactionTargetEntry ? reactionTargetEntry.fast_available !== false : false;
+  const reactionTargetActionAvailable = reactionTargetEntry
+    ? reactionTargetEntry.fast_available !== false || reactionTargetEntry.slow_available !== false
+    : false;
   const reactionTargetIsProne = Boolean(reactionTargetEntry?.prone);
   const reactionTargetIsHeld =
     Boolean(reactionTargetEntry?.grappled_by_id) ||
@@ -858,7 +860,7 @@ export default function Combat({
     combatMode &&
     Boolean(pendingReaction) &&
     viewerCanControlReaction &&
-    reactionTargetFastAvailable &&
+    reactionTargetActionAvailable &&
     !reactionTargetIsProne &&
     !reactionTargetIsHeld &&
     !reactionTargetIsCovered &&
@@ -934,7 +936,7 @@ export default function Combat({
     combatMode &&
     Boolean(pendingReaction) &&
     viewerCanControlReaction &&
-    (reactionTargetFastAvailable || freeDodgeAvailable) &&
+    (reactionTargetActionAvailable || freeDodgeAvailable) &&
     !reactionTargetIsProne &&
     !reactionTargetIsHeld &&
     !reactionTargetIsCovered &&
@@ -995,7 +997,7 @@ export default function Combat({
   const slashCanDodgeReaction =
     slashReactionPhase &&
     slashCanControlPhase &&
-    (Boolean(currentEntry?.fast_available) || slashFreeDodgeAvailable) &&
+    (Boolean(currentEntry?.fast_available || currentEntry?.slow_available) || slashFreeDodgeAvailable) &&
     !Boolean(currentEntry?.prone) &&
     !Boolean(currentEntry?.grappled_by_id) &&
     !Boolean(currentEntry?.clung_onto_by_id) &&
@@ -1008,7 +1010,7 @@ export default function Combat({
   const slashCanParryReaction =
     slashReactionPhase &&
     slashCanControlPhase &&
-    Boolean(currentEntry?.fast_available) &&
+    Boolean(currentEntry?.fast_available || currentEntry?.slow_available) &&
     !Boolean(currentEntry?.prone) &&
     !Boolean(currentEntry?.grappled_by_id) &&
     !Boolean(currentEntry?.clung_onto_by_id) &&
@@ -2202,7 +2204,7 @@ export default function Combat({
   const canUseFeintFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
-    if (!currentEntry.fast_available) return false;
+    if (!currentEntry.fast_available && !currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
@@ -3076,7 +3078,7 @@ export default function Combat({
         if (!hand) continue;
         const props = (weapon.properties || []).map((p) => p.toLowerCase());
         const isLoading = props.includes("loading");
-        if (isLoading ? !currentEntry.slow_available : !currentEntry.fast_available) continue;
+        if (isLoading ? !currentEntry.slow_available : !(currentEntry.fast_available || currentEntry.slow_available)) continue;
         options.push({
           weaponItemId: weapon.id,
           weaponName: weapon.name,
@@ -3094,7 +3096,7 @@ export default function Combat({
         if (!hand) continue;
         const props = (weapon.properties || []).map((p) => p.toLowerCase());
         const isLoading = props.includes("loading");
-        if (isLoading ? !currentEntry.slow_available : !currentEntry.fast_available) continue;
+        if (isLoading ? !currentEntry.slow_available : !(currentEntry.fast_available || currentEntry.slow_available)) continue;
         options.push({
           weaponItemId: weapon.id,
           weaponName: weapon.name,
@@ -3147,7 +3149,7 @@ export default function Combat({
       weaponName: string;
     }>;
     if (!actorTokenId || selectedTokenId === actorTokenId) return [];
-    if (!currentEntry.fast_available) return [];
+    if (!currentEntry.fast_available && !currentEntry.slow_available) return [];
     if (actorTauntAngerRestricted) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
     if (isActorProne || actorHardLockedByHold) return [];
@@ -5726,7 +5728,7 @@ export default function Combat({
   };
   const requestFeint = async () => {
     if (!canUseFeintFromSelection || !currentEntry || !selectedTokenId || !actorTokenId) return;
-    const didConsume = await consumeAction("fast");
+    const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
     if (!swingCleared) return;
@@ -5816,7 +5818,7 @@ export default function Combat({
     hand: "left" | "right" | "both";
   }) => {
     if (!currentEntry || !actorTokenId) return;
-    const didConsume = option.isLoading ? await consumeAction("slow") : await consumeAction("fast");
+    const didConsume = option.isLoading ? await consumeAction("slow") : await consumeFastOrSlow();
     if (!didConsume) return;
     const preserveAim =
       !!currentAim && currentAim.weaponItemId === option.weaponItemId;
@@ -5888,7 +5890,7 @@ export default function Combat({
 
   const requestAim = async (option: { weaponItemId: string; weaponName: string }) => {
     if (!currentEntry || !actorTokenId || !selectedTokenId) return;
-    const didConsume = await consumeAction("fast");
+    const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim: false });
     if (!swingCleared) return;

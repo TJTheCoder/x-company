@@ -1272,6 +1272,7 @@ export default function Dashboard() {
     user_email?: string | null;
     used_item_flags?: string[] | null;
     fast_available?: boolean | null;
+    slow_available?: boolean | null;
     fast_footwork_dodge_used?: boolean | null;
     prone?: boolean | null;
     monster_snapshot?: {
@@ -2193,6 +2194,7 @@ export default function Dashboard() {
           initiative_entries: Array<{
             participant_id: string;
             fast_available?: boolean | null;
+            slow_available?: boolean | null;
             prone?: boolean | null;
             grappled_by_id?: string | null;
             clung_onto_by_id?: string | null;
@@ -2220,7 +2222,9 @@ export default function Dashboard() {
             e.participant_id === attack.targetCharacterId ||
             e.participant_id === `player:${attack.targetCharacterId}`
         );
-        const fastAvailable = entry ? (entry.fast_available ?? true) : false;
+        const actionAvailable = entry
+          ? (entry.fast_available ?? true) || (entry.slow_available ?? true)
+          : false;
         const isProne = Boolean(entry?.prone);
         const isHeld =
           Boolean(entry?.grappled_by_id) ||
@@ -2228,7 +2232,7 @@ export default function Dashboard() {
           Boolean((entry?.clung_onto_by_ids || []).length > 0);
         const isEntryDead = Boolean(entry?.dead || entry?.monster_snapshot?.dead);
         const isMonsterTarget = attack.targetCharacterId.startsWith("monster:");
-        let canReact = fastAvailable && !isProne && !isHeld && !isEntryDead;
+        let canReact = actionAvailable && !isProne && !isHeld && !isEntryDead;
         if (canReact && isMonsterTarget) {
           const snap = entry?.monster_snapshot;
           if (snap) {
@@ -2747,6 +2751,7 @@ export default function Dashboard() {
             participant_id: string;
             kind?: "player" | "monster";
             fast_available?: boolean | null;
+            slow_available?: boolean | null;
             prone?: boolean | null;
             covered?: boolean | null;
             dead?: boolean | null;
@@ -2798,7 +2803,7 @@ export default function Dashboard() {
             Boolean(attackerEntry.clung_onto_by_id) ||
             Boolean((attackerEntry.clung_onto_by_ids || []).length > 0);
           const attackerCanAct =
-            attackerEntry.fast_available !== false &&
+            (attackerEntry.fast_available !== false || attackerEntry.slow_available !== false) &&
             !Boolean(attackerEntry.prone) &&
             !Boolean(attackerEntry.covered) &&
             !Boolean(attackerEntry.dead) &&
@@ -3450,6 +3455,7 @@ export default function Dashboard() {
       let nextTargetFlags = [...slashState.targetFlags];
       let nextTargetProne = Boolean(slashState.targetEntry.prone);
       let nextTargetFastAvailable = slashState.targetEntry.fast_available;
+      let nextTargetSlowAvailable = slashState.targetEntry.slow_available;
       let nextTargetFastFootworkUsed = Boolean(slashState.targetEntry.fast_footwork_dodge_used);
 
       if (roll.rollType === "reaction") {
@@ -3494,7 +3500,11 @@ export default function Dashboard() {
             if (consumeError) {
               console.error("Failed to consume reaction action:", consumeError);
             } else {
-              nextTargetFastAvailable = false;
+              if (nextTargetFastAvailable !== false) {
+                nextTargetFastAvailable = false;
+              } else {
+                nextTargetSlowAvailable = false;
+              }
             }
           }
 
@@ -3546,6 +3556,7 @@ export default function Dashboard() {
               ...entry,
               used_item_flags: normalizeFlagList(nextTargetFlags),
               fast_available: nextTargetFastAvailable,
+              slow_available: nextTargetSlowAvailable,
               fast_footwork_dodge_used: nextTargetFastFootworkUsed,
               prone: nextTargetProne,
             }

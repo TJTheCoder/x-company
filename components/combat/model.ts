@@ -6,10 +6,11 @@ import type {
   PendingArmorPrompt,
   PendingMeleeAction,
   PendingReactionRoll,
+  ResolvedReactionRoll,
   ResolvedArtRoll,
   ResolvedMeleeAttack,
 } from "@/app/protected/page";
-import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
+import type { MonsterSnapshot } from "@/lib/monsters";
 
 export type CombatProps = {
   isDM: boolean;
@@ -18,6 +19,7 @@ export type CombatProps = {
   character: CharacterType | null;
   onQueueMeleeAction?: (action: PendingMeleeAction) => void;
   onQueueReactionRoll?: (roll: PendingReactionRoll) => void;
+  onResolveReactionRoll?: (roll: ResolvedReactionRoll) => void | Promise<void>;
   onResolveMeleeAttack?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
   onApplyStartOfTurnEffects?: (tokenId: string) => void | Promise<void>;
   pendingArmorPrompt?: PendingArmorPrompt | null;

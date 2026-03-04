@@ -1,11 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { InventoryItem, ResolvedMeleeAttack } from "@/app/protected/page";
 import { addItemToInventory, isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
 import { buildMonsterSnapshot, formatMonsterTooltip } from "@/lib/monsters";
 import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
+import {
+  ARTS_CHOSEN_FLAG,
+  DODGED_FLAG,
+  PARRIED_FLAG,
+  findIncomingDamageFlag,
+  findIncomingDamageMetaFlag,
+  isIncomingDamageMetaFlag,
+} from "@/lib/combat-flags";
 import artsCatalogData from "../data/arts.json";
 import * as combatModel from "./combat/model";
 import * as combatActions from "./combat/actions";
@@ -197,6 +205,7 @@ export default function Combat({
   character,
   onQueueMeleeAction,
   onQueueReactionRoll,
+  onResolveReactionRoll,
   onResolveMeleeAttack,
   onApplyStartOfTurnEffects,
   pendingArmorPrompt,
@@ -211,6 +220,9 @@ export default function Combat({
   onResolveArtRoll,
   onArtRollCleared,
 }: CombatProps) {
+  const DEFAULT_COMBAT_PANEL_HEIGHT = 520;
+  const MIN_COMBAT_PANEL_HEIGHT = 420;
+  const MAX_COMBAT_PANEL_HEIGHT = 920;
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [zoneLines, setZoneLines] = useState<ZoneStroke[]>([]);
   const [tokenPositions, setTokenPositions] = useState<TokenPosition[]>([]);
@@ -244,6 +256,7 @@ export default function Combat({
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isResolvingReaction, setIsResolvingReaction] = useState(false);
+  const [combatPanelHeight, setCombatPanelHeight] = useState(DEFAULT_COMBAT_PANEL_HEIGHT);
   const [imageNatural, setImageNatural] = useState<{ w: number; h: number } | null>(null);
   const [imageRect, setImageRect] = useState<ImageRect | null>(null);
   const isSyncingRef = useRef(false);
@@ -251,6 +264,8 @@ export default function Combat({
   const handledPendingMonsterArtRollIdRef = useRef<string | null>(null);
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
+  const isResizingPanelRef = useRef(false);
+  const resizePanelStartRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const draggedTokenRef = useRef<string | null>(null);
@@ -680,10 +695,69 @@ export default function Combat({
   const actorTauntedAngerByName = currentEntry?.taunted_anger_by_name ?? null;
   const actorTauntedDistractValue = Math.max(0, currentEntry?.taunted_distract_value ?? 0);
   const actorFlameIntensity = Math.max(0, currentEntry?.flame_intensity ?? 0);
-  const actorUsedItemFlags = useMemo(
-    () => new Set((currentEntry?.used_item_flags || []).filter((value): value is string => typeof value === "string")),
+  const actorUsedItemFlagList = useMemo(
+    () => (currentEntry?.used_item_flags || []).filter((value): value is string => typeof value === "string"),
     [currentEntry]
   );
+  const actorUsedItemFlags = useMemo(() => new Set(actorUsedItemFlagList), [actorUsedItemFlagList]);
+  const slashIncomingDamage = useMemo(() => {
+    const record = findIncomingDamageFlag(actorUsedItemFlagList);
+    if (!record) return null;
+    if (record.value.type !== "Slash") return null;
+    return record.value;
+  }, [actorUsedItemFlagList]);
+  const slashIncomingMeta = useMemo(() => {
+    const record = findIncomingDamageMetaFlag(actorUsedItemFlagList);
+    return record?.value ?? null;
+  }, [actorUsedItemFlagList]);
+  const slashIncomingAttackerEntry = useMemo(
+    () => findEntryForTokenId(slashIncomingMeta?.attackerTokenId ?? null),
+    [findEntryForTokenId, slashIncomingMeta]
+  );
+  const slashIncomingAttackerFlags = useMemo(
+    () =>
+      new Set(
+        (slashIncomingAttackerEntry?.used_item_flags || []).filter(
+          (value): value is string => typeof value === "string"
+        )
+      ),
+    [slashIncomingAttackerEntry]
+  );
+  const slashHasDodged = actorUsedItemFlags.has(DODGED_FLAG);
+  const slashHasParried = actorUsedItemFlags.has(PARRIED_FLAG);
+  const slashAttackerHasArtsChosen = slashIncomingAttackerFlags.has(ARTS_CHOSEN_FLAG);
+  const slashIncomingActive =
+    combatMode &&
+    Boolean(actorTokenId) &&
+    Boolean(slashIncomingDamage && slashIncomingMeta) &&
+    Math.max(0, slashIncomingDamage?.totalDamage ?? 0) > 0;
+  const slashReactionPhase = slashIncomingActive && (!slashHasDodged || !slashHasParried);
+  const slashArmorPhase = slashIncomingActive && slashHasDodged && slashHasParried && slashAttackerHasArtsChosen;
+  const slashCanControlPhase =
+    slashIncomingActive &&
+    Boolean(actorTokenId) &&
+    (currentEntry?.kind === "monster"
+      ? isDmViewer
+      : Boolean(
+          (userEmail && normalizeEmail(currentEntry?.user_email || "") === normalizeEmail(userEmail)) || isDmUser
+        ));
+  const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
+    if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
+    return {
+      id: slashIncomingMeta.attackId,
+      attackerCharacterId: slashIncomingMeta.attackerTokenId,
+      targetCharacterId: actorTokenId,
+      weaponName: slashIncomingMeta.weaponName || "Slash",
+      weaponBaseDamage: Math.max(0, slashIncomingDamage.totalDamage),
+      maneuver: "Slash",
+      totalSuccesses: Math.max(0, slashIncomingDamage.successes),
+      requiredSuccesses: 1,
+      swingBonusDamage: 0,
+      rangeAtAttack: slashIncomingMeta.rangeAtAttack ?? null,
+      skipReaction: true,
+      slashFlow: true,
+    };
+  }, [slashIncomingDamage, slashIncomingMeta, actorTokenId]);
   const actorTauntAngerTargetEntry = useMemo(
     () => findEntryForTokenId(actorTauntedAngerById),
     [findEntryForTokenId, actorTauntedAngerById]
@@ -870,19 +944,166 @@ export default function Combat({
       })),
     ];
   }, [pendingReaction, canParryReaction, reactionManeuver, character, reactionTargetIsMonster, reactionTargetEntry]);
+  const slashReactionTargetIsMonster = currentEntry?.kind === "monster";
+  const slashReactionTargetCharacter = actorTokenId ? characterById.get(actorTokenId) || null : null;
+  const slashFreeDodgeAvailable =
+    slashIncomingActive &&
+    !slashReactionTargetIsMonster &&
+    hasTalentLevelAtLeast(slashReactionTargetCharacter, FAST_FOOTWORK_TALENT_ID, 1) &&
+    !Boolean(currentEntry?.fast_footwork_dodge_used);
+  const slashCanDodgeReaction =
+    slashReactionPhase &&
+    slashCanControlPhase &&
+    (Boolean(currentEntry?.fast_available) || slashFreeDodgeAvailable) &&
+    !Boolean(currentEntry?.prone) &&
+    !Boolean(currentEntry?.grappled_by_id) &&
+    !Boolean(currentEntry?.clung_onto_by_id) &&
+    !Boolean((currentEntry?.clung_onto_by_ids || []).length > 0) &&
+    !Boolean(currentEntry?.covered) &&
+    !actorState.dead &&
+    !actorState.physicalBroken &&
+    !actorState.mentalBroken &&
+    !isSkillBlockedForToken(actorTokenId, "MOVE");
+  const slashCanParryReaction =
+    slashReactionPhase &&
+    slashCanControlPhase &&
+    Boolean(currentEntry?.fast_available) &&
+    !Boolean(currentEntry?.prone) &&
+    !Boolean(currentEntry?.grappled_by_id) &&
+    !Boolean(currentEntry?.clung_onto_by_id) &&
+    !Boolean((currentEntry?.clung_onto_by_ids || []).length > 0) &&
+    !Boolean(currentEntry?.covered) &&
+    !actorState.dead &&
+    !actorState.physicalBroken &&
+    !actorState.mentalBroken &&
+    !isSkillBlockedForToken(actorTokenId, "MELEE");
+  const slashParryOptions = useMemo(() => {
+    if (!slashCanParryReaction || !slashIncomingActive) {
+      return [] as Array<{ id: string; name: string; gearBonus: number; kind: "weapon" | "shield" }>;
+    }
+    if (slashReactionTargetIsMonster) {
+      const snapshot = currentEntry?.monster_snapshot;
+      if (!snapshot) return [];
+      const weapons = monsterEquippedMeleeWeapons(snapshot)
+        .filter((weapon) => weapon.properties.some((prop) => prop === "parrying"))
+        .map((weapon) => ({
+          id: weapon.id,
+          name: weapon.name,
+          gearBonus: Math.max(0, weapon.gearBonus ?? 0),
+          kind: "weapon" as const,
+        }));
+      const shields = monsterEquippedShields(snapshot).map((shield) => ({
+        id: shield.id,
+        name: shield.name,
+        gearBonus: Math.max(0, shield.gearBonus ?? 0),
+        kind: "shield" as const,
+      }));
+      return [...weapons, ...shields];
+    }
+    if (!slashReactionTargetCharacter) return [];
+    const held = playerHeldItems(slashReactionTargetCharacter);
+    const shields = held.filter((item) => item.item_type === "Shield");
+    const parryingWeapons = held.filter((item) => isParryingWeapon(item));
+    return [
+      ...parryingWeapons.map((item) => ({
+        id: item.id,
+        name: item.name,
+        gearBonus: Math.max(0, item.gearBonus ?? 0),
+        kind: "weapon" as const,
+      })),
+      ...shields.map((item) => ({
+        id: item.id,
+        name: item.name,
+        gearBonus: Math.max(0, item.gearBonus ?? 0),
+        kind: "shield" as const,
+      })),
+    ];
+  }, [slashCanParryReaction, slashIncomingActive, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
   const shouldShowReactionModal =
-    Boolean(pendingReaction) &&
-    REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
-    combatMode &&
-    viewerCanControlReaction;
+    ((Boolean(pendingReaction) &&
+      REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
+      combatMode &&
+      viewerCanControlReaction) ||
+      (slashReactionPhase && slashCanControlPhase)) &&
+    combatMode;
+  const effectiveProtectionDice = (item: InventoryItem | null | undefined): number => {
+    if (!item) return 0;
+    if (
+      (item.item_type === "Armor" || item.item_type === "Helmet") &&
+      typeof item.effective_gear_bonus === "number" &&
+      !Number.isNaN(item.effective_gear_bonus)
+    ) {
+      return Math.max(0, Math.trunc(item.effective_gear_bonus));
+    }
+    return Math.max(0, Math.trunc(item.gearBonus ?? 0));
+  };
+  const slashArmorPrompt = useMemo(() => {
+    if (!slashArmorPhase || !slashCanControlPhase || !actorTokenId || !currentEntry) return null;
+    const attack = buildSlashFlowAttack();
+    if (!attack) return null;
+    const slotMatches = (slotValue: string | null | undefined, item: InventoryItem) =>
+      Boolean(slotValue && (slotValue === item.id || slotValue === item.name));
+
+    let armorItem: InventoryItem | null = null;
+    let helmetItem: InventoryItem | null = null;
+    if (currentEntry.kind === "monster") {
+      const gear = currentEntry.monster_snapshot?.gear || [];
+      const slots = currentEntry.monster_snapshot?.equipment_slots || { armor: null, helmet: null };
+      armorItem = gear.find((item) => item.item_type === "Armor" && slotMatches(slots.armor, item)) || null;
+      helmetItem = gear.find((item) => item.item_type === "Helmet" && slotMatches(slots.helmet, item)) || null;
+    } else {
+      const target = slashReactionTargetCharacter;
+      const inventory = target?.inventory || [];
+      const slots = target?.equipment_slots || { armor: null, helmet: null };
+      armorItem = inventory.find((item) => item.item_type === "Armor" && slotMatches(slots.armor, item)) || null;
+      helmetItem = inventory.find((item) => item.item_type === "Helmet" && slotMatches(slots.helmet, item)) || null;
+    }
+
+    const armorDice = effectiveProtectionDice(armorItem);
+    const helmetDice = effectiveProtectionDice(helmetItem);
+    const armorUsed = armorItem ? actorUsedItemFlags.has(`Used (${armorItem.name})`) : true;
+    const helmetUsed = helmetItem ? actorUsedItemFlags.has(`Used (${helmetItem.name})`) : true;
+
+    return {
+      id: `slash-armor:${attack.id}`,
+      targetCharacterId: actorTokenId,
+      attack,
+      armorItemId: armorItem?.id ?? null,
+      armorName: armorItem?.name ?? null,
+      armorDice,
+      helmetItemId: helmetItem?.id ?? null,
+      helmetName: helmetItem?.name ?? null,
+      helmetDice,
+      armorUsed: {
+        armor: armorUsed,
+        helmet: helmetUsed,
+      },
+      isSlashFlow: true,
+    };
+  }, [
+    slashArmorPhase,
+    slashCanControlPhase,
+    actorTokenId,
+    currentEntry,
+    buildSlashFlowAttack,
+    slashReactionTargetCharacter,
+    actorUsedItemFlags,
+  ]);
   const armorPrompt =
     pendingArmorPrompt && pendingArmorPrompt.targetCharacterId === currentUserTokenId ? pendingArmorPrompt : null;
-  const armorPromptUsed = armorPrompt?.armorUsed || {};
-  const armorPromptHelmetDice = Math.max(0, armorPrompt?.helmetDice ?? 0);
-  const armorPromptArmorDice = Math.max(0, armorPrompt?.armorDice ?? 0);
-  const armorPromptCanHelmet = Boolean(armorPrompt?.helmetItemId) && armorPromptHelmetDice > 0 && !armorPromptUsed.helmet;
-  const armorPromptCanArmor = Boolean(armorPrompt?.armorItemId) && armorPromptArmorDice > 0 && !armorPromptUsed.armor;
-  const shouldShowArmorPrompt = combatMode && Boolean(armorPrompt) && (armorPromptCanHelmet || armorPromptCanArmor);
+  const activeArmorPrompt = slashArmorPrompt || armorPrompt;
+  const armorPromptUsed = activeArmorPrompt?.armorUsed || {};
+  const armorPromptHelmetDice = Math.max(0, activeArmorPrompt?.helmetDice ?? 0);
+  const armorPromptArmorDice = Math.max(0, activeArmorPrompt?.armorDice ?? 0);
+  const armorPromptCanHelmet =
+    Boolean(activeArmorPrompt?.helmetItemId) && armorPromptHelmetDice > 0 && !armorPromptUsed.helmet;
+  const armorPromptCanArmor =
+    Boolean(activeArmorPrompt?.armorItemId) && armorPromptArmorDice > 0 && !armorPromptUsed.armor;
+  const shouldShowArmorPrompt =
+    combatMode &&
+    Boolean(activeArmorPrompt) &&
+    (slashArmorPrompt ? slashCanControlPhase : true) &&
+    (armorPromptCanHelmet || armorPromptCanArmor);
   const artPrompt = useMemo(() => {
     if (!pendingArtPrompt) return null;
     const attackerId = pendingArtPrompt.attackerCharacterId;
@@ -897,6 +1118,18 @@ export default function Combat({
     Array.isArray(artPrompt?.options) &&
     artPrompt!.options.length > 0;
   const handleArmorPromptPass = useCallback(async () => {
+    if (slashArmorPrompt && onResolveReactionRoll) {
+      await onResolveReactionRoll({
+        id: `slash-armor-pass:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        reactionId: `slash-armor:${slashArmorPrompt.attack.id}`,
+        targetCharacterId: slashArmorPrompt.targetCharacterId,
+        mode: "pass",
+        rollType: "armor",
+        totalSuccesses: 0,
+        attack: slashArmorPrompt.attack,
+      });
+      return;
+    }
     if (!armorPrompt) return;
     onConsumeArmorPrompt?.(armorPrompt.id);
     await onArmorPromptPass?.({
@@ -904,17 +1137,46 @@ export default function Combat({
       armorSkipped: true,
       armorUsed: armorPrompt.armorUsed,
     });
-  }, [armorPrompt, onConsumeArmorPrompt, onArmorPromptPass]);
+  }, [slashArmorPrompt, onResolveReactionRoll, armorPrompt, onConsumeArmorPrompt, onArmorPromptPass]);
   const handleArmorPromptRoll = useCallback(
-    (slot: "helmet" | "armor") => {
-      if (!armorPrompt || !onQueueReactionRoll) return;
+    async (slot: "helmet" | "armor") => {
+      if (!activeArmorPrompt) return;
       const isHelmet = slot === "helmet";
-      const gearItemId = isHelmet ? armorPrompt.helmetItemId : armorPrompt.armorItemId;
+      const gearItemId = isHelmet ? activeArmorPrompt.helmetItemId : activeArmorPrompt.armorItemId;
       if (!gearItemId) return;
+      if (slashArmorPrompt && onResolveReactionRoll) {
+        if (currentEntry?.kind === "monster") {
+          const gearDice = rollD6Pool(Math.max(0, isHelmet ? armorPromptHelmetDice : armorPromptArmorDice));
+          const successes = gearDice.filter((d) => d === 6).length;
+          if (isDmViewer) {
+            setMonsterRollResult({
+              actionLabel: isHelmet ? `Helmet (${slashArmorPrompt.helmetName || "Helmet"})` : `Armor (${slashArmorPrompt.armorName || "Armor"})`,
+              attributeDice: [],
+              skillDice: [],
+              gearDice,
+              successes,
+            });
+          }
+          await onResolveReactionRoll({
+            id: `slash-armor-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `slash-armor:${slashArmorPrompt.attack.id}:${slot}`,
+            targetCharacterId: slashArmorPrompt.targetCharacterId,
+            mode: isHelmet ? "helmet" : "armor",
+            rollType: "armor",
+            totalSuccesses: successes,
+            armorSlot: slot,
+            attack: slashArmorPrompt.attack,
+          });
+          return;
+        }
+        if (!onQueueReactionRoll) return;
+      }
+      if (!armorPrompt && !slashArmorPrompt) return;
+      if (!onQueueReactionRoll) return;
       onQueueReactionRoll({
         id: `armor-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-        reactionId: `armor:${armorPrompt.attack.id}:${slot}`,
-        targetCharacterId: armorPrompt.targetCharacterId,
+        reactionId: `${slashArmorPrompt ? "slash-armor" : "armor"}:${activeArmorPrompt.attack.id}:${slot}`,
+        targetCharacterId: activeArmorPrompt.targetCharacterId,
         mode: isHelmet ? "helmet" : "armor",
         rollType: "armor",
         rollAttribute: "AGL",
@@ -924,11 +1186,24 @@ export default function Combat({
         fixedSkillDice: 0,
         gearItemId,
         armorSlot: slot,
-        attack: armorPrompt.attack,
+        attack: activeArmorPrompt.attack,
       });
-      onConsumeArmorPrompt?.(armorPrompt.id);
+      if (armorPrompt) {
+        onConsumeArmorPrompt?.(armorPrompt.id);
+      }
     },
-    [armorPrompt, onQueueReactionRoll, onConsumeArmorPrompt]
+    [
+      activeArmorPrompt,
+      slashArmorPrompt,
+      onResolveReactionRoll,
+      currentEntry,
+      armorPromptHelmetDice,
+      armorPromptArmorDice,
+      isDmViewer,
+      onQueueReactionRoll,
+      armorPrompt,
+      onConsumeArmorPrompt,
+    ]
   );
   const handleArtPromptPass = useCallback(async () => {
     if (!artPrompt) return;
@@ -948,6 +1223,106 @@ export default function Combat({
       mode: "pass" | "dodge-stand" | "dodge-prone" | "parry",
       parryItem?: { id: string; gearBonus: number; kind: "weapon" | "shield"; name: string }
     ) => {
+      if (slashReactionPhase && slashCanControlPhase) {
+        const slashAttack = buildSlashFlowAttack();
+        if (!slashAttack || !actorTokenId) return;
+        if (mode === "dodge-stand" && slashHasDodged) return;
+        if (mode === "dodge-prone" && slashHasDodged) return;
+        if (mode === "parry" && slashHasParried) return;
+        if ((mode === "dodge-stand" || mode === "dodge-prone") && !slashCanDodgeReaction) return;
+        if (mode === "parry" && !slashCanParryReaction) return;
+        if (!onResolveReactionRoll && !onQueueReactionRoll) return;
+
+        if (mode === "pass") {
+          if (!onResolveReactionRoll) return;
+          await onResolveReactionRoll({
+            id: `slash-reaction-pass:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `slash:${slashAttack.id}`,
+            targetCharacterId: slashAttack.targetCharacterId,
+            mode: "pass",
+            rollType: "reaction",
+            totalSuccesses: 0,
+            attack: slashAttack,
+          });
+          return;
+        }
+
+        const sizeDelta = sizeForTokenId(actorTokenId) - sizeForTokenId(slashIncomingMeta?.attackerTokenId);
+        const maneuverBonus =
+          mode === "parry"
+            ? (parryItem?.kind === "shield" ? 0 : 0) + sizeDelta
+            : 0;
+        const bonusDice =
+          mode === "dodge-stand" ? 0 : mode === "dodge-prone" ? 2 : maneuverBonus;
+        const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+
+        if (!slashReactionTargetIsMonster && onQueueReactionRoll) {
+          onQueueReactionRoll({
+            id: `slash-reaction-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `slash:${slashAttack.id}`,
+            targetCharacterId: slashAttack.targetCharacterId,
+            mode: mode === "parry" ? "parry" : mode,
+            rollType: "reaction",
+            rollAttribute: mode === "parry" ? "STR" : "AGL",
+            rollSkill: mode === "parry" ? "MELEE" : "MOVE",
+            bonusDice: bonusDice + tauntPenalty,
+            gearItemId: mode === "parry" && parryItem ? parryItem.id : null,
+            applyProne: mode === "dodge-prone",
+            attack: slashAttack,
+          });
+          return;
+        }
+
+        if (!slashReactionTargetIsMonster || !currentEntry?.monster_snapshot || !onResolveReactionRoll) return;
+        setIsResolvingReaction(true);
+        try {
+          const snapshot = currentEntry.monster_snapshot;
+          const attrCount = Math.max(0, mode === "parry" ? snapshot.str ?? 0 : snapshot.agl ?? 0);
+          const signedSkillPool = (snapshot.special ?? 0) + bonusDice + tauntPenalty;
+          const skillCount = Math.abs(signedSkillPool);
+          const skillIsNegative = signedSkillPool < 0;
+          const gearCount = Math.max(0, mode === "parry" && parryItem ? parryItem.gearBonus : 0);
+          const attributeDice = rollD6Pool(attrCount);
+          const skillDice = rollD6Pool(skillCount);
+          const gearDice = rollD6Pool(gearCount);
+          const rawSuccesses =
+            attributeDice.filter((d) => d === 6).length +
+            skillDice.filter((d) => d === 6).length +
+            gearDice.filter((d) => d === 6).length;
+          const successes = skillIsNegative
+            ? Math.max(0, rawSuccesses - skillDice.filter((d) => d === 6).length * 2)
+            : rawSuccesses;
+          if (isDmViewer) {
+            setMonsterRollResult({
+              actionLabel:
+                mode === "dodge-stand"
+                  ? "Dodge (Standing)"
+                  : mode === "dodge-prone"
+                    ? "Dodge (Fall Prone)"
+                    : `Parry (${parryItem?.name || "Parry"})`,
+              attributeDice,
+              skillDice,
+              skillIsNegative,
+              gearDice,
+              successes,
+            });
+          }
+          await onResolveReactionRoll({
+            id: `slash-reaction-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `slash:${slashAttack.id}`,
+            targetCharacterId: slashAttack.targetCharacterId,
+            mode: mode === "parry" ? "parry" : mode,
+            rollType: "reaction",
+            totalSuccesses: successes,
+            applyProne: mode === "dodge-prone",
+            attack: slashAttack,
+          });
+        } finally {
+          setIsResolvingReaction(false);
+        }
+        return;
+      }
+
       if (!pendingReaction) return;
       const supabase = createClient();
       const baseAttack: ResolvedMeleeAttack = {
@@ -1133,8 +1508,22 @@ export default function Combat({
       }
     },
     [
+      slashReactionPhase,
+      slashCanControlPhase,
+      buildSlashFlowAttack,
+      actorTokenId,
+      slashHasDodged,
+      slashHasParried,
+      slashCanDodgeReaction,
+      slashCanParryReaction,
+      sizeForTokenId,
+      slashIncomingMeta,
+      slashReactionTargetIsMonster,
+      currentEntry,
+      onResolveReactionRoll,
+      onQueueReactionRoll,
+      isDmViewer,
       pendingReaction,
-      canReact,
       canDodgeReaction,
       canParryReaction,
       rollReaction,
@@ -1145,9 +1534,7 @@ export default function Combat({
       sizeDelta,
       reactionTargetId,
       reactionTargetIsMonster,
-      isDmViewer,
       onResolveMeleeAttack,
-      onQueueReactionRoll,
     ]
   );
   const actorHoldCounterpartIds = useMemo(() => {
@@ -1325,7 +1712,9 @@ export default function Combat({
             flags.push("Blitzed");
           }
           for (const usedFlag of entry?.used_item_flags || []) {
-            if (usedFlag) flags.push(usedFlag);
+            if (!usedFlag) continue;
+            if (isIncomingDamageMetaFlag(usedFlag)) continue;
+            flags.push(usedFlag);
           }
 
           const character = characters.find((char) => char.id === pos.character_id);
@@ -2920,6 +3309,51 @@ export default function Combat({
     setError(null);
     isSyncingRef.current = false;
   }, []);
+
+  const handleCombatPanelResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      isResizingPanelRef.current = true;
+      resizePanelStartRef.current = {
+        startY: event.clientY,
+        startHeight: combatPanelHeight,
+      };
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+    },
+    [combatPanelHeight]
+  );
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!isResizingPanelRef.current) return;
+      const start = resizePanelStartRef.current;
+      if (!start) return;
+      const nextHeight = Math.max(
+        MIN_COMBAT_PANEL_HEIGHT,
+        Math.min(MAX_COMBAT_PANEL_HEIGHT, Math.trunc(start.startHeight + (event.clientY - start.startY)))
+      );
+      setCombatPanelHeight(nextHeight);
+    };
+
+    const stopResizing = () => {
+      if (!isResizingPanelRef.current && !resizePanelStartRef.current) return;
+      isResizingPanelRef.current = false;
+      resizePanelStartRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResizing);
+    window.addEventListener("pointercancel", stopResizing);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResizing);
+      window.removeEventListener("pointercancel", stopResizing);
+      stopResizing();
+    };
+  }, [MAX_COMBAT_PANEL_HEIGHT, MIN_COMBAT_PANEL_HEIGHT]);
 
   const loadCharacters = useCallback(async () => {
     const supabase = createClient();
@@ -6275,16 +6709,16 @@ export default function Combat({
           </div>
         </div>
       )}
-      {shouldShowArmorPrompt && armorPrompt && (
+      {shouldShowArmorPrompt && activeArmorPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
                 <p className="text-sm text-amber-200/80">
-                  Incoming: {armorPrompt.attack.maneuver} ({armorPrompt.attack.weaponName})
+                  Incoming: {activeArmorPrompt.attack.maneuver} ({activeArmorPrompt.attack.weaponName})
                 </p>
-                <p className="text-xs text-amber-200/70">Successes: {armorPrompt.attack.totalSuccesses}</p>
+                <p className="text-xs text-amber-200/70">Successes: {activeArmorPrompt.attack.totalSuccesses}</p>
               </div>
             </div>
 
@@ -6294,7 +6728,7 @@ export default function Combat({
                   onClick={() => handleArmorPromptRoll("helmet")}
                   className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
                 >
-                  Helmet ({armorPrompt.helmetName ?? "Helmet"} +{armorPromptHelmetDice})
+                  Helmet ({activeArmorPrompt.helmetName ?? "Helmet"} +{armorPromptHelmetDice})
                 </button>
               )}
               {armorPromptCanArmor && (
@@ -6302,7 +6736,7 @@ export default function Combat({
                   onClick={() => handleArmorPromptRoll("armor")}
                   className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
                 >
-                  Armor ({armorPrompt.armorName ?? "Armor"} +{armorPromptArmorDice})
+                  Armor ({activeArmorPrompt.armorName ?? "Armor"} +{armorPromptArmorDice})
                 </button>
               )}
               <button
@@ -6315,61 +6749,113 @@ export default function Combat({
           </div>
         </div>
       )}
-      {shouldShowReactionModal && pendingReaction && (
+      {shouldShowReactionModal && (pendingReaction || slashReactionPhase) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
                 <p className="text-sm text-amber-200/80">
-                  Incoming: {pendingReaction.maneuver} ({pendingReaction.weaponName})
+                  Incoming:{" "}
+                  {slashReactionPhase
+                    ? `Slash (${slashIncomingMeta?.weaponName || "Slash"})`
+                    : `${pendingReaction?.maneuver || "Attack"} (${pendingReaction?.weaponName || "Weapon"})`}
                 </p>
-                <p className="text-xs text-amber-200/70">Successes: {pendingReaction.totalSuccesses}</p>
+                <p className="text-xs text-amber-200/70">
+                  Successes: {slashReactionPhase ? slashIncomingDamage?.successes ?? 0 : pendingReaction?.totalSuccesses ?? 0}
+                </p>
               </div>
             </div>
 
-            {!canDodgeReaction && !canParryReaction && (
+            {slashReactionPhase && !slashCanDodgeReaction && !slashCanParryReaction && (
+              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
+                Reaction unavailable (no fast action or restricted).
+              </div>
+            )}
+            {!slashReactionPhase && !canDodgeReaction && !canParryReaction && (
               <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
                 Reaction unavailable (no fast action or restricted).
               </div>
             )}
 
             <div className="mt-4 grid grid-cols-1 gap-2">
-              {canReact && (
+              {slashReactionPhase ? (
                 <>
-                  <button
-                    onClick={() => void resolvePendingReaction("dodge-stand")}
-                    disabled={isResolvingReaction || !canDodgeReaction}
-                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
-                      freeDodgeAvailable
-                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
-                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
-                    }`}
-                  >
-                    Dodge (Standing)
-                  </button>
-                  <button
-                    onClick={() => void resolvePendingReaction("dodge-prone")}
-                    disabled={isResolvingReaction || !canDodgeReaction}
-                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
-                      freeDodgeAvailable
-                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
-                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
-                    }`}
-                  >
-                    Dodge (Fall Prone)
-                  </button>
-                  {parryOptions.map((option) => (
-                    <button
-                      key={`parry-${option.id}`}
-                      onClick={() => void resolvePendingReaction("parry", option)}
-                      disabled={isResolvingReaction || !canParryReaction}
-                      className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
-                    >
-                      {`Parry (${option.name})`}
-                    </button>
-                  ))}
+                  {!slashHasDodged && (
+                    <>
+                      <button
+                        onClick={() => void resolvePendingReaction("dodge-stand")}
+                        disabled={isResolvingReaction || !slashCanDodgeReaction}
+                        className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                          slashFreeDodgeAvailable
+                            ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                            : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                        }`}
+                      >
+                        Dodge (Standing)
+                      </button>
+                      <button
+                        onClick={() => void resolvePendingReaction("dodge-prone")}
+                        disabled={isResolvingReaction || !slashCanDodgeReaction}
+                        className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                          slashFreeDodgeAvailable
+                            ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                            : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                        }`}
+                      >
+                        Dodge (Fall Prone)
+                      </button>
+                    </>
+                  )}
+                  {!slashHasParried &&
+                    slashParryOptions.map((option) => (
+                      <button
+                        key={`slash-parry-${option.id}`}
+                        onClick={() => void resolvePendingReaction("parry", option)}
+                        disabled={isResolvingReaction || !slashCanParryReaction}
+                        className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                      >
+                        {`Parry (${option.name})`}
+                      </button>
+                    ))}
                 </>
+              ) : (
+                canReact && (
+                  <>
+                    <button
+                      onClick={() => void resolvePendingReaction("dodge-stand")}
+                      disabled={isResolvingReaction || !canDodgeReaction}
+                      className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                        freeDodgeAvailable
+                          ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                          : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                      }`}
+                    >
+                      Dodge (Standing)
+                    </button>
+                    <button
+                      onClick={() => void resolvePendingReaction("dodge-prone")}
+                      disabled={isResolvingReaction || !canDodgeReaction}
+                      className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                        freeDodgeAvailable
+                          ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                          : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                      }`}
+                    >
+                      Dodge (Fall Prone)
+                    </button>
+                    {parryOptions.map((option) => (
+                      <button
+                        key={`parry-${option.id}`}
+                        onClick={() => void resolvePendingReaction("parry", option)}
+                        disabled={isResolvingReaction || !canParryReaction}
+                        className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
+                      >
+                        {`Parry (${option.name})`}
+                      </button>
+                    ))}
+                  </>
+                )
               )}
               <button
                 onClick={() => void resolvePendingReaction("pass")}
@@ -6382,8 +6868,11 @@ export default function Combat({
           </div>
         </div>
       )}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 min-h-[560px]">
-      <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+      <aside
+        className="rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3"
+        style={{ height: `${combatPanelHeight}px` }}
+      >
         <h3 className="text-xl font-bold text-amber-300 mb-3">Combat Actions</h3>
         <div className="rounded border border-amber-500/20 bg-gray-900/30 p-3 text-sm text-amber-100/90 mb-3">
           {`Selected: ${
@@ -6837,9 +7326,10 @@ export default function Combat({
             setSelectedTokenId(null);
             setSelectedZoneTarget({ zoneId, point });
           }}
-          className={`relative h-full min-h-[520px] overflow-hidden rounded-2xl border transition-all ${
+          className={`relative overflow-hidden rounded-2xl border transition-all ${
             isDragging ? "border-amber-300 bg-amber-500/10" : "border-amber-500/40 bg-black/20"
           }`}
+          style={{ height: `${combatPanelHeight}px` }}
         >
           {mapUrl ? (
             <>
@@ -7132,7 +7622,10 @@ export default function Combat({
         {error && <p className="mt-3 text-sm text-red-300">{error}</p>}
       </div>
 
-      <aside className="min-h-[520px] max-h-[520px] rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3">
+      <aside
+        className="rounded-2xl border border-amber-500/40 bg-black/20 p-4 flex flex-col lg:col-span-3"
+        style={{ height: `${combatPanelHeight}px` }}
+      >
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-xl font-bold text-amber-300">Initiative</h3>
           <div className="text-xs text-amber-200/80">
@@ -7285,6 +7778,13 @@ export default function Combat({
           })}
         </div>
       </aside>
+    </div>
+    <div
+      onPointerDown={handleCombatPanelResizeStart}
+      className="my-2 flex h-4 cursor-row-resize items-center justify-center select-none rounded text-amber-200/70 hover:text-amber-100"
+      title="Drag to resize combat panels"
+    >
+      <div className="h-1 w-20 rounded-full bg-amber-500/50" />
     </div>
     </>
   );

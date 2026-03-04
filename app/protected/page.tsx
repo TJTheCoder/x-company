@@ -3,6 +3,18 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { applyGearDamageToItem, normalizeInventoryItems } from "@/lib/item-catalog";
+import {
+  ARTS_CHOSEN_FLAG,
+  DODGED_FLAG,
+  PARRIED_FLAG,
+  buildIncomingDamageFlag,
+  buildIncomingDamageMetaFlag,
+  findIncomingDamageFlag,
+  findIncomingDamageMetaFlag,
+  isIncomingDamageMetaFlag,
+  type IncomingDamageFlag,
+  type IncomingDamageMeta,
+} from "@/lib/combat-flags";
 import artsCatalogData from "../../data/arts.json";
 import Character from "../../components/character";
 import Inventory from "../../components/inventory";
@@ -175,13 +187,14 @@ export type ResolvedMeleeAttack = {
   armorSkipped?: boolean;
   sunderResolved?: boolean;
   laggingBladeResolved?: boolean;
+  slashFlow?: boolean;
 };
 
 export type PendingReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
   rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
@@ -205,7 +218,7 @@ export type ResolvedReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
   rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
   armorSlot?: "armor" | "helmet";
@@ -1179,6 +1192,343 @@ export default function Dashboard() {
     await applyFlameTickForToken(tokenId);
   };
 
+  type SlashFlowCombatEntry = {
+    participant_id: string;
+    kind?: "player" | "monster";
+    user_email?: string | null;
+    used_item_flags?: string[] | null;
+    fast_available?: boolean | null;
+    prone?: boolean | null;
+    monster_snapshot?: {
+      gear?: InventoryItem[] | null;
+      equipment_slots?: EquipmentSlots | null;
+    } | null;
+  };
+
+  type SlashFlowState = {
+    entries: SlashFlowCombatEntry[];
+    currentIndex: number | null;
+    targetIndex: number;
+    attackerIndex: number;
+    targetEntry: SlashFlowCombatEntry;
+    attackerEntry: SlashFlowCombatEntry;
+    targetFlags: string[];
+    attackerFlags: string[];
+    incoming: IncomingDamageFlag;
+    meta: IncomingDamageMeta;
+  };
+
+  type SlashProtectionOption = {
+    slot: "armor" | "helmet";
+    itemId: string;
+    itemName: string;
+    dice: number;
+  };
+
+  const tokenMatchesParticipant = (participantId: string | null | undefined, tokenId: string): boolean => {
+    if (!participantId || !tokenId) return false;
+    return participantId === tokenId || participantId === `player:${tokenId}`;
+  };
+
+  const normalizeFlagList = (flags: unknown): string[] => {
+    if (!Array.isArray(flags)) return [];
+    const next: string[] = [];
+    const seen = new Set<string>();
+    for (const value of flags) {
+      if (typeof value !== "string") continue;
+      const trimmed = value.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      next.push(trimmed);
+    }
+    return next;
+  };
+
+  const usedItemFlagForName = (name: string): string => `Used (${name})`;
+
+  const replaceIncomingFlags = (
+    flags: string[],
+    incoming: IncomingDamageFlag,
+    meta: IncomingDamageMeta
+  ): string[] => {
+    const next = flags.filter((flag) => !findIncomingDamageFlag([flag]) && !isIncomingDamageMetaFlag(flag));
+    next.push(buildIncomingDamageFlag(incoming.type, incoming.successes, incoming.totalDamage));
+    next.push(buildIncomingDamageMetaFlag(meta));
+    return normalizeFlagList(next);
+  };
+
+  const loadSlashFlowState = async (targetTokenId: string): Promise<SlashFlowState | null> => {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: SlashFlowCombatEntry[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (error) {
+      console.error("Failed to load slash flow state:", error);
+      return null;
+    }
+
+    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
+    if (entries.length === 0) return null;
+
+    const targetIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, targetTokenId)
+    );
+    if (targetIndex < 0) return null;
+
+    const targetEntry = entries[targetIndex];
+    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
+    const incomingRecord = findIncomingDamageFlag(targetFlags);
+    const metaRecord = findIncomingDamageMetaFlag(targetFlags);
+    if (!incomingRecord || !metaRecord) return null;
+
+    const attackerIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, metaRecord.value.attackerTokenId)
+    );
+    if (attackerIndex < 0) return null;
+    const attackerEntry = entries[attackerIndex];
+    const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
+
+    return {
+      entries,
+      currentIndex: data?.initiative_current_index ?? null,
+      targetIndex,
+      attackerIndex,
+      targetEntry,
+      attackerEntry,
+      targetFlags,
+      attackerFlags,
+      incoming: incomingRecord.value,
+      meta: metaRecord.value,
+    };
+  };
+
+  const updateSlashFlowState = async (
+    entries: SlashFlowCombatEntry[],
+    currentIndex: number | null
+  ): Promise<boolean> => {
+    const supabase = createClient();
+    const { error } = await supabase
+      .from("combat_state")
+      .update({
+        initiative_entries: entries,
+        initiative_current_index: currentIndex,
+      })
+      .eq("id", 1);
+    if (error) {
+      console.error("Failed to update slash flow state:", error);
+      return false;
+    }
+    return true;
+  };
+
+  const resolveSlashProtectionOptions = async (
+    targetTokenId: string,
+    targetEntry: SlashFlowCombatEntry
+  ): Promise<SlashProtectionOption[]> => {
+    if (targetTokenId.startsWith("monster:")) {
+      const snapshot = targetEntry.monster_snapshot || {};
+      const gear = snapshot.gear || [];
+      const slots = snapshot.equipment_slots || { armor: null, helmet: null };
+      const matches = (slotValue: string | null | undefined, item: InventoryItem) =>
+        Boolean(slotValue && (slotValue === item.id || slotValue === item.name));
+      const armor = gear.find((item) => item.item_type === "Armor" && matches(slots.armor, item)) || null;
+      const helmet = gear.find((item) => item.item_type === "Helmet" && matches(slots.helmet, item)) || null;
+      const options: SlashProtectionOption[] = [];
+      if (helmet && helmet.id) {
+        const dice = effectiveArmorDiceForItem(helmet);
+        if (dice > 0) {
+          options.push({
+            slot: "helmet",
+            itemId: helmet.id,
+            itemName: helmet.name,
+            dice,
+          });
+        }
+      }
+      if (armor && armor.id) {
+        const dice = effectiveArmorDiceForItem(armor);
+        if (dice > 0) {
+          options.push({
+            slot: "armor",
+            itemId: armor.id,
+            itemName: armor.name,
+            dice,
+          });
+        }
+      }
+      return options;
+    }
+
+    const supabase = createClient();
+    const { data: target, error } = await supabase
+      .from("characters")
+      .select("id, inventory, equipment_slots")
+      .eq("id", targetTokenId)
+      .maybeSingle<{
+        id: string;
+        inventory?: InventoryItem[] | null;
+        equipment_slots?: EquipmentSlots | null;
+      }>();
+    if (error || !target) {
+      if (error) {
+        console.error("Failed to load player protection options:", error);
+      }
+      return [];
+    }
+    const inventory = target.inventory || [];
+    const slots = target.equipment_slots || { armor: null, helmet: null, left: null, right: null };
+    const matches = (slotValue: string | null | undefined, item: InventoryItem) =>
+      Boolean(slotValue && (slotValue === item.id || slotValue === item.name));
+    const armor = inventory.find((item) => item.item_type === "Armor" && matches(slots.armor, item)) || null;
+    const helmet = inventory.find((item) => item.item_type === "Helmet" && matches(slots.helmet, item)) || null;
+    const options: SlashProtectionOption[] = [];
+    if (helmet && helmet.id) {
+      const dice = effectiveArmorDiceForItem(helmet);
+      if (dice > 0) {
+        options.push({
+          slot: "helmet",
+          itemId: helmet.id,
+          itemName: helmet.name,
+          dice,
+        });
+      }
+    }
+    if (armor && armor.id) {
+      const dice = effectiveArmorDiceForItem(armor);
+      if (dice > 0) {
+        options.push({
+          slot: "armor",
+          itemId: armor.id,
+          itemName: armor.name,
+          dice,
+        });
+      }
+    }
+    return options;
+  };
+
+  const clearSlashFlowFlags = (
+    state: SlashFlowState,
+    options: SlashProtectionOption[]
+  ): SlashFlowCombatEntry[] => {
+    const removableUsed = new Set(options.map((option) => usedItemFlagForName(option.itemName)));
+    return state.entries.map((entry, index) => {
+      const flags = normalizeFlagList(entry.used_item_flags);
+      if (index === state.targetIndex) {
+        const nextFlags = flags.filter((flag) => {
+          if (flag === DODGED_FLAG || flag === PARRIED_FLAG) return false;
+          if (findIncomingDamageFlag([flag])) return false;
+          if (isIncomingDamageMetaFlag(flag)) return false;
+          if (removableUsed.has(flag)) return false;
+          return true;
+        });
+        return {
+          ...entry,
+          used_item_flags: nextFlags,
+        };
+      }
+      if (index === state.attackerIndex) {
+        const nextFlags = flags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
+        return {
+          ...entry,
+          used_item_flags: nextFlags,
+        };
+      }
+      return entry;
+    });
+  };
+
+  const beginSlashIncomingDamageFlow = async (
+    attack: ResolvedMeleeAttack,
+    successes: number
+  ): Promise<boolean> => {
+    const totalDamage =
+      Math.max(0, attack.weaponBaseDamage) +
+      Math.max(0, successes - 1) +
+      Math.max(0, attack.swingBonusDamage ?? 0);
+    if (totalDamage <= 0) return false;
+
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: SlashFlowCombatEntry[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (error) {
+      console.error("Failed to load combat state for slash flow:", error);
+      return false;
+    }
+
+    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
+    if (entries.length === 0) return false;
+    const targetIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, attack.targetCharacterId)
+    );
+    const attackerIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, attack.attackerCharacterId)
+    );
+    if (targetIndex < 0 || attackerIndex < 0) return false;
+
+    const targetEntry = entries[targetIndex];
+    const attackerEntry = entries[attackerIndex];
+    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
+    const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
+    const incoming: IncomingDamageFlag = {
+      type: "Slash",
+      successes: Math.max(0, successes),
+      totalDamage: totalDamage,
+    };
+    const meta: IncomingDamageMeta = {
+      attackerTokenId: attack.attackerCharacterId,
+      attackId: attack.id,
+      weaponName: attack.weaponName,
+      rangeAtAttack: attack.rangeAtAttack ?? null,
+    };
+    const nextTargetFlags = replaceIncomingFlags(
+      targetFlags.filter((flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG),
+      incoming,
+      meta
+    );
+    const nextAttackerFlags = attackerFlags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
+    const nextEntries = entries.map((entry, index) => {
+      if (index === targetIndex) {
+        return {
+          ...entry,
+          used_item_flags: nextTargetFlags,
+        };
+      }
+      if (index === attackerIndex) {
+        return {
+          ...entry,
+          used_item_flags: nextAttackerFlags,
+        };
+      }
+      return entry;
+    });
+    const { error: updateError } = await supabase
+      .from("combat_state")
+      .update({
+        initiative_entries: nextEntries,
+        initiative_current_index: targetIndex,
+      })
+      .eq("id", 1);
+    if (updateError) {
+      console.error("Failed to initialize slash flow:", updateError);
+      return false;
+    }
+    setPendingArmorPrompt(null);
+    setPendingArtPrompt(null);
+    return true;
+  };
+
   const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
     const successes = Math.max(0, attack.totalSuccesses);
     const requiredSuccesses = Math.max(1, attack.requiredSuccesses ?? 1);
@@ -1294,6 +1644,40 @@ export default function Dashboard() {
       !attack.skipReaction &&
       successes > 0 &&
       reactionEligibleManeuvers.has(attack.maneuver);
+    if (attack.maneuver === "Slash" && !attack.skipReaction && successes > 0) {
+      const startedSlashFlow = await beginSlashIncomingDamageFlow(attack, successes);
+      if (startedSlashFlow) {
+        return;
+      }
+    }
+    if (attack.maneuver === "Slash" && attack.slashFlow) {
+      const slashState = await loadSlashFlowState(attack.targetCharacterId);
+      if (!slashState) return;
+      const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
+      const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
+      if (!hasDodged || !hasParried) return;
+
+      const nextSuccesses = Math.max(0, attack.totalSuccesses);
+      if (nextSuccesses !== slashState.incoming.successes) {
+        const delta = nextSuccesses - slashState.incoming.successes;
+        const nextIncoming: IncomingDamageFlag = {
+          ...slashState.incoming,
+          successes: nextSuccesses,
+          totalDamage: Math.max(0, slashState.incoming.totalDamage + delta),
+        };
+        const nextTargetFlags = replaceIncomingFlags(slashState.targetFlags, nextIncoming, slashState.meta);
+        const nextEntries = slashState.entries.map((entry, index) =>
+          index === slashState.targetIndex
+            ? {
+                ...entry,
+                used_item_flags: nextTargetFlags,
+              }
+            : entry
+        );
+        const updated = await updateSlashFlowState(nextEntries, slashState.currentIndex);
+        if (!updated) return;
+      }
+    }
     const attackerHasLitFlamingLongsword = async (): Promise<boolean> => {
       if (!(attack.maneuver === "Slash" || attack.maneuver === "Stab" || attack.maneuver === "Strike")) {
         return false;
@@ -2347,6 +2731,61 @@ export default function Dashboard() {
       }
     }
 
+    if (attack.maneuver === "Slash" && attack.slashFlow) {
+      const slashState = await loadSlashFlowState(attack.targetCharacterId);
+      if (!slashState) return;
+      const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
+      const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
+      if (!hasDodged || !hasParried) return;
+
+      const nextAttackerFlags = normalizeFlagList(slashState.attackerEntry.used_item_flags);
+      if (!nextAttackerFlags.includes(ARTS_CHOSEN_FLAG)) {
+        nextAttackerFlags.push(ARTS_CHOSEN_FLAG);
+      }
+      const nextEntries = slashState.entries.map((entry, index) =>
+        index === slashState.attackerIndex
+          ? {
+              ...entry,
+              used_item_flags: nextAttackerFlags,
+            }
+          : entry
+      );
+      const stateAfterArts: SlashFlowState = {
+        ...slashState,
+        entries: nextEntries,
+        attackerEntry: nextEntries[slashState.attackerIndex],
+        attackerFlags: nextAttackerFlags,
+      };
+      const protectionOptions = await resolveSlashProtectionOptions(
+        attack.targetCharacterId,
+        stateAfterArts.targetEntry
+      );
+      if (protectionOptions.length === 0) {
+        const clearedEntries = clearSlashFlowFlags(stateAfterArts, protectionOptions);
+        const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+        if (!updated) return;
+        await resolveMeleeAttack({
+          id: slashState.meta.attackId,
+          attackerCharacterId: slashState.meta.attackerTokenId,
+          targetCharacterId: attack.targetCharacterId,
+          weaponName: slashState.meta.weaponName,
+          weaponBaseDamage: Math.max(0, slashState.incoming.totalDamage),
+          maneuver: "Slash",
+          totalSuccesses: 1,
+          requiredSuccesses: 1,
+          swingBonusDamage: 0,
+          rangeAtAttack: slashState.meta.rangeAtAttack,
+          skipReaction: true,
+          armorSkipped: true,
+          sunderResolved: true,
+          laggingBladeResolved: true,
+        });
+        return;
+      }
+      await updateSlashFlowState(nextEntries, slashState.targetIndex);
+      return;
+    }
+
     const armorUsed = {
       ...(attack.armorUsed || {}),
     };
@@ -2799,6 +3238,191 @@ export default function Dashboard() {
       return;
     }
     if (!roll.attack) return;
+
+    const slashState = await loadSlashFlowState(roll.targetCharacterId);
+    const isSlashFlow =
+      roll.attack.maneuver === "Slash" &&
+      Boolean(slashState) &&
+      slashState!.incoming.type === "Slash" &&
+      slashState!.meta.attackId === roll.attack.id;
+
+    if (isSlashFlow && slashState) {
+      let nextIncoming: IncomingDamageFlag = slashState.incoming;
+      let nextTargetFlags = [...slashState.targetFlags];
+
+      if (roll.rollType === "reaction") {
+        if (roll.mode !== "pass") {
+          const reduction = Math.max(0, roll.totalSuccesses);
+          nextIncoming = {
+            ...nextIncoming,
+            successes: Math.max(0, nextIncoming.successes - reduction),
+            totalDamage: Math.max(0, nextIncoming.totalDamage - reduction),
+          };
+        }
+        if (!nextTargetFlags.includes(DODGED_FLAG)) nextTargetFlags.push(DODGED_FLAG);
+        if (!nextTargetFlags.includes(PARRIED_FLAG)) nextTargetFlags.push(PARRIED_FLAG);
+
+        if (roll.mode !== "pass") {
+          const isDodgeReaction = roll.mode === "dodge-stand" || roll.mode === "dodge-prone";
+          let usedFreeDodge = false;
+          if (isDodgeReaction) {
+            const { data: freeDodgeData, error: freeDodgeError } = await supabase.rpc(
+              "combat_consume_fast_footwork_dodge",
+              {
+                p_actor_token_id: roll.targetCharacterId,
+              }
+            );
+            if (freeDodgeError) {
+              console.error("Failed to consume Fast Footwork dodge:", freeDodgeError);
+            } else {
+              usedFreeDodge = Boolean(freeDodgeData);
+            }
+          }
+
+          if (!usedFreeDodge) {
+            const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
+              p_actor_token_id: roll.targetCharacterId,
+            });
+            if (consumeError) {
+              console.error("Failed to consume reaction action:", consumeError);
+            }
+          }
+
+          if (roll.applyProne) {
+            const { error: proneError } = await supabase.rpc("combat_set_prone_for_token", {
+              p_actor_token_id: roll.targetCharacterId,
+              p_prone: true,
+            });
+            if (proneError) {
+              console.error("Failed to apply prone from reaction:", proneError);
+            }
+          }
+        }
+      } else if (roll.rollType === "armor") {
+        const protectionOptions = await resolveSlashProtectionOptions(
+          roll.targetCharacterId,
+          slashState.targetEntry
+        );
+        const optionBySlot = new Map(protectionOptions.map((option) => [option.slot, option]));
+        if (roll.mode === "pass") {
+          for (const option of protectionOptions) {
+            const flag = usedItemFlagForName(option.itemName);
+            if (!nextTargetFlags.includes(flag)) nextTargetFlags.push(flag);
+          }
+        } else if (roll.armorSlot) {
+          const option = optionBySlot.get(roll.armorSlot);
+          if (option) {
+            const flag = usedItemFlagForName(option.itemName);
+            if (!nextTargetFlags.includes(flag)) nextTargetFlags.push(flag);
+          }
+        }
+        const reduction = Math.max(0, roll.totalSuccesses);
+        nextIncoming = {
+          ...nextIncoming,
+          successes: Math.max(0, nextIncoming.successes - reduction),
+          totalDamage: Math.max(0, nextIncoming.totalDamage - reduction),
+        };
+      }
+
+      nextTargetFlags = replaceIncomingFlags(nextTargetFlags, nextIncoming, slashState.meta);
+      let nextEntries = slashState.entries.map((entry, index) =>
+        index === slashState.targetIndex
+          ? {
+              ...entry,
+              used_item_flags: normalizeFlagList(nextTargetFlags),
+            }
+          : entry
+      );
+      const refreshState = (): SlashFlowState => {
+        const targetEntry = nextEntries[slashState.targetIndex];
+        const attackerEntry = nextEntries[slashState.attackerIndex];
+        return {
+          ...slashState,
+          entries: nextEntries,
+          targetEntry,
+          attackerEntry,
+          targetFlags: normalizeFlagList(targetEntry.used_item_flags),
+          attackerFlags: normalizeFlagList(attackerEntry.used_item_flags),
+          incoming: nextIncoming,
+        };
+      };
+
+      if (nextIncoming.totalDamage <= 0) {
+        const stateForClear = refreshState();
+        const protectionOptions = await resolveSlashProtectionOptions(
+          roll.targetCharacterId,
+          stateForClear.targetEntry
+        );
+        const clearedEntries = clearSlashFlowFlags(stateForClear, protectionOptions);
+        await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+        return;
+      }
+
+      const stateAfterUpdate = refreshState();
+      const hasDodged = stateAfterUpdate.targetFlags.includes(DODGED_FLAG);
+      const hasParried = stateAfterUpdate.targetFlags.includes(PARRIED_FLAG);
+      if (!hasDodged || !hasParried) {
+        await updateSlashFlowState(nextEntries, slashState.targetIndex);
+        return;
+      }
+
+      const attackerHasArtsChosen = stateAfterUpdate.attackerFlags.includes(ARTS_CHOSEN_FLAG);
+      if (!attackerHasArtsChosen) {
+        const updated = await updateSlashFlowState(nextEntries, slashState.attackerIndex);
+        if (!updated) return;
+        await resolveMeleeAttack({
+          id: slashState.meta.attackId,
+          attackerCharacterId: slashState.meta.attackerTokenId,
+          targetCharacterId: roll.targetCharacterId,
+          weaponName: slashState.meta.weaponName,
+          weaponBaseDamage: Math.max(0, nextIncoming.totalDamage),
+          maneuver: "Slash",
+          totalSuccesses: Math.max(0, nextIncoming.successes),
+          requiredSuccesses: 1,
+          swingBonusDamage: 0,
+          rangeAtAttack: slashState.meta.rangeAtAttack,
+          skipReaction: true,
+          slashFlow: true,
+        });
+        return;
+      }
+
+      const protectionOptions = await resolveSlashProtectionOptions(
+        roll.targetCharacterId,
+        stateAfterUpdate.targetEntry
+      );
+      const usedFlagSet = new Set(stateAfterUpdate.targetFlags);
+      const allProtectionUsed =
+        protectionOptions.length === 0 ||
+        protectionOptions.every((option) => usedFlagSet.has(usedItemFlagForName(option.itemName)));
+      if (!allProtectionUsed) {
+        await updateSlashFlowState(nextEntries, slashState.targetIndex);
+        return;
+      }
+
+      const clearedEntries = clearSlashFlowFlags(stateAfterUpdate, protectionOptions);
+      const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+      if (!updated) return;
+
+      await resolveMeleeAttack({
+        id: slashState.meta.attackId,
+        attackerCharacterId: slashState.meta.attackerTokenId,
+        targetCharacterId: roll.targetCharacterId,
+        weaponName: slashState.meta.weaponName,
+        weaponBaseDamage: Math.max(0, nextIncoming.totalDamage),
+        maneuver: "Slash",
+        totalSuccesses: 1,
+        requiredSuccesses: 1,
+        swingBonusDamage: 0,
+        rangeAtAttack: slashState.meta.rangeAtAttack,
+        skipReaction: true,
+        armorSkipped: true,
+        sunderResolved: true,
+        laggingBladeResolved: true,
+      });
+      return;
+    }
+
     const reducedSuccesses = Math.max(0, roll.attack.totalSuccesses - Math.max(0, roll.totalSuccesses));
     const finalAttack: ResolvedMeleeAttack = {
       ...roll.attack,
@@ -2819,6 +3443,7 @@ export default function Dashboard() {
     }
 
     const isDodgeReaction = roll.mode === "dodge-stand" || roll.mode === "dodge-prone";
+    const isPassReaction = roll.mode === "pass";
     let usedFreeDodge = false;
     if (isDodgeReaction) {
       const { data: freeDodgeData, error: freeDodgeError } = await supabase.rpc(
@@ -2834,7 +3459,7 @@ export default function Dashboard() {
       }
     }
 
-    if (!usedFreeDodge) {
+    if (!isPassReaction && !usedFreeDodge) {
       const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
         p_actor_token_id: roll.targetCharacterId,
       });
@@ -2843,7 +3468,7 @@ export default function Dashboard() {
       }
     }
 
-    if (roll.applyProne) {
+    if (!isPassReaction && roll.applyProne) {
       const { error: proneError } = await supabase.rpc("combat_set_prone_for_token", {
         p_actor_token_id: roll.targetCharacterId,
         p_prone: true,
@@ -3399,6 +4024,7 @@ export default function Dashboard() {
               character={character}
               onQueueMeleeAction={queueMeleeAction}
               onQueueReactionRoll={queueReactionRoll}
+              onResolveReactionRoll={resolveReactionRoll}
               onResolveMeleeAttack={resolveMeleeAttack}
               onApplyStartOfTurnEffects={onApplyStartOfTurnEffects}
               pendingArmorPrompt={pendingArmorPrompt}

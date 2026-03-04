@@ -707,6 +707,7 @@ export default function Combat({
       record.value.type !== "Slash" &&
       record.value.type !== "Stab" &&
       record.value.type !== "Strike" &&
+      record.value.type !== "Flame" &&
       record.value.type !== "Grapple" &&
       record.value.type !== "Cling" &&
       record.value.type !== "Shove" &&
@@ -724,9 +725,10 @@ export default function Combat({
   const flowManeuverForIncomingType = useCallback(
     (
       type: string | null | undefined
-    ): "Slash" | "Stab" | "Strike" | "Grapple" | "Cling" | "Shove" | "Disarm" | "Feint" => {
+    ): "Slash" | "Stab" | "Strike" | "Flame" | "Grapple" | "Cling" | "Shove" | "Disarm" | "Feint" => {
       if (type === "Stab") return "Stab";
       if (type === "Strike") return "Strike";
+      if (type === "Flame") return "Flame";
       if (type === "Grapple") return "Grapple";
       if (type === "Cling") return "Cling";
       if (type === "Shove") return "Shove";

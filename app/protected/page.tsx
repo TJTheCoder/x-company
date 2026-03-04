@@ -112,6 +112,7 @@ export type PendingMeleeAction = {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Flame"
     | "Shoot"
     | "Grapple Attack"
     | "Retreat"
@@ -155,6 +156,7 @@ export type ResolvedMeleeAttack = {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Flame"
     | "Shoot"
     | "Grapple Attack"
     | "Retreat"
@@ -1157,16 +1159,81 @@ export default function Dashboard() {
     };
   };
 
-  const applyFlameTag = async (tokenId: string, intensity: number) => {
+  const queueFlameIncomingDamageFlow = async (opts: {
+    sourceTokenId: string;
+    targetTokenId: string;
+    intensity: number;
+    sourceLabel?: string;
+  }): Promise<number | null> => {
+    const clampedIntensity = Math.max(0, Math.trunc(opts.intensity));
+    if (clampedIntensity <= 0) return 0;
+    const successes = rollD6Pool(clampedIntensity).filter((value) => value === 6).length;
+    if (successes <= 0) return 0;
+
+    const attackId = `flame:${opts.sourceTokenId}:${opts.targetTokenId}:${Date.now()}:${Math.random()
+      .toString(36)
+      .slice(2)}`;
+    const started = await initializeIncomingFlagFlow({
+      targetTokenId: opts.targetTokenId,
+      attackerTokenId: opts.sourceTokenId,
+      incoming: {
+        type: "Flame",
+        successes,
+        totalDamage: successes,
+      },
+      meta: {
+        attackerTokenId: opts.sourceTokenId,
+        attackId,
+        weaponName: opts.sourceLabel || "Flame",
+        rangeAtAttack: null,
+        disarmTargetItemId: null,
+        disarmZoneId: null,
+      },
+      preResolveReaction: true,
+      preResolveArtsChosen: true,
+      autoUseProtectionWhenNoDamageTotal: false,
+    });
+    if (!started) return null;
+
+    await resolveMeleeAttack({
+      id: attackId,
+      attackerCharacterId: opts.sourceTokenId,
+      targetCharacterId: opts.targetTokenId,
+      weaponName: opts.sourceLabel || "Flame",
+      weaponBaseDamage: successes,
+      maneuver: "Flame",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+      swingBonusDamage: 0,
+      rangeAtAttack: null,
+      skipReaction: true,
+      slashFlow: true,
+      sunderResolved: true,
+      laggingBladeResolved: true,
+    });
+    return successes;
+  };
+
+  const applyFlameTag = async (
+    tokenId: string,
+    intensity: number,
+    sourceTokenId: string = tokenId
+  ) => {
     const existingIntensity = await getFlameIntensityForToken(tokenId);
-    const applied = await applyFlameDamageToToken(tokenId, intensity);
-    if (applied.damage <= 0 || applied.strAfter <= 0) {
+    const queuedSuccesses = await queueFlameIncomingDamageFlow({
+      sourceTokenId,
+      targetTokenId: tokenId,
+      intensity,
+      sourceLabel: "Flame",
+    });
+    if (queuedSuccesses === null) return;
+    if (queuedSuccesses <= 0) {
       if (existingIntensity <= 0) {
         await setFlameIntensityForToken(tokenId, null);
       }
       return;
     }
-    const nextFromNewHit = Math.min(FLAME_MAX_INTENSITY, applied.damage + 1);
+    const nextFromNewHit = Math.min(FLAME_MAX_INTENSITY, queuedSuccesses + 1);
     const nextIntensity = existingIntensity > 0 ? Math.max(existingIntensity, nextFromNewHit) : nextFromNewHit;
     await setFlameIntensityForToken(tokenId, nextIntensity);
   };
@@ -1174,18 +1241,24 @@ export default function Dashboard() {
   const applyFlameTickForToken = async (tokenId: string) => {
     const currentIntensity = await getFlameIntensityForToken(tokenId);
     if (currentIntensity <= 0) return;
-    const applied = await applyFlameDamageToToken(tokenId, currentIntensity);
-    if (applied.damage <= 0 || applied.strAfter <= 0) {
+    const queuedSuccesses = await queueFlameIncomingDamageFlow({
+      sourceTokenId: tokenId,
+      targetTokenId: tokenId,
+      intensity: currentIntensity,
+      sourceLabel: "Flame",
+    });
+    if (queuedSuccesses === null) return;
+    if (queuedSuccesses <= 0) {
       await setFlameIntensityForToken(tokenId, null);
       return;
     }
-    await setFlameIntensityForToken(tokenId, Math.min(FLAME_MAX_INTENSITY, applied.damage + 1));
+    await setFlameIntensityForToken(tokenId, Math.min(FLAME_MAX_INTENSITY, queuedSuccesses + 1));
   };
 
   const applyFlameContactFromTo = async (fromTokenId: string, toTokenId: string) => {
     const intensity = await getFlameIntensityForToken(fromTokenId);
     if (intensity <= 0) return;
-    await applyFlameTag(toTokenId, intensity);
+    await applyFlameTag(toTokenId, intensity, fromTokenId);
   };
 
   const onApplyStartOfTurnEffects = async (tokenId: string) => {
@@ -1230,6 +1303,7 @@ export default function Dashboard() {
     | "Slash"
     | "Stab"
     | "Strike"
+    | "Flame"
     | "Grapple"
     | "Cling"
     | "Shove"
@@ -1242,6 +1316,7 @@ export default function Dashboard() {
     maneuver === "Slash" ||
     maneuver === "Stab" ||
     maneuver === "Strike" ||
+    maneuver === "Flame" ||
     maneuver === "Grapple" ||
     maneuver === "Cling" ||
     maneuver === "Shove" ||
@@ -1258,6 +1333,8 @@ export default function Dashboard() {
       ? "Stab"
       : incoming.type === "Strike"
         ? "Strike"
+        : incoming.type === "Flame"
+          ? "Flame"
         : incoming.type === "Grapple"
           ? "Grapple"
           : incoming.type === "Cling"
@@ -1467,6 +1544,7 @@ export default function Dashboard() {
       if (index === state.targetIndex) {
         const nextFlags = flags.filter((flag) => {
           if (flag === DODGED_FLAG || flag === PARRIED_FLAG) return false;
+          if (state.attackerIndex === state.targetIndex && flag === ARTS_CHOSEN_FLAG) return false;
           if (findIncomingDamageFlag([flag])) return false;
           if (isIncomingDamageMetaFlag(flag)) return false;
           if (removableUsed.has(flag)) return false;
@@ -1486,6 +1564,99 @@ export default function Dashboard() {
       }
       return entry;
     });
+  };
+
+  const initializeIncomingFlagFlow = async (params: {
+    targetTokenId: string;
+    attackerTokenId: string;
+    incoming: IncomingDamageFlag;
+    meta: IncomingDamageMeta;
+    preResolveReaction?: boolean;
+    preResolveArtsChosen?: boolean;
+    autoUseProtectionWhenNoDamageTotal?: boolean;
+  }): Promise<boolean> => {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: SlashFlowCombatEntry[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (error) {
+      console.error("Failed to load combat state for incoming flow:", error);
+      return false;
+    }
+
+    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
+    if (entries.length === 0) return false;
+    const targetIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, params.targetTokenId)
+    );
+    const attackerIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, params.attackerTokenId)
+    );
+    if (targetIndex < 0 || attackerIndex < 0) return false;
+
+    const targetEntry = entries[targetIndex];
+    const attackerEntry = entries[attackerIndex];
+    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
+    const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
+    const preppedTargetFlags = targetFlags.filter(
+      (flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG && flag !== ARTS_CHOSEN_FLAG
+    );
+    if (params.preResolveReaction) {
+      preppedTargetFlags.push(DODGED_FLAG);
+      preppedTargetFlags.push(PARRIED_FLAG);
+    }
+    if (params.incoming.totalDamage === null && params.autoUseProtectionWhenNoDamageTotal !== false) {
+      const protectionOptions = await resolveSlashProtectionOptions(params.targetTokenId, targetEntry);
+      for (const option of protectionOptions) {
+        preppedTargetFlags.push(usedItemFlagForName(option.itemName));
+      }
+    }
+    const nextTargetFlags = replaceIncomingFlags(preppedTargetFlags, params.incoming, params.meta);
+    const nextAttackerFlags = attackerFlags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
+    if (params.preResolveArtsChosen && !nextAttackerFlags.includes(ARTS_CHOSEN_FLAG)) {
+      nextAttackerFlags.push(ARTS_CHOSEN_FLAG);
+    }
+    const nextEntries = entries.map((entry, index) => {
+      if (index === targetIndex && index === attackerIndex) {
+        return {
+          ...entry,
+          used_item_flags: normalizeFlagList([...nextTargetFlags, ...nextAttackerFlags]),
+        };
+      }
+      if (index === targetIndex) {
+        return {
+          ...entry,
+          used_item_flags: nextTargetFlags,
+        };
+      }
+      if (index === attackerIndex) {
+        return {
+          ...entry,
+          used_item_flags: nextAttackerFlags,
+        };
+      }
+      return entry;
+    });
+
+    const { error: updateError } = await supabase
+      .from("combat_state")
+      .update({
+        initiative_entries: nextEntries,
+        initiative_current_index: targetIndex,
+      })
+      .eq("id", 1);
+    if (updateError) {
+      console.error("Failed to initialize incoming flow:", updateError);
+      return false;
+    }
+    setPendingArmorPrompt(null);
+    setPendingArtPrompt(null);
+    return true;
   };
 
   const beginSlashIncomingDamageFlow = async (
@@ -1509,34 +1680,6 @@ export default function Dashboard() {
       : null;
     if (hasIncomingDamageTotal && (totalDamage ?? 0) <= 0) return false;
 
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("combat_state")
-      .select("initiative_entries, initiative_current_index")
-      .eq("id", 1)
-      .maybeSingle<{
-        initiative_entries: SlashFlowCombatEntry[] | null;
-        initiative_current_index: number | null;
-      }>();
-    if (error) {
-      console.error("Failed to load combat state for slash flow:", error);
-      return false;
-    }
-
-    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
-    if (entries.length === 0) return false;
-    const targetIndex = entries.findIndex((entry) =>
-      tokenMatchesParticipant(entry.participant_id, attack.targetCharacterId)
-    );
-    const attackerIndex = entries.findIndex((entry) =>
-      tokenMatchesParticipant(entry.participant_id, attack.attackerCharacterId)
-    );
-    if (targetIndex < 0 || attackerIndex < 0) return false;
-
-    const targetEntry = entries[targetIndex];
-    const attackerEntry = entries[attackerIndex];
-    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
-    const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
     const incoming: IncomingDamageFlag = {
       type: flowManeuver,
       successes: Math.max(0, successes),
@@ -1550,51 +1693,14 @@ export default function Dashboard() {
       disarmTargetItemId: attack.disarmTargetItemId ?? null,
       disarmZoneId: attack.disarmZoneId ?? null,
     };
-    const preppedTargetFlags = targetFlags.filter((flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG);
-    if (preResolveReaction) {
-      preppedTargetFlags.push(DODGED_FLAG);
-      preppedTargetFlags.push(PARRIED_FLAG);
-    }
-    if (!hasIncomingDamageTotal) {
-      const protectionOptions = await resolveSlashProtectionOptions(
-        attack.targetCharacterId,
-        targetEntry
-      );
-      for (const option of protectionOptions) {
-        preppedTargetFlags.push(usedItemFlagForName(option.itemName));
-      }
-    }
-    const nextTargetFlags = replaceIncomingFlags(preppedTargetFlags, incoming, meta);
-    const nextAttackerFlags = attackerFlags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
-    const nextEntries = entries.map((entry, index) => {
-      if (index === targetIndex) {
-        return {
-          ...entry,
-          used_item_flags: nextTargetFlags,
-        };
-      }
-      if (index === attackerIndex) {
-        return {
-          ...entry,
-          used_item_flags: nextAttackerFlags,
-        };
-      }
-      return entry;
+    return initializeIncomingFlagFlow({
+      targetTokenId: attack.targetCharacterId,
+      attackerTokenId: attack.attackerCharacterId,
+      incoming,
+      meta,
+      preResolveReaction,
+      autoUseProtectionWhenNoDamageTotal: true,
     });
-    const { error: updateError } = await supabase
-      .from("combat_state")
-      .update({
-        initiative_entries: nextEntries,
-        initiative_current_index: targetIndex,
-      })
-      .eq("id", 1);
-    if (updateError) {
-      console.error("Failed to initialize slash flow:", updateError);
-      return false;
-    }
-    setPendingArmorPrompt(null);
-    setPendingArtPrompt(null);
-    return true;
   };
 
   const resolveMeleeAttack = async (attack: ResolvedMeleeAttack) => {
@@ -3219,7 +3325,7 @@ export default function Dashboard() {
         await applyFlameContactFromTo(attack.targetCharacterId, attack.attackerCharacterId);
       }
       if (await attackerHasLitFlamingLongsword()) {
-        await applyFlameTag(attack.targetCharacterId, 3);
+        await applyFlameTag(attack.targetCharacterId, 3, attack.attackerCharacterId);
       }
       await pruneBrokenOnlyEngagements();
       return;
@@ -3303,7 +3409,7 @@ export default function Dashboard() {
       await applyFlameContactFromTo(attack.targetCharacterId, attack.attackerCharacterId);
     }
     if (await attackerHasLitFlamingLongsword()) {
-      await applyFlameTag(attack.targetCharacterId, 3);
+      await applyFlameTag(attack.targetCharacterId, 3, attack.attackerCharacterId);
     }
     await pruneBrokenOnlyEngagements();
   };

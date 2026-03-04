@@ -1198,6 +1198,7 @@ export default function Dashboard() {
     user_email?: string | null;
     used_item_flags?: string[] | null;
     fast_available?: boolean | null;
+    fast_footwork_dodge_used?: boolean | null;
     prone?: boolean | null;
     monster_snapshot?: {
       gear?: InventoryItem[] | null;
@@ -1224,6 +1225,21 @@ export default function Dashboard() {
     itemName: string;
     dice: number;
   };
+
+  type FlagFlowManeuver = "Slash" | "Stab" | "Strike";
+
+  const isFlagFlowManeuver = (
+    maneuver: ResolvedMeleeAttack["maneuver"]
+  ): maneuver is FlagFlowManeuver =>
+    maneuver === "Slash" || maneuver === "Stab" || maneuver === "Strike";
+
+  const isFlagFlowTriggerManeuver = (
+    maneuver: ResolvedMeleeAttack["maneuver"]
+  ): maneuver is FlagFlowManeuver | "Grapple Attack" =>
+    isFlagFlowManeuver(maneuver) || maneuver === "Grapple Attack";
+
+  const flagFlowManeuverFromIncoming = (incoming: IncomingDamageFlag): FlagFlowManeuver =>
+    incoming.type === "Stab" ? "Stab" : incoming.type === "Strike" ? "Strike" : "Slash";
 
   const tokenMatchesParticipant = (participantId: string | null | undefined, tokenId: string): boolean => {
     if (!participantId || !tokenId) return false;
@@ -1447,6 +1463,10 @@ export default function Dashboard() {
     attack: ResolvedMeleeAttack,
     successes: number
   ): Promise<boolean> => {
+    if (!isFlagFlowTriggerManeuver(attack.maneuver)) return false;
+    const flowManeuver: FlagFlowManeuver =
+      attack.maneuver === "Grapple Attack" ? "Strike" : attack.maneuver;
+    const preResolveReaction = attack.maneuver === "Grapple Attack";
     const totalDamage =
       Math.max(0, attack.weaponBaseDamage) +
       Math.max(0, successes - 1) +
@@ -1482,21 +1502,22 @@ export default function Dashboard() {
     const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
     const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
     const incoming: IncomingDamageFlag = {
-      type: "Slash",
+      type: flowManeuver,
       successes: Math.max(0, successes),
       totalDamage: totalDamage,
     };
     const meta: IncomingDamageMeta = {
       attackerTokenId: attack.attackerCharacterId,
       attackId: attack.id,
-      weaponName: attack.weaponName,
+      weaponName: preResolveReaction ? "Strike" : attack.weaponName,
       rangeAtAttack: attack.rangeAtAttack ?? null,
     };
-    const nextTargetFlags = replaceIncomingFlags(
-      targetFlags.filter((flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG),
-      incoming,
-      meta
-    );
+    const preppedTargetFlags = targetFlags.filter((flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG);
+    if (preResolveReaction) {
+      preppedTargetFlags.push(DODGED_FLAG);
+      preppedTargetFlags.push(PARRIED_FLAG);
+    }
+    const nextTargetFlags = replaceIncomingFlags(preppedTargetFlags, incoming, meta);
     const nextAttackerFlags = attackerFlags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
     const nextEntries = entries.map((entry, index) => {
       if (index === targetIndex) {
@@ -1644,15 +1665,26 @@ export default function Dashboard() {
       !attack.skipReaction &&
       successes > 0 &&
       reactionEligibleManeuvers.has(attack.maneuver);
-    if (attack.maneuver === "Slash" && !attack.skipReaction && successes > 0) {
+    if (isFlagFlowTriggerManeuver(attack.maneuver) && !attack.skipReaction && successes > 0) {
       const startedSlashFlow = await beginSlashIncomingDamageFlow(attack, successes);
       if (startedSlashFlow) {
+        if (attack.maneuver === "Grapple Attack") {
+          await resolveMeleeAttack({
+            ...attack,
+            maneuver: "Strike",
+            weaponName: "Strike",
+            skipReaction: true,
+            slashFlow: true,
+          });
+        }
         return;
       }
     }
-    if (attack.maneuver === "Slash" && attack.slashFlow) {
+    if (isFlagFlowManeuver(attack.maneuver) && attack.slashFlow) {
       const slashState = await loadSlashFlowState(attack.targetCharacterId);
       if (!slashState) return;
+      const flowManeuver = flagFlowManeuverFromIncoming(slashState.incoming);
+      if (flowManeuver !== attack.maneuver) return;
       const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
       const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
       if (!hasDodged || !hasParried) return;
@@ -2731,9 +2763,11 @@ export default function Dashboard() {
       }
     }
 
-    if (attack.maneuver === "Slash" && attack.slashFlow) {
+    if (isFlagFlowManeuver(attack.maneuver) && attack.slashFlow) {
       const slashState = await loadSlashFlowState(attack.targetCharacterId);
       if (!slashState) return;
+      const flowManeuver = flagFlowManeuverFromIncoming(slashState.incoming);
+      if (flowManeuver !== attack.maneuver) return;
       const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
       const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
       if (!hasDodged || !hasParried) return;
@@ -2770,7 +2804,7 @@ export default function Dashboard() {
           targetCharacterId: attack.targetCharacterId,
           weaponName: slashState.meta.weaponName,
           weaponBaseDamage: Math.max(0, slashState.incoming.totalDamage),
-          maneuver: "Slash",
+          maneuver: flowManeuver,
           totalSuccesses: 1,
           requiredSuccesses: 1,
           swingBonusDamage: 0,
@@ -3241,14 +3275,18 @@ export default function Dashboard() {
 
     const slashState = await loadSlashFlowState(roll.targetCharacterId);
     const isSlashFlow =
-      roll.attack.maneuver === "Slash" &&
+      isFlagFlowManeuver(roll.attack.maneuver) &&
       Boolean(slashState) &&
-      slashState!.incoming.type === "Slash" &&
+      flagFlowManeuverFromIncoming(slashState!.incoming) === roll.attack.maneuver &&
       slashState!.meta.attackId === roll.attack.id;
 
     if (isSlashFlow && slashState) {
+      const flowManeuver = flagFlowManeuverFromIncoming(slashState.incoming);
       let nextIncoming: IncomingDamageFlag = slashState.incoming;
       let nextTargetFlags = [...slashState.targetFlags];
+      let nextTargetProne = Boolean(slashState.targetEntry.prone);
+      let nextTargetFastAvailable = slashState.targetEntry.fast_available;
+      let nextTargetFastFootworkUsed = Boolean(slashState.targetEntry.fast_footwork_dodge_used);
 
       if (roll.rollType === "reaction") {
         if (roll.mode !== "pass") {
@@ -3276,6 +3314,9 @@ export default function Dashboard() {
               console.error("Failed to consume Fast Footwork dodge:", freeDodgeError);
             } else {
               usedFreeDodge = Boolean(freeDodgeData);
+              if (usedFreeDodge) {
+                nextTargetFastFootworkUsed = true;
+              }
             }
           }
 
@@ -3285,6 +3326,8 @@ export default function Dashboard() {
             });
             if (consumeError) {
               console.error("Failed to consume reaction action:", consumeError);
+            } else {
+              nextTargetFastAvailable = false;
             }
           }
 
@@ -3295,6 +3338,8 @@ export default function Dashboard() {
             });
             if (proneError) {
               console.error("Failed to apply prone from reaction:", proneError);
+            } else {
+              nextTargetProne = true;
             }
           }
         }
@@ -3330,6 +3375,9 @@ export default function Dashboard() {
           ? {
               ...entry,
               used_item_flags: normalizeFlagList(nextTargetFlags),
+              fast_available: nextTargetFastAvailable,
+              fast_footwork_dodge_used: nextTargetFastFootworkUsed,
+              prone: nextTargetProne,
             }
           : entry
       );
@@ -3376,7 +3424,7 @@ export default function Dashboard() {
           targetCharacterId: roll.targetCharacterId,
           weaponName: slashState.meta.weaponName,
           weaponBaseDamage: Math.max(0, nextIncoming.totalDamage),
-          maneuver: "Slash",
+          maneuver: flowManeuver,
           totalSuccesses: Math.max(0, nextIncoming.successes),
           requiredSuccesses: 1,
           swingBonusDamage: 0,
@@ -3410,7 +3458,7 @@ export default function Dashboard() {
         targetCharacterId: roll.targetCharacterId,
         weaponName: slashState.meta.weaponName,
         weaponBaseDamage: Math.max(0, nextIncoming.totalDamage),
-        maneuver: "Slash",
+        maneuver: flowManeuver,
         totalSuccesses: 1,
         requiredSuccesses: 1,
         swingBonusDamage: 0,

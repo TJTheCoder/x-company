@@ -703,7 +703,7 @@ export default function Combat({
   const slashIncomingDamage = useMemo(() => {
     const record = findIncomingDamageFlag(actorUsedItemFlagList);
     if (!record) return null;
-    if (record.value.type !== "Slash") return null;
+    if (record.value.type !== "Slash" && record.value.type !== "Stab" && record.value.type !== "Strike") return null;
     return record.value;
   }, [actorUsedItemFlagList]);
   const slashIncomingMeta = useMemo(() => {
@@ -743,13 +743,19 @@ export default function Combat({
         ));
   const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
     if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
+    const maneuver =
+      slashIncomingDamage.type === "Stab"
+        ? "Stab"
+        : slashIncomingDamage.type === "Strike"
+          ? "Strike"
+          : "Slash";
     return {
       id: slashIncomingMeta.attackId,
       attackerCharacterId: slashIncomingMeta.attackerTokenId,
       targetCharacterId: actorTokenId,
-      weaponName: slashIncomingMeta.weaponName || "Slash",
+      weaponName: slashIncomingMeta.weaponName || maneuver,
       weaponBaseDamage: Math.max(0, slashIncomingDamage.totalDamage),
-      maneuver: "Slash",
+      maneuver,
       totalSuccesses: Math.max(0, slashIncomingDamage.successes),
       requiredSuccesses: 1,
       swingBonusDamage: 0,
@@ -1248,12 +1254,34 @@ export default function Combat({
         }
 
         const sizeDelta = sizeForTokenId(actorTokenId) - sizeForTokenId(slashIncomingMeta?.attackerTokenId);
+        const incomingManeuver =
+          slashIncomingDamage?.type === "Stab"
+            ? "Stab"
+            : slashIncomingDamage?.type === "Strike"
+              ? "Strike"
+              : "Slash";
+        const dodgeStandingBonus = incomingManeuver === "Slash" ? 0 : -2;
+        const dodgeProneBonus = incomingManeuver === "Slash" ? 2 : 0;
         const maneuverBonus =
           mode === "parry"
-            ? (parryItem?.kind === "shield" ? 0 : 0) + sizeDelta
+            ? parryItem
+              ? parryItem.kind === "weapon"
+                ? incomingManeuver === "Stab"
+                  ? -2
+                  : incomingManeuver === "Strike"
+                    ? 2
+                    : 0
+                : incomingManeuver === "Stab" || incomingManeuver === "Strike"
+                  ? 2
+                  : 0
+              : 0
             : 0;
         const bonusDice =
-          mode === "dodge-stand" ? 0 : mode === "dodge-prone" ? 2 : maneuverBonus;
+          mode === "dodge-stand"
+            ? dodgeStandingBonus
+            : mode === "dodge-prone"
+              ? dodgeProneBonus
+              : maneuverBonus + sizeDelta;
         const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
 
         if (!slashReactionTargetIsMonster && onQueueReactionRoll) {
@@ -1517,6 +1545,7 @@ export default function Combat({
       slashCanDodgeReaction,
       slashCanParryReaction,
       sizeForTokenId,
+      slashIncomingDamage,
       slashIncomingMeta,
       slashReactionTargetIsMonster,
       currentEntry,
@@ -6758,7 +6787,17 @@ export default function Combat({
                 <p className="text-sm text-amber-200/80">
                   Incoming:{" "}
                   {slashReactionPhase
-                    ? `Slash (${slashIncomingMeta?.weaponName || "Slash"})`
+                    ? `${
+                        slashIncomingDamage?.type === "Stab"
+                          ? "Stab"
+                          : slashIncomingDamage?.type === "Strike"
+                            ? "Strike"
+                            : "Slash"
+                      } (${slashIncomingMeta?.weaponName || (slashIncomingDamage?.type === "Stab"
+                        ? "Stab"
+                        : slashIncomingDamage?.type === "Strike"
+                          ? "Strike"
+                          : "Slash")})`
                     : `${pendingReaction?.maneuver || "Attack"} (${pendingReaction?.weaponName || "Weapon"})`}
                 </p>
                 <p className="text-xs text-amber-200/70">

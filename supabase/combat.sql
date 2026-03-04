@@ -1859,6 +1859,90 @@ $$;
 
 grant execute on function public.combat_use_reaction_action(text) to authenticated;
 
+create or replace function public.combat_update_flow_state(
+  p_initiative_entries jsonb,
+  p_initiative_current_index int,
+  p_actor_token_id text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_existing_entries jsonb;
+  v_actor_entry jsonb;
+  v_actor_idx int;
+  v_actor_kind text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_initiative_entries is null or jsonb_typeof(p_initiative_entries) <> 'array' then
+    raise exception 'initiative entries payload is required';
+  end if;
+
+  select coalesce(initiative_entries, '[]'::jsonb)
+  into v_existing_entries
+  from public.combat_state
+  where id = 1
+  for update;
+
+  if not v_is_dm then
+    if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+      raise exception 'Actor token is required';
+    end if;
+
+    select e.ord - 1, e.entry
+    into v_actor_idx, v_actor_entry
+    from jsonb_array_elements(v_existing_entries) with ordinality as e(entry, ord)
+    where e.entry->>'participant_id' = p_actor_token_id
+       or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+    order by e.ord
+    limit 1;
+
+    if v_actor_idx is null then
+      raise exception 'Actor participant not found';
+    end if;
+
+    v_actor_kind := coalesce(v_actor_entry->>'kind', '');
+    if v_actor_kind <> 'player' then
+      raise exception 'Only player characters can update flow state';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'Only player characters can update flow state';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only update flow state for your own character';
+    end if;
+  end if;
+
+  update public.combat_state
+  set initiative_entries = p_initiative_entries,
+      initiative_current_index = case
+        when p_initiative_current_index is null then initiative_current_index
+        else p_initiative_current_index
+      end,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_update_flow_state(jsonb, int, text) to authenticated;
+
 create or replace function public.combat_consume_fast_footwork_dodge(
   p_actor_token_id text
 )

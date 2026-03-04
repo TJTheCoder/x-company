@@ -1150,7 +1150,11 @@ export default function Dashboard() {
           if (participantId !== tokenId && participantId !== `player:${tokenId}`) return entry;
           return { ...entry, prone: true };
         });
-        await supabase.from("combat_state").update({ initiative_entries: nextEntries }).eq("id", 1);
+        await supabase.rpc("combat_update_flow_state", {
+          p_initiative_entries: nextEntries,
+          p_initiative_current_index: null,
+          p_actor_token_id: tokenId,
+        });
       }
     }
     return {
@@ -1437,16 +1441,15 @@ export default function Dashboard() {
 
   const updateSlashFlowState = async (
     entries: SlashFlowCombatEntry[],
-    currentIndex: number | null
+    currentIndex: number | null,
+    actorTokenId: string
   ): Promise<boolean> => {
     const supabase = createClient();
-    const { error } = await supabase
-      .from("combat_state")
-      .update({
-        initiative_entries: entries,
-        initiative_current_index: currentIndex,
-      })
-      .eq("id", 1);
+    const { error } = await supabase.rpc("combat_update_flow_state", {
+      p_initiative_entries: entries,
+      p_initiative_current_index: currentIndex,
+      p_actor_token_id: actorTokenId,
+    });
     if (error) {
       console.error("Failed to update slash flow state:", error);
       return false;
@@ -1649,13 +1652,11 @@ export default function Dashboard() {
       return entry;
     });
 
-    const { error: updateError } = await supabase
-      .from("combat_state")
-      .update({
-        initiative_entries: nextEntries,
-        initiative_current_index: targetIndex,
-      })
-      .eq("id", 1);
+    const { error: updateError } = await supabase.rpc("combat_update_flow_state", {
+      p_initiative_entries: nextEntries,
+      p_initiative_current_index: targetIndex,
+      p_actor_token_id: params.attackerTokenId,
+    });
     if (updateError) {
       console.error("Failed to initialize incoming flow:", updateError);
       return false;
@@ -1868,7 +1869,11 @@ export default function Dashboard() {
               }
             : entry
         );
-        const updated = await updateSlashFlowState(nextEntries, slashState.currentIndex);
+        const updated = await updateSlashFlowState(
+          nextEntries,
+          slashState.currentIndex,
+          attack.attackerCharacterId
+        );
         if (!updated) return;
       }
     }
@@ -2963,7 +2968,11 @@ export default function Dashboard() {
       const incomingHasDamageTotal = slashState.incoming.totalDamage !== null;
       if (!incomingHasDamageTotal || protectionOptions.length === 0) {
         const clearedEntries = clearSlashFlowFlags(stateAfterArts, protectionOptions);
-        const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+        const updated = await updateSlashFlowState(
+          clearedEntries,
+          slashState.attackerIndex,
+          slashState.meta.attackerTokenId
+        );
         if (!updated) return;
         await resolveMeleeAttack({
           id: slashState.meta.attackId,
@@ -2985,7 +2994,7 @@ export default function Dashboard() {
         });
         return;
       }
-      await updateSlashFlowState(nextEntries, slashState.targetIndex);
+      await updateSlashFlowState(nextEntries, slashState.targetIndex, slashState.meta.attackerTokenId);
       return;
     }
 
@@ -3583,7 +3592,7 @@ export default function Dashboard() {
           stateForClear.targetEntry
         );
         const clearedEntries = clearSlashFlowFlags(stateForClear, protectionOptions);
-        await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+        await updateSlashFlowState(clearedEntries, slashState.attackerIndex, roll.targetCharacterId);
         return;
       }
 
@@ -3591,13 +3600,13 @@ export default function Dashboard() {
       const hasDodged = stateAfterUpdate.targetFlags.includes(DODGED_FLAG);
       const hasParried = stateAfterUpdate.targetFlags.includes(PARRIED_FLAG);
       if (!hasDodged || !hasParried) {
-        await updateSlashFlowState(nextEntries, slashState.targetIndex);
+        await updateSlashFlowState(nextEntries, slashState.targetIndex, roll.targetCharacterId);
         return;
       }
 
       const attackerHasArtsChosen = stateAfterUpdate.attackerFlags.includes(ARTS_CHOSEN_FLAG);
       if (!attackerHasArtsChosen) {
-        const updated = await updateSlashFlowState(nextEntries, slashState.attackerIndex);
+        const updated = await updateSlashFlowState(nextEntries, slashState.attackerIndex, roll.targetCharacterId);
         if (!updated) return;
         await resolveMeleeAttack({
           id: slashState.meta.attackId,
@@ -3627,12 +3636,12 @@ export default function Dashboard() {
         protectionOptions.length === 0 ||
         protectionOptions.every((option) => usedFlagSet.has(usedItemFlagForName(option.itemName)));
       if (!allProtectionUsed) {
-        await updateSlashFlowState(nextEntries, slashState.targetIndex);
+        await updateSlashFlowState(nextEntries, slashState.targetIndex, roll.targetCharacterId);
         return;
       }
 
       const clearedEntries = clearSlashFlowFlags(stateAfterUpdate, protectionOptions);
-      const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex);
+      const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex, roll.targetCharacterId);
       if (!updated) return;
 
       await resolveMeleeAttack({

@@ -126,6 +126,12 @@ const parseArtCost = (cost: string): ParsedArtCost => {
   return { minSuccesses: 0, hasScaling: false, scaleStep: 0 };
 };
 
+const tokenIdFromParticipantId = (participantId: string | null | undefined): string | null => {
+  const raw = String(participantId || "").trim();
+  if (!raw) return null;
+  return raw.startsWith("player:") ? raw.slice("player:".length) : raw;
+};
+
 type GroupedItemDisplay = {
   key: string;
   label: string;
@@ -270,7 +276,7 @@ export default function Combat({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const draggedTokenRef = useRef<string | null>(null);
 
-  const isDmUser = isDM && userEmail === DM_EMAIL;
+  const isDmUser = isDM && normalizeEmail(userEmail || "") === normalizeEmail(DM_EMAIL);
   const isDmViewer = isDM;
   const canDraw = isDmUser && !!mapUrl && !!imageRect;
   const playerEntries = useMemo<InitiativeEntry[]>(
@@ -315,9 +321,13 @@ export default function Combat({
     initiativeCurrentIndex < displayedInitiativeEntries.length
       ? displayedInitiativeEntries[initiativeCurrentIndex]
       : null;
+  const currentEntryTokenId = useMemo(
+    () => tokenIdFromParticipantId(currentEntry?.participant_id),
+    [currentEntry]
+  );
   const actorCharacter =
-    currentEntry?.kind === "player" && currentEntry.user_email
-      ? characters.find((char) => normalizeEmail(char.email) === normalizeEmail(currentEntry.user_email)) || null
+    currentEntry?.kind === "player" && currentEntryTokenId
+      ? characters.find((char) => char.id === currentEntryTokenId) || null
       : null;
   const monsterByParticipantId = useMemo(() => {
     const map = new Map<string, InitiativeMonster>();
@@ -413,11 +423,7 @@ export default function Combat({
     }
     return map;
   }, [initiativeEntries]);
-  const actorTokenId = useMemo(() => {
-    if (!currentEntry) return null;
-    if (currentEntry.kind === "monster") return currentEntry.participant_id;
-    return actorCharacter?.id ?? null;
-  }, [currentEntry, actorCharacter]);
+  const actorTokenId = currentEntryTokenId;
   const currentUserTokenId = isDmUser ? null : character?.id ?? null;
   const actorTokenCharacter = actorTokenId ? characters.find((char) => char.id === actorTokenId) || null : null;
   const tokenStateById = useMemo(() => {
@@ -776,7 +782,7 @@ export default function Combat({
     Boolean(actorTokenId) &&
     (currentEntry?.kind === "monster"
       ? isDmViewer
-      : Boolean(userEmail && normalizeEmail(currentEntry?.user_email || "") === normalizeEmail(userEmail)));
+      : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
   const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
     if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
     const maneuver = flowManeuverForIncomingType(slashIncomingDamage.type);
@@ -1853,11 +1859,11 @@ export default function Combat({
       combatMode &&
       Boolean(actorTokenId) &&
       pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId);
-    if (!currentEntry || !userEmail) return false;
+    if (!currentEntry) return false;
     if (attackerTurnLockedByReaction) return false;
     if (isDmUser) return currentEntry.kind === "monster";
-    return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
-  }, [currentEntry, isDmUser, userEmail, combatMode, actorTokenId, pendingReactions]);
+    return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
+  }, [currentEntry, isDmUser, currentUserTokenId, combatMode, actorTokenId, pendingReactions]);
   const rangeBetweenTokens = useCallback(
     (sourceTokenId: string | null | undefined, targetTokenId: string | null | undefined): CombatRange | null => {
       if (!sourceTokenId || !targetTokenId || sourceTokenId === targetTokenId) return null;
@@ -2520,7 +2526,7 @@ export default function Combat({
   }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
 
   const canPass = useMemo(() => {
-    if (!currentEntry || !userEmail) return false;
+    if (!currentEntry) return false;
     if (
       combatMode &&
       actorTokenId &&
@@ -2529,8 +2535,8 @@ export default function Combat({
       return false;
     }
     if (isDmUser) return currentEntry.kind === "monster";
-    return normalizeEmail(currentEntry.user_email) === normalizeEmail(userEmail);
-  }, [currentEntry, userEmail, isDmUser, combatMode, actorTokenId, pendingReactions]);
+    return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
+  }, [currentEntry, currentUserTokenId, isDmUser, combatMode, actorTokenId, pendingReactions]);
   const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {
     if (!currentEntry) return null;
     if (currentEntry.kind === "player") {
@@ -2639,12 +2645,12 @@ export default function Combat({
     if (
       currentEntry.kind === "player" &&
       !isDmUser &&
-      (!selectedTokenCharacter || !userEmail || normalizeEmail(selectedTokenCharacter.email) !== normalizeEmail(userEmail))
+      (!currentUserTokenId || selectedTokenId !== currentUserTokenId)
     ) {
       return false;
     }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, selectedTokenCharacter, userEmail, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, currentUserTokenId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
 
   const meleeActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || (isActorProne && !actorHardLockedByHold)) {

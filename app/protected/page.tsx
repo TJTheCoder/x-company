@@ -2850,6 +2850,7 @@ export default function Dashboard() {
             !Boolean(attackerEntry.covered) &&
             !Boolean(attackerEntry.dead) &&
             !attackerHeld;
+          const attackerFastAvailable = attackerEntry.fast_available !== false;
           let attackerHasSunder = false;
           let attackerHasLaggingBlade = false;
           let attackerSpirits = 0;
@@ -2890,7 +2891,12 @@ export default function Dashboard() {
           if (attackerCanAct && !attackerBroken) {
             const options: PendingArtPromptOption[] = [];
 
-            if (canResolveSunder && attackerHasSunder && attackerSpirits >= sunderMinSpirit) {
+            if (
+              canResolveSunder &&
+              attackerHasSunder &&
+              attackerFastAvailable &&
+              attackerSpirits >= sunderMinSpirit
+            ) {
               let sunderTargets: Array<{
                 itemId: string;
                 itemName: string;
@@ -3985,6 +3991,59 @@ export default function Dashboard() {
     clearPendingArtPrompt(promptId);
 
     if (selected.kind === "sunder") {
+      const supabase = createClient();
+      const { data: combatState, error: stateError } = await supabase
+        .from("combat_state")
+        .select("initiative_entries, initiative_current_index")
+        .eq("id", 1)
+        .maybeSingle<{
+          initiative_entries: SlashFlowCombatEntry[] | null;
+          initiative_current_index: number | null;
+        }>();
+      const entries = Array.isArray(combatState?.initiative_entries) ? combatState!.initiative_entries : [];
+      const attackerIndex = entries.findIndex((entry) =>
+        tokenMatchesParticipant(entry.participant_id, prompt.attackerCharacterId)
+      );
+      const attackerEntry = attackerIndex >= 0 ? entries[attackerIndex] : null;
+
+      if (stateError || !attackerEntry || attackerEntry.fast_available === false) {
+        if (stateError) {
+          console.error("Failed to load combat state before sunder:", stateError);
+        } else {
+          console.error("Cannot resolve sunder without an available fast action.");
+        }
+        await resolveMeleeAttack({
+          ...prompt.attack,
+          sunderResolved: true,
+          laggingBladeResolved: true,
+          skipReaction: true,
+        });
+        return;
+      }
+      const nextEntries = entries.map((entry, index) =>
+        index === attackerIndex
+          ? {
+              ...entry,
+              fast_available: false,
+            }
+          : entry
+      );
+      const { error: consumeError } = await supabase.rpc("combat_update_flow_state", {
+        p_initiative_entries: nextEntries,
+        p_initiative_current_index: combatState?.initiative_current_index ?? null,
+        p_actor_token_id: prompt.attackerCharacterId,
+      });
+      if (consumeError) {
+        console.error("Failed to consume fast action for sunder:", consumeError);
+        await resolveMeleeAttack({
+          ...prompt.attack,
+          sunderResolved: true,
+          laggingBladeResolved: true,
+          skipReaction: true,
+        });
+        return;
+      }
+
       queueArtRoll({
         id: `art-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
         actorCharacterId: prompt.attackerCharacterId,

@@ -438,18 +438,48 @@ export default function Combat({
         mentalBrokenAttrs: string[];
       }
     >();
+    // Seed from persisted records so Dead/Broken survives initiative reset.
+    for (const character of characters) {
+      const p = getPhysicalBrokenAttributes(character.attributes);
+      const m = getMentalBrokenAttributes(character.attributes);
+      map.set(character.id, {
+        dead: Boolean(character.dead),
+        physicalBroken: p.length > 0,
+        mentalBroken: m.length > 0,
+        physicalBrokenAttrs: p,
+        mentalBrokenAttrs: m,
+      });
+    }
+    for (const monster of initiativeMonsters) {
+      const snap = monster.monster_snapshot || null;
+      const p = getPhysicalBrokenAttributes({ STR: snap?.str, AGL: snap?.agl });
+      const m = getMentalBrokenAttributes({ WIT: snap?.wit, EMP: snap?.emp });
+      map.set(monster.id, {
+        dead: Boolean(snap?.dead),
+        physicalBroken: p.length > 0,
+        mentalBroken: m.length > 0,
+        physicalBrokenAttrs: p,
+        mentalBrokenAttrs: m,
+      });
+    }
+
     for (const entry of initiativeEntries) {
       const tokenId =
         entry.kind === "player" ? entry.participant_id.replace(/^player:/, "") : entry.participant_id;
       if (!tokenId) continue;
+      const existing = map.get(tokenId);
       if (entry.kind === "player") {
         const c = characterById.get(tokenId);
-        const p = getPhysicalBrokenAttributes(c?.attributes);
-        const m = getMentalBrokenAttributes(c?.attributes);
+        const p = c
+          ? getPhysicalBrokenAttributes(c.attributes)
+          : existing?.physicalBrokenAttrs || [];
+        const m = c
+          ? getMentalBrokenAttributes(c.attributes)
+          : existing?.mentalBrokenAttrs || [];
         map.set(tokenId, {
-          dead: Boolean(c?.dead || entry.dead),
-          physicalBroken: p.length > 0,
-          mentalBroken: m.length > 0,
+          dead: Boolean(existing?.dead || c?.dead || entry.dead),
+          physicalBroken: Boolean(existing?.physicalBroken) || p.length > 0,
+          mentalBroken: Boolean(existing?.mentalBroken) || m.length > 0,
           physicalBrokenAttrs: p,
           mentalBrokenAttrs: m,
         });
@@ -458,16 +488,16 @@ export default function Combat({
         const p = getPhysicalBrokenAttributes({ STR: snap?.str, AGL: snap?.agl });
         const m = getMentalBrokenAttributes({ WIT: snap?.wit, EMP: snap?.emp });
         map.set(tokenId, {
-          dead: Boolean(entry.dead || snap?.dead),
-          physicalBroken: p.length > 0,
-          mentalBroken: m.length > 0,
+          dead: Boolean(existing?.dead || entry.dead || snap?.dead),
+          physicalBroken: Boolean(existing?.physicalBroken) || p.length > 0,
+          mentalBroken: Boolean(existing?.mentalBroken) || m.length > 0,
           physicalBrokenAttrs: p,
           mentalBrokenAttrs: m,
         });
       }
     }
     return map;
-  }, [initiativeEntries, characterById, monsterByParticipantId]);
+  }, [initiativeEntries, characters, initiativeMonsters, characterById, monsterByParticipantId]);
   const currentUserEntry = useMemo(() => {
     if (!currentUserTokenId) return null;
     return (
@@ -6857,7 +6887,8 @@ export default function Combat({
           </div>
         </div>
       )}
-      {shouldShowArmorPrompt && activeArmorPrompt && (
+      {/* Never render armor selection while an art selection prompt is active. */}
+      {!shouldShowArtPrompt && shouldShowArmorPrompt && activeArmorPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">

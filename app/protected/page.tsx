@@ -3837,6 +3837,7 @@ export default function Dashboard() {
     if (context.sunder) {
       const sunderContext = context.sunder;
       const sunderDamage = Math.max(0, roll.successes);
+      let sunderApplied = sunderDamage <= 0;
       if (sunderDamage > 0) {
         if (sunderContext.targetIsMonster) {
           const { data: combatState, error: combatError } = await supabase
@@ -3870,6 +3871,13 @@ export default function Dashboard() {
             if (snapshot) {
               const sourceGear = snapshot.gear || [];
               const nextGear = applyGearDamageToItem(sourceGear, sunderContext.targetItemId, sunderDamage);
+              const sourceTarget = sourceGear.find((item) => item.id === sunderContext.targetItemId) || null;
+              const nextTarget = nextGear.find((item) => item.id === sunderContext.targetItemId) || null;
+              const gearAdjusted = sourceTarget
+                ? !nextTarget ||
+                  Math.max(0, Math.trunc(nextTarget.gearBonus ?? 0)) <
+                    Math.max(0, Math.trunc(sourceTarget.gearBonus ?? 0))
+                : false;
               const destroyed = !nextGear.some((item) => item.id === sunderContext.targetItemId);
               const nextSlots = destroyed
                 ? clearDestroyedItemSlots(
@@ -3901,15 +3909,21 @@ export default function Dashboard() {
                   },
                 };
               });
-              const { error: updateError } = await supabase
+              const { data: updatedCombatState, error: updateError } = await supabase
                 .from("combat_state")
                 .update({
                   initiative_monsters: nextMonsters,
                   initiative_entries: nextEntries,
                 })
-                .eq("id", 1);
-              if (updateError) {
-                console.error("Failed to apply sunder to monster gear:", updateError);
+                .eq("id", 1)
+                .select("id")
+                .maybeSingle<{ id: number }>();
+              if (updateError || !updatedCombatState) {
+                if (updateError) {
+                  console.error("Failed to apply sunder to monster gear:", updateError);
+                } else {
+                  console.error("Failed to apply sunder to monster gear: no rows were updated.");
+                }
                 const { error: fallbackError } = await supabase.rpc("combat_update_flow_state", {
                   p_initiative_entries: nextEntries,
                   p_initiative_current_index: combatState?.initiative_current_index ?? null,
@@ -3917,7 +3931,11 @@ export default function Dashboard() {
                 });
                 if (fallbackError) {
                   console.error("Failed to apply sunder to monster gear via flow-state fallback:", fallbackError);
+                } else {
+                  sunderApplied = gearAdjusted;
                 }
+              } else {
+                sunderApplied = gearAdjusted;
               }
             }
           }
@@ -3938,6 +3956,13 @@ export default function Dashboard() {
           } else {
             const sourceInventory = target.inventory || [];
             const nextInventory = applyGearDamageToItem(sourceInventory, sunderContext.targetItemId, sunderDamage);
+            const sourceTarget = sourceInventory.find((item) => item.id === sunderContext.targetItemId) || null;
+            const nextTarget = nextInventory.find((item) => item.id === sunderContext.targetItemId) || null;
+            const gearAdjusted = sourceTarget
+              ? !nextTarget ||
+                Math.max(0, Math.trunc(nextTarget.gearBonus ?? 0)) <
+                  Math.max(0, Math.trunc(sourceTarget.gearBonus ?? 0))
+              : false;
             const destroyed = !nextInventory.some((item) => item.id === sunderContext.targetItemId);
             const nextSlots = destroyed
               ? clearDestroyedItemSlots(
@@ -3946,17 +3971,29 @@ export default function Dashboard() {
                   sunderContext.targetItemName
                 )
               : target.equipment_slots || { left: null, right: null, armor: null, helmet: null };
-            const { error: updateError } = await supabase
+            const { data: updatedCharacter, error: updateError } = await supabase
               .from("characters")
               .update({ inventory: nextInventory, equipment_slots: nextSlots })
-              .eq("id", sunderContext.attack.targetCharacterId);
+              .eq("id", sunderContext.attack.targetCharacterId)
+              .select("id")
+              .maybeSingle<{ id: string }>();
             if (updateError) {
               console.error("Failed to apply sunder to character gear:", updateError);
+            } else if (!updatedCharacter) {
+              console.error("Failed to apply sunder to character gear: no rows were updated.");
             } else if (character?.id === sunderContext.attack.targetCharacterId) {
               updateCharacter({ inventory: nextInventory, equipment_slots: nextSlots });
+              sunderApplied = gearAdjusted;
+            } else {
+              sunderApplied = gearAdjusted;
             }
           }
         }
+      }
+
+      if (!sunderApplied) {
+        console.error("Sunder did not resolve correctly; halting follow-up attack resolution.");
+        return;
       }
 
       await resolveMeleeAttack({
@@ -4021,12 +4058,7 @@ export default function Dashboard() {
         } else {
           console.error("Cannot resolve sunder without an available fast action.");
         }
-        await resolveMeleeAttack({
-          ...prompt.attack,
-          sunderResolved: true,
-          laggingBladeResolved: true,
-          skipReaction: true,
-        });
+        setPendingArtPrompt(prompt);
         return;
       }
       const nextEntries = entries.map((entry, index) =>
@@ -4044,12 +4076,7 @@ export default function Dashboard() {
       });
       if (consumeError) {
         console.error("Failed to consume fast action for sunder:", consumeError);
-        await resolveMeleeAttack({
-          ...prompt.attack,
-          sunderResolved: true,
-          laggingBladeResolved: true,
-          skipReaction: true,
-        });
+        setPendingArtPrompt(prompt);
         return;
       }
 

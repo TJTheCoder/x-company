@@ -3836,16 +3836,17 @@ export default function Dashboard() {
 
     if (context.sunder) {
       const sunderContext = context.sunder;
-      const sunderDamage = Math.max(0, roll.scaling);
+      const sunderDamage = Math.max(0, roll.successes);
       if (sunderDamage > 0) {
         if (sunderContext.targetIsMonster) {
           const { data: combatState, error: combatError } = await supabase
             .from("combat_state")
-            .select("initiative_monsters, initiative_entries")
+            .select("initiative_monsters, initiative_entries, initiative_current_index")
             .eq("id", 1)
             .maybeSingle<{
               initiative_monsters: Array<{ id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
               initiative_entries: Array<{ participant_id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+              initiative_current_index?: number | null;
             }>();
           if (combatError || !combatState) {
             if (combatError) {
@@ -3909,6 +3910,14 @@ export default function Dashboard() {
                 .eq("id", 1);
               if (updateError) {
                 console.error("Failed to apply sunder to monster gear:", updateError);
+                const { error: fallbackError } = await supabase.rpc("combat_update_flow_state", {
+                  p_initiative_entries: nextEntries,
+                  p_initiative_current_index: combatState?.initiative_current_index ?? null,
+                  p_actor_token_id: sunderContext.attack.attackerCharacterId,
+                });
+                if (fallbackError) {
+                  console.error("Failed to apply sunder to monster gear via flow-state fallback:", fallbackError);
+                }
               }
             }
           }

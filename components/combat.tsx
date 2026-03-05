@@ -7050,7 +7050,7 @@ export default function Combat({
         </div>
         {incomingPipelineActive && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
           <div className="mb-3 rounded border border-orange-500/40 bg-orange-900/20 px-3 py-2 text-xs text-orange-200/90">
-            Incoming resolution in progress. Complete Reaction, Arts, and Armor before taking other actions.
+            Reactions in stack. Please wait for resolution.
           </div>
         )}
         <div className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">

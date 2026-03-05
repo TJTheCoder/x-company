@@ -105,6 +105,26 @@ create trigger trg_monsters_updated_at
 before update on public.monsters
 for each row execute function public.combat_set_updated_at();
 
+create or replace function public.combat_force_mode_off_when_empty()
+returns trigger
+language plpgsql
+as $$
+begin
+  if coalesce(new.combat_mode, false) = true and (
+    jsonb_typeof(coalesce(new.initiative_entries, '[]'::jsonb)) <> 'array'
+    or jsonb_array_length(coalesce(new.initiative_entries, '[]'::jsonb)) = 0
+  ) then
+    new.combat_mode = false;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_combat_force_mode_off_when_empty on public.combat_state;
+create trigger trg_combat_force_mode_off_when_empty
+before update of initiative_entries, combat_mode on public.combat_state
+for each row execute function public.combat_force_mode_off_when_empty();
+
 alter table public.combat_state enable row level security;
 alter table public.monsters enable row level security;
 

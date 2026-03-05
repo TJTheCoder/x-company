@@ -16,6 +16,7 @@ export type IncomingDamageMeta = {
   attackerTokenId: string;
   attackId: string;
   weaponName: string;
+  weaponBaseDamage?: number | null;
   rangeAtAttack: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   disarmTargetItemId?: string | null;
   disarmZoneId?: number | null;
@@ -102,6 +103,11 @@ export const buildIncomingDamageMetaFlag = (meta: IncomingDamageMeta): string =>
     encodePart(meta.attackerTokenId || ""),
     encodePart(meta.attackId || ""),
     encodePart(meta.weaponName || ""),
+    encodePart(
+      typeof meta.weaponBaseDamage === "number" && Number.isFinite(meta.weaponBaseDamage)
+        ? String(clampInt(meta.weaponBaseDamage))
+        : ""
+    ),
     encodePart(meta.rangeAtAttack || ""),
     encodePart(meta.disarmTargetItemId || ""),
     encodePart(
@@ -117,15 +123,24 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
   const raw = String(flag || "").trim();
   if (!raw.startsWith(INCOMING_META_PREFIX) || !raw.endsWith(")")) return null;
   const body = raw.slice(INCOMING_META_PREFIX.length, -1);
-  const [attackerPart, attackPart, weaponPart, rangePart, disarmItemPart, disarmZonePart] = body.split("|");
+  const parts = body.split("|");
+  const [attackerPart, attackPart, weaponPart, p4, p5, p6, p7] = parts;
   if (!attackerPart || !attackPart) return null;
+  const hasWeaponBase = parts.length >= 7;
+  const weaponBasePart = hasWeaponBase ? p4 : "";
+  const rangePart = hasWeaponBase ? p5 : p4;
+  const disarmItemPart = hasWeaponBase ? p6 : p5;
+  const disarmZonePart = hasWeaponBase ? p7 : p6;
+  const weaponBaseValue = decodePart(weaponBasePart || "").trim();
   const disarmItemValue = decodePart(disarmItemPart || "").trim();
   const disarmZoneValue = decodePart(disarmZonePart || "").trim();
+  const parsedWeaponBase = weaponBaseValue ? Number.parseInt(weaponBaseValue, 10) : Number.NaN;
   const parsedDisarmZone = disarmZoneValue ? Number.parseInt(disarmZoneValue, 10) : Number.NaN;
   return {
     attackerTokenId: decodePart(attackerPart),
     attackId: decodePart(attackPart),
     weaponName: decodePart(weaponPart || ""),
+    weaponBaseDamage: Number.isFinite(parsedWeaponBase) ? clampInt(parsedWeaponBase) : null,
     rangeAtAttack: parseRange(decodePart(rangePart || "")),
     disarmTargetItemId: disarmItemValue || null,
     disarmZoneId: Number.isFinite(parsedDisarmZone) ? Math.trunc(parsedDisarmZone) : null,

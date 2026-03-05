@@ -1190,6 +1190,7 @@ export default function Dashboard() {
         attackerTokenId: opts.sourceTokenId,
         attackId,
         weaponName: opts.sourceLabel || "Flame",
+        weaponBaseDamage: successes,
         rangeAtAttack: null,
         disarmTargetItemId: null,
         disarmZoneId: null,
@@ -1356,6 +1357,25 @@ export default function Dashboard() {
                 : incoming.type === "Feint"
                   ? "Feint"
             : "Slash";
+
+  const isNonDamagingIncomingManeuver = (maneuver: FlagFlowManeuver): boolean =>
+    maneuver === "Grapple" ||
+    maneuver === "Cling" ||
+    maneuver === "Shove" ||
+    maneuver === "Disarm" ||
+    maneuver === "Feint";
+
+  const resolveIncomingTotalDamage = (
+    incoming: IncomingDamageFlag,
+    meta: IncomingDamageMeta
+  ): number | null => {
+    const maneuver = flagFlowManeuverFromIncoming(incoming);
+    if (isNonDamagingIncomingManeuver(maneuver)) return null;
+    if (incoming.totalDamage !== null) return Math.max(0, incoming.totalDamage);
+    const baseDamage = Math.max(0, Math.trunc(meta.weaponBaseDamage ?? 0));
+    const successBonus = Math.max(0, Math.max(0, Math.trunc(incoming.successes)) - 1);
+    return baseDamage + successBonus;
+  };
 
   const tokenMatchesParticipant = (participantId: string | null | undefined, tokenId: string): boolean => {
     if (!participantId || !tokenId) return false;
@@ -1696,6 +1716,7 @@ export default function Dashboard() {
       attackerTokenId: attack.attackerCharacterId,
       attackId: attack.id,
       weaponName: preResolveReaction ? "Strike" : attack.weaponName,
+      weaponBaseDamage: Math.max(0, Math.trunc(attack.weaponBaseDamage ?? 0)),
       rangeAtAttack: attack.rangeAtAttack ?? null,
       disarmTargetItemId: attack.disarmTargetItemId ?? null,
       disarmZoneId: attack.disarmZoneId ?? null,
@@ -2336,15 +2357,27 @@ export default function Dashboard() {
         }
       }
 
+      const combatUpdate: {
+        initiative_entries: Array<{ participant_id: string }>;
+        initiative_current_index: number | null;
+        initiative_monsters: Array<{ id: string }>;
+        token_positions: Array<{ character_id: string }>;
+        engagements: Array<{ a: string; b: string }>;
+        combat_mode?: boolean;
+      } = {
+        initiative_entries: nextEntries,
+        initiative_current_index: nextCurrent,
+        initiative_monsters: nextMonsters,
+        token_positions: nextTokens,
+        engagements: nextEdges,
+      };
+      if (nextEntries.length === 0) {
+        combatUpdate.combat_mode = false;
+      }
+
       const { error: updateError } = await supabase
         .from("combat_state")
-        .update({
-          initiative_entries: nextEntries,
-          initiative_current_index: nextCurrent,
-          initiative_monsters: nextMonsters,
-          token_positions: nextTokens,
-          engagements: nextEdges,
-        })
+        .update(combatUpdate)
         .eq("id", 1);
       if (updateError) {
         console.error("Failed to remove participant from combat:", updateError);
@@ -2965,7 +2998,8 @@ export default function Dashboard() {
         attack.targetCharacterId,
         stateAfterArts.targetEntry
       );
-      const incomingHasDamageTotal = slashState.incoming.totalDamage !== null;
+      const resolvedIncomingTotalDamage = resolveIncomingTotalDamage(slashState.incoming, slashState.meta);
+      const incomingHasDamageTotal = resolvedIncomingTotalDamage !== null;
       if (!incomingHasDamageTotal || protectionOptions.length === 0) {
         const clearedEntries = clearSlashFlowFlags(stateAfterArts, protectionOptions);
         const updated = await updateSlashFlowState(
@@ -2979,7 +3013,7 @@ export default function Dashboard() {
           attackerCharacterId: slashState.meta.attackerTokenId,
           targetCharacterId: attack.targetCharacterId,
           weaponName: slashState.meta.weaponName,
-          weaponBaseDamage: Math.max(0, slashState.incoming.totalDamage ?? 0),
+          weaponBaseDamage: Math.max(0, resolvedIncomingTotalDamage ?? 0),
           maneuver: flowManeuver,
           totalSuccesses: incomingHasDamageTotal ? 1 : Math.max(0, slashState.incoming.successes),
           requiredSuccesses: 1,
@@ -3585,7 +3619,10 @@ export default function Dashboard() {
         };
       };
 
-      if (nextIncoming.totalDamage !== null && nextIncoming.totalDamage <= 0) {
+      const resolvedIncomingTotalDamage = resolveIncomingTotalDamage(nextIncoming, slashState.meta);
+      const incomingHasDamageTotal = resolvedIncomingTotalDamage !== null;
+
+      if (incomingHasDamageTotal && resolvedIncomingTotalDamage <= 0) {
         const stateForClear = refreshState();
         const protectionOptions = await resolveSlashProtectionOptions(
           roll.targetCharacterId,
@@ -3604,6 +3641,31 @@ export default function Dashboard() {
         return;
       }
 
+      if (!incomingHasDamageTotal) {
+        const clearedEntries = clearSlashFlowFlags(stateAfterUpdate, []);
+        const updated = await updateSlashFlowState(clearedEntries, slashState.attackerIndex, roll.targetCharacterId);
+        if (!updated) return;
+
+        await resolveMeleeAttack({
+          id: slashState.meta.attackId,
+          attackerCharacterId: slashState.meta.attackerTokenId,
+          targetCharacterId: roll.targetCharacterId,
+          weaponName: slashState.meta.weaponName,
+          weaponBaseDamage: 0,
+          maneuver: flowManeuver,
+          totalSuccesses: Math.max(0, nextIncoming.successes),
+          requiredSuccesses: 1,
+          swingBonusDamage: 0,
+          disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
+          disarmZoneId: slashState.meta.disarmZoneId ?? null,
+          rangeAtAttack: slashState.meta.rangeAtAttack,
+          skipReaction: true,
+          sunderResolved: true,
+          laggingBladeResolved: true,
+        });
+        return;
+      }
+
       const attackerHasArtsChosen = stateAfterUpdate.attackerFlags.includes(ARTS_CHOSEN_FLAG);
       if (!attackerHasArtsChosen) {
         const updated = await updateSlashFlowState(nextEntries, slashState.attackerIndex, roll.targetCharacterId);
@@ -3613,7 +3675,7 @@ export default function Dashboard() {
           attackerCharacterId: slashState.meta.attackerTokenId,
           targetCharacterId: roll.targetCharacterId,
           weaponName: slashState.meta.weaponName,
-          weaponBaseDamage: Math.max(0, nextIncoming.totalDamage ?? 0),
+          weaponBaseDamage: Math.max(0, resolvedIncomingTotalDamage ?? 0),
           maneuver: flowManeuver,
           totalSuccesses: Math.max(0, nextIncoming.successes),
           requiredSuccesses: 1,
@@ -3649,17 +3711,17 @@ export default function Dashboard() {
         attackerCharacterId: slashState.meta.attackerTokenId,
         targetCharacterId: roll.targetCharacterId,
         weaponName: slashState.meta.weaponName,
-        weaponBaseDamage: Math.max(0, nextIncoming.totalDamage ?? 0),
+        weaponBaseDamage: Math.max(0, resolvedIncomingTotalDamage ?? 0),
         maneuver: flowManeuver,
         totalSuccesses:
-          nextIncoming.totalDamage === null ? Math.max(0, nextIncoming.successes) : 1,
+          incomingHasDamageTotal ? 1 : Math.max(0, nextIncoming.successes),
         requiredSuccesses: 1,
         swingBonusDamage: 0,
         disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
         disarmZoneId: slashState.meta.disarmZoneId ?? null,
         rangeAtAttack: slashState.meta.rangeAtAttack,
         skipReaction: true,
-        armorSkipped: nextIncoming.totalDamage !== null,
+        armorSkipped: incomingHasDamageTotal,
         sunderResolved: true,
         laggingBladeResolved: true,
       });

@@ -1863,39 +1863,42 @@ export default function Dashboard() {
     }
     if (isFlagFlowManeuver(attack.maneuver) && attack.slashFlow) {
       const slashState = await loadSlashFlowState(attack.targetCharacterId);
-      if (!slashState) return;
-      const flowManeuver = flagFlowManeuverFromIncoming(slashState.incoming);
-      if (flowManeuver !== attack.maneuver) return;
-      const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
-      const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
-      if (!hasDodged || !hasParried) return;
+      if (slashState) {
+        const flowManeuver = flagFlowManeuverFromIncoming(slashState.incoming);
+        if (flowManeuver !== attack.maneuver) return;
+        const hasDodged = slashState.targetFlags.includes(DODGED_FLAG);
+        const hasParried = slashState.targetFlags.includes(PARRIED_FLAG);
+        if (!hasDodged || !hasParried) return;
 
-      const nextSuccesses = Math.max(0, attack.totalSuccesses);
-      if (nextSuccesses !== slashState.incoming.successes) {
-        const delta = nextSuccesses - slashState.incoming.successes;
-        const nextIncoming: IncomingDamageFlag = {
-          ...slashState.incoming,
-          successes: nextSuccesses,
-          totalDamage:
-            slashState.incoming.totalDamage === null
-              ? null
-              : Math.max(0, slashState.incoming.totalDamage + delta),
-        };
-        const nextTargetFlags = replaceIncomingFlags(slashState.targetFlags, nextIncoming, slashState.meta);
-        const nextEntries = slashState.entries.map((entry, index) =>
-          index === slashState.targetIndex
-            ? {
-                ...entry,
-                used_item_flags: nextTargetFlags,
-              }
-            : entry
-        );
-        const updated = await updateSlashFlowState(
-          nextEntries,
-          slashState.currentIndex,
-          attack.attackerCharacterId
-        );
-        if (!updated) return;
+        const nextSuccesses = Math.max(0, attack.totalSuccesses);
+        if (nextSuccesses !== slashState.incoming.successes) {
+          const delta = nextSuccesses - slashState.incoming.successes;
+          const nextIncoming: IncomingDamageFlag = {
+            ...slashState.incoming,
+            successes: nextSuccesses,
+            totalDamage:
+              slashState.incoming.totalDamage === null
+                ? null
+                : Math.max(0, slashState.incoming.totalDamage + delta),
+          };
+          const nextTargetFlags = replaceIncomingFlags(slashState.targetFlags, nextIncoming, slashState.meta);
+          const nextEntries = slashState.entries.map((entry, index) =>
+            index === slashState.targetIndex
+              ? {
+                  ...entry,
+                  used_item_flags: nextTargetFlags,
+                }
+              : entry
+          );
+          const updated = await updateSlashFlowState(
+            nextEntries,
+            slashState.currentIndex,
+            attack.attackerCharacterId
+          );
+          if (!updated) return;
+        }
+      } else if (!attack.skipReaction) {
+        return;
       }
     }
     const attackerHasLitFlamingLongsword = async (): Promise<boolean> => {

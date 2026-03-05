@@ -3375,15 +3375,21 @@ export default function Dashboard() {
         };
       });
 
-      const { error: updateCombatError } = await supabase
+      const { data: updatedCombatState, error: updateCombatError } = await supabase
         .from("combat_state")
         .update({
           initiative_monsters: nextMonsters,
           initiative_entries: nextEntries,
         })
-        .eq("id", 1);
-      if (updateCombatError) {
-        console.error("Failed to apply monster melee damage:", updateCombatError);
+        .eq("id", 1)
+        .select("id")
+        .maybeSingle<{ id: number }>();
+      if (updateCombatError || !updatedCombatState) {
+        if (updateCombatError) {
+          console.error("Failed to apply monster melee damage:", updateCombatError);
+        } else {
+          console.error("Failed to apply monster melee damage: no rows were updated.");
+        }
         const { error: flowUpdateError } = await supabase.rpc("combat_update_flow_state", {
           p_initiative_entries: nextEntries,
           p_initiative_current_index: combatState.initiative_current_index ?? null,

@@ -251,6 +251,7 @@ export default function Combat({
     hasCover: boolean;
   } | null>(null);
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
+  const [excludedPlayerIds, setExcludedPlayerIds] = useState<string[]>([]);
   const [monsterNameDrafts, setMonsterNameDrafts] = useState<Record<string, string>>({});
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [selectedZoneTarget, setSelectedZoneTarget] = useState<{ zoneId: number; point: ZonePoint } | null>(null);
@@ -280,9 +281,14 @@ export default function Combat({
   const isDmUser = isDM && normalizeEmail(userEmail || "") === normalizeEmail(DM_EMAIL);
   const isDmViewer = isDM;
   const canDraw = isDmUser && !!mapUrl && !!imageRect;
+  const excludedPlayerIdSet = useMemo(() => new Set(excludedPlayerIds), [excludedPlayerIds]);
+  const eligiblePlayers = useMemo(
+    () => characters.filter((player) => !excludedPlayerIdSet.has(player.id)),
+    [characters, excludedPlayerIdSet]
+  );
   const playerEntries = useMemo<InitiativeEntry[]>(
     () =>
-      characters.map((player) => ({
+      eligiblePlayers.map((player) => ({
         participant_id: `player:${player.id}`,
         kind: "player",
         name: player.name,
@@ -293,7 +299,7 @@ export default function Combat({
         fast_available: true,
         covered: false,
       })),
-    [characters]
+    [eligiblePlayers]
   );
   const preRollMonsterEntries = useMemo<InitiativeEntry[]>(
     () =>
@@ -316,6 +322,24 @@ export default function Combat({
     () => (initiativeEntries.length > 0 ? initiativeEntries : [...playerEntries, ...preRollMonsterEntries]),
     [initiativeEntries, playerEntries, preRollMonsterEntries]
   );
+  useEffect(() => {
+    if (initiativeEntries.length === 0 || characters.length === 0) return;
+    const activePlayerIds = new Set(
+      initiativeEntries
+        .filter((entry) => entry.kind === "player")
+        .map((entry) => tokenIdFromParticipantId(entry.participant_id))
+        .filter((id): id is string => Boolean(id))
+    );
+    const inferredExcluded = characters
+      .map((player) => player.id)
+      .filter((playerId) => !activePlayerIds.has(playerId));
+    setExcludedPlayerIds((prev) => {
+      if (prev.length === inferredExcluded.length && prev.every((value, idx) => value === inferredExcluded[idx])) {
+        return prev;
+      }
+      return inferredExcluded;
+    });
+  }, [initiativeEntries, characters]);
   const currentEntry =
     initiativeCurrentIndex !== null &&
     initiativeCurrentIndex >= 0 &&
@@ -3823,7 +3847,18 @@ export default function Combat({
     const used = new Set<string>();
     const supabase = createClient();
     const updatedPlayers: Array<{ id: string; inventory: InventoryItem[] }> = [];
-    const playerEntries = characters.map((player) => {
+    const existingPlayerIds = new Set(
+      initiativeEntries
+        .filter((entry) => entry.kind === "player")
+        .map((entry) => tokenIdFromParticipantId(entry.participant_id))
+        .filter((id): id is string => Boolean(id))
+    );
+    const playersForRoll =
+      existingPlayerIds.size > 0
+        ? eligiblePlayers.filter((player) => existingPlayerIds.has(player.id))
+        : eligiblePlayers;
+
+    const playerEntries = playersForRoll.map((player) => {
       const heldRanged = playerEquippedRangedWeapons(player);
       let readiedWeapon: InventoryItem | null = null;
       let readiedHand: "left" | "right" | "both" | null = null;
@@ -4271,6 +4306,12 @@ export default function Combat({
       delete next[participantId];
       return next;
     });
+    if (participantId.startsWith("player:")) {
+      const removedPlayerId = participantId.slice(7);
+      setExcludedPlayerIds((prev) =>
+        prev.includes(removedPlayerId) ? prev : [...prev, removedPlayerId]
+      );
+    }
     await saveInitiativeState(nextEntries, nextCurrent, combatMode, nextMonsters, nextEdges, nextTokens);
   };
 
@@ -4283,6 +4324,7 @@ export default function Combat({
     if (!isDmUser) return;
     const participantId = `player:${player.id}`;
     if (initiativeEntries.some((entry) => entry.participant_id === participantId)) return;
+    setExcludedPlayerIds((prev) => prev.filter((id) => id !== player.id));
 
     let nextEntries = initiativeEntries;
     let nextCurrent = initiativeCurrentIndex;

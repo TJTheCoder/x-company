@@ -268,6 +268,7 @@ export default function Combat({
   const isSyncingRef = useRef(false);
   const handledInvalidReadiedRef = useRef<string | null>(null);
   const handledPendingMonsterArtRollIdRef = useRef<string | null>(null);
+  const handledSlashArtsPhaseRef = useRef<Set<string>>(new Set());
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
   const isResizingPanelRef = useRef(false);
@@ -783,6 +784,60 @@ export default function Combat({
     (currentEntry?.kind === "monster"
       ? isDmViewer
       : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
+  const slashArtsPhaseAttack = useMemo<ResolvedMeleeAttack | null>(() => {
+    if (!combatMode || !actorTokenId || !currentEntry) return null;
+    const attackerFlags = new Set(
+      (currentEntry.used_item_flags || []).filter((value): value is string => typeof value === "string")
+    );
+    if (attackerFlags.has(ARTS_CHOSEN_FLAG)) return null;
+
+    for (const entry of initiativeEntries) {
+      const targetTokenId = tokenIdFromParticipantId(entry.participant_id);
+      if (!targetTokenId || targetTokenId === actorTokenId) continue;
+      const flags = (entry.used_item_flags || []).filter((value): value is string => typeof value === "string");
+      if (!flags.includes(DODGED_FLAG) || !flags.includes(PARRIED_FLAG)) continue;
+
+      const incomingRecord = findIncomingDamageFlag(flags);
+      const metaRecord = findIncomingDamageMetaFlag(flags);
+      if (!incomingRecord || !metaRecord) continue;
+      if (metaRecord.value.attackerTokenId !== actorTokenId) continue;
+
+      const maneuver = flowManeuverForIncomingType(incomingRecord.value.type);
+      return {
+        id: metaRecord.value.attackId,
+        attackerCharacterId: metaRecord.value.attackerTokenId,
+        targetCharacterId: targetTokenId,
+        weaponName: metaRecord.value.weaponName || maneuver,
+        weaponBaseDamage: Math.max(0, incomingRecord.value.totalDamage ?? 0),
+        maneuver,
+        totalSuccesses: Math.max(0, incomingRecord.value.successes),
+        requiredSuccesses: 1,
+        swingBonusDamage: 0,
+        disarmTargetItemId: metaRecord.value.disarmTargetItemId ?? null,
+        disarmZoneId: metaRecord.value.disarmZoneId ?? null,
+        rangeAtAttack: metaRecord.value.rangeAtAttack ?? null,
+        skipReaction: true,
+        slashFlow: true,
+      };
+    }
+    return null;
+  }, [combatMode, actorTokenId, currentEntry, initiativeEntries, flowManeuverForIncomingType]);
+  const slashArtsCanControlPhase =
+    Boolean(slashArtsPhaseAttack) &&
+    Boolean(actorTokenId) &&
+    (currentEntry?.kind === "monster"
+      ? isDmViewer
+      : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
+  useEffect(() => {
+    if (!onResolveMeleeAttack || !slashArtsPhaseAttack || !slashArtsCanControlPhase) return;
+    const key = `${slashArtsPhaseAttack.id}:${slashArtsPhaseAttack.attackerCharacterId}:${slashArtsPhaseAttack.targetCharacterId}`;
+    if (handledSlashArtsPhaseRef.current.has(key)) return;
+    handledSlashArtsPhaseRef.current.add(key);
+    void Promise.resolve(onResolveMeleeAttack(slashArtsPhaseAttack)).catch((error) => {
+      console.error("Failed to auto-enter Incoming arts phase:", error);
+      handledSlashArtsPhaseRef.current.delete(key);
+    });
+  }, [onResolveMeleeAttack, slashArtsPhaseAttack, slashArtsCanControlPhase]);
   const buildSlashFlowAttack = useCallback((): ResolvedMeleeAttack | null => {
     if (!slashIncomingDamage || !slashIncomingMeta || !actorTokenId) return null;
     const maneuver = flowManeuverForIncomingType(slashIncomingDamage.type);
@@ -1814,10 +1869,11 @@ export default function Combat({
 
           const monster = monsterByParticipantId.get(pos.character_id);
           if (monster) {
+            const snapshot = entry?.monster_snapshot || monster.monster_snapshot;
             const tooltip =
-              isDmUser && monster.monster_snapshot
-                ? formatMonsterTooltip(monster.monster_snapshot) + `\n${flags.length > 0 ? `Flags: ${flags.join(", ")}` : "Flags: None"}`
-                : formatMonsterPublicTooltip(monster.name, monster.monster_snapshot, flags);
+              isDmUser && snapshot
+                ? formatMonsterTooltip(snapshot) + `\n${flags.length > 0 ? `Flags: ${flags.join(", ")}` : "Flags: None"}`
+                : formatMonsterPublicTooltip(monster.name, snapshot, flags);
             return {
               ...pos,
               type: "monster" as const,
@@ -1854,16 +1910,28 @@ export default function Combat({
     return ids;
   }, [renderedTokens, canPlaceTokenFor, isDmUser, initiativeEntries]);
 
+  const incomingPipelineActive = useMemo(
+    () =>
+      combatMode &&
+      initiativeEntries.some((entry) => {
+        const flags = Array.isArray(entry.used_item_flags)
+          ? entry.used_item_flags.filter((value): value is string => typeof value === "string")
+          : [];
+        return Boolean(findIncomingDamageFlag(flags) && findIncomingDamageMetaFlag(flags));
+      }),
+    [combatMode, initiativeEntries]
+  );
   const isMyTurn = useMemo(() => {
     const attackerTurnLockedByReaction =
       combatMode &&
       Boolean(actorTokenId) &&
       pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId);
     if (!currentEntry) return false;
+    if (incomingPipelineActive) return false;
     if (attackerTurnLockedByReaction) return false;
     if (isDmUser) return currentEntry.kind === "monster";
     return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
-  }, [currentEntry, isDmUser, currentUserTokenId, combatMode, actorTokenId, pendingReactions]);
+  }, [currentEntry, isDmUser, currentUserTokenId, combatMode, actorTokenId, pendingReactions, incomingPipelineActive]);
   const rangeBetweenTokens = useCallback(
     (sourceTokenId: string | null | undefined, targetTokenId: string | null | undefined): CombatRange | null => {
       if (!sourceTokenId || !targetTokenId || sourceTokenId === targetTokenId) return null;
@@ -2527,6 +2595,7 @@ export default function Combat({
 
   const canPass = useMemo(() => {
     if (!currentEntry) return false;
+    if (incomingPipelineActive) return false;
     if (
       combatMode &&
       actorTokenId &&
@@ -2536,7 +2605,7 @@ export default function Combat({
     }
     if (isDmUser) return currentEntry.kind === "monster";
     return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
-  }, [currentEntry, currentUserTokenId, isDmUser, combatMode, actorTokenId, pendingReactions]);
+  }, [currentEntry, currentUserTokenId, isDmUser, combatMode, actorTokenId, pendingReactions, incomingPipelineActive]);
   const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {
     if (!currentEntry) return null;
     if (currentEntry.kind === "player") {
@@ -6979,6 +7048,11 @@ export default function Combat({
             </div>
           )}
         </div>
+        {incomingPipelineActive && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
+          <div className="mb-3 rounded border border-orange-500/40 bg-orange-900/20 px-3 py-2 text-xs text-orange-200/90">
+            Incoming resolution in progress. Complete Reaction, Arts, and Armor before taking other actions.
+          </div>
+        )}
         <div className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
           {canUseGrappleFromSelection && (
             <button

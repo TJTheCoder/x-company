@@ -1735,6 +1735,7 @@ export default function Dashboard() {
     const successes = Math.max(0, attack.totalSuccesses);
     const requiredSuccesses = Math.max(1, attack.requiredSuccesses ?? 1);
     const supabase = createClient();
+    const flowActorTokenId = character?.id ?? attack.attackerCharacterId;
     const didSucceed = successes >= requiredSuccesses;
     const reactionEligibleManeuvers = new Set<ResolvedMeleeAttack["maneuver"]>([
       "Shove",
@@ -1893,7 +1894,7 @@ export default function Dashboard() {
           const updated = await updateSlashFlowState(
             nextEntries,
             slashState.currentIndex,
-            attack.attackerCharacterId
+            flowActorTokenId
           );
           if (!updated) return;
         }
@@ -3008,7 +3009,7 @@ export default function Dashboard() {
         const updated = await updateSlashFlowState(
           clearedEntries,
           slashState.attackerIndex,
-          slashState.meta.attackerTokenId
+          flowActorTokenId
         );
         if (!updated) return;
         await resolveMeleeAttack({
@@ -3031,7 +3032,7 @@ export default function Dashboard() {
         });
         return;
       }
-      await updateSlashFlowState(nextEntries, slashState.targetIndex, slashState.meta.attackerTokenId);
+      await updateSlashFlowState(nextEntries, slashState.targetIndex, flowActorTokenId);
       return;
     }
 
@@ -3305,7 +3306,7 @@ export default function Dashboard() {
     if (attack.targetCharacterId.startsWith("monster:")) {
       const { data: combatState, error: combatError } = await supabase
         .from("combat_state")
-        .select("initiative_monsters, initiative_entries")
+        .select("initiative_monsters, initiative_entries, initiative_current_index")
         .eq("id", 1)
         .maybeSingle<{
           initiative_monsters: Array<{
@@ -3329,6 +3330,7 @@ export default function Dashboard() {
             } | null;
             prone?: boolean | null;
           }> | null;
+          initiative_current_index?: number | null;
         }>();
 
       if (combatError || !combatState) {
@@ -3376,6 +3378,14 @@ export default function Dashboard() {
         .eq("id", 1);
       if (updateCombatError) {
         console.error("Failed to apply monster melee damage:", updateCombatError);
+        const { error: flowUpdateError } = await supabase.rpc("combat_update_flow_state", {
+          p_initiative_entries: nextEntries,
+          p_initiative_current_index: combatState.initiative_current_index ?? null,
+          p_actor_token_id: flowActorTokenId,
+        });
+        if (flowUpdateError) {
+          console.error("Failed to apply monster melee damage via flow state fallback:", flowUpdateError);
+        }
       }
       if (await isEngagedStrikeContact()) {
         await applyFlameContactFromTo(attack.targetCharacterId, attack.attackerCharacterId);

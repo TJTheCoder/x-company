@@ -210,7 +210,9 @@ export default function Combat({
   onRequestDrawGear,
   character,
   onQueueMeleeAction,
+  pendingMeleeAction,
   onQueueReactionRoll,
+  pendingReactionRoll,
   onResolveReactionRoll,
   onResolveMeleeAttack,
   onApplyStartOfTurnEffects,
@@ -2558,7 +2560,7 @@ export default function Combat({
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
     if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
-    if (actorHasOccupiedHands) return false;
+    if (currentEntry.kind === "player" && actorHasOccupiedHands) return false;
     if (selectedRange !== "Engaged") return false;
     if (!selectedTargetEntry) return false;
     const targetHasClungIds =
@@ -2602,7 +2604,7 @@ export default function Combat({
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return false;
     if (!actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return false;
     if (actorHardLockedByHold || isActorProne || isActorClungOnto) return false;
-    if (actorHasOccupiedHands) return false;
+    if (currentEntry.kind === "player" && actorHasOccupiedHands) return false;
     if (selectedRange !== "Engaged") return false;
     if (!selectedTargetEntry) return false;
     if (selectedTargetEntry.clinging_target_id) return false;
@@ -4403,14 +4405,25 @@ export default function Combat({
       currentEntry?.fast_available === false &&
       currentEntry?.slow_available === false;
     const reactionStackOngoing = incomingPipelineActive || pendingReactions.length > 0;
+    const pendingResolutionOngoing =
+      Boolean(pendingMeleeAction) ||
+      Boolean(pendingReactionRoll) ||
+      Boolean(pendingArmorPrompt) ||
+      Boolean(pendingArtPrompt) ||
+      Boolean(pendingArtRoll) ||
+      isResolvingReaction;
 
-    if (!participantId || !canPass || !noActionsRemaining || reactionStackOngoing) {
+    if (!participantId || !canPass || !noActionsRemaining || reactionStackOngoing || pendingResolutionOngoing) {
       autoPassAttemptRef.current = null;
       return;
     }
     if (autoPassAttemptRef.current === participantId) return;
     autoPassAttemptRef.current = participantId;
-    void passTurn();
+    const timeoutId = window.setTimeout(() => {
+      if (autoPassAttemptRef.current !== participantId) return;
+      void passTurn();
+    }, 150);
+    return () => window.clearTimeout(timeoutId);
   }, [
     currentEntry?.participant_id,
     currentEntry?.fast_available,
@@ -4418,6 +4431,12 @@ export default function Combat({
     canPass,
     incomingPipelineActive,
     pendingReactions.length,
+    pendingMeleeAction,
+    pendingReactionRoll,
+    pendingArmorPrompt,
+    pendingArtPrompt,
+    pendingArtRoll,
+    isResolvingReaction,
   ]);
 
   const engageByTokenIds = async (actorTokenIdValue: string, targetTokenIdValue: string): Promise<boolean> => {

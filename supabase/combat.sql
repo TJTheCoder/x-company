@@ -1233,72 +1233,10 @@ begin
   v_after_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
   v_after_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
-  if not v_after_fast and not v_after_slow then
-    if jsonb_typeof(v_pending_reactions) = 'array' and jsonb_array_length(v_pending_reactions) > 0 then
-      v_has_reaction_stack := true;
-    end if;
-
-    if not v_has_reaction_stack then
-      for v_entry in select value from jsonb_array_elements(v_entries) as e(value)
-      loop
-        v_flags := coalesce(v_entry->'used_item_flags', '[]'::jsonb);
-        if jsonb_typeof(v_flags) <> 'array' then
-          continue;
-        end if;
-        v_has_incoming := false;
-        v_has_meta := false;
-        for v_flag in select value from jsonb_array_elements_text(v_flags) as f(value)
-        loop
-          if v_flag like 'Incoming (%' or v_flag like 'Incoming Damage (%' then
-            v_has_incoming := true;
-          elsif v_flag like '__Incoming Meta (%' then
-            v_has_meta := true;
-          end if;
-          if v_has_incoming and v_has_meta then
-            v_has_reaction_stack := true;
-            exit;
-          end if;
-        end loop;
-        exit when v_has_reaction_stack;
-      end loop;
-    end if;
-
-    if v_has_reaction_stack then
-      update public.combat_state
-      set initiative_entries = v_entries,
-          updated_by_email = v_email
-      where id = 1;
-    else
-      v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
-      v_next_entry := v_entries -> v_next_idx;
-      v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
-      v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
-      v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
-
-      if v_next_idx = 0 and v_count > 0 then
-        v_reset_entries := public.combat_apply_round_transition(v_entries);
-
-        update public.combat_state
-        set initiative_entries = v_reset_entries,
-            initiative_current_index = v_next_idx,
-            updated_by_email = v_email
-        where id = 1;
-      else
-        update public.combat_state
-        set initiative_entries = v_entries,
-            initiative_current_index = v_next_idx,
-            updated_by_email = v_email
-        where id = 1;
-      end if;
-
-      perform public.combat_apply_falling(v_next_token_id);
-    end if;
-  else
-    update public.combat_state
-    set initiative_entries = v_entries,
-        updated_by_email = v_email
-    where id = 1;
-  end if;
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
 end;
 $$;
 
@@ -1380,72 +1318,10 @@ begin
   v_fast := coalesce((v_current ->> 'fast_available')::boolean, true);
   v_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
-  if not v_fast and not v_slow then
-    if jsonb_typeof(v_pending_reactions) = 'array' and jsonb_array_length(v_pending_reactions) > 0 then
-      v_has_reaction_stack := true;
-    end if;
-
-    if not v_has_reaction_stack then
-      for v_entry in select value from jsonb_array_elements(v_entries) as e(value)
-      loop
-        v_flags := coalesce(v_entry->'used_item_flags', '[]'::jsonb);
-        if jsonb_typeof(v_flags) <> 'array' then
-          continue;
-        end if;
-        v_has_incoming := false;
-        v_has_meta := false;
-        for v_flag in select value from jsonb_array_elements_text(v_flags) as f(value)
-        loop
-          if v_flag like 'Incoming (%' or v_flag like 'Incoming Damage (%' then
-            v_has_incoming := true;
-          elsif v_flag like '__Incoming Meta (%' then
-            v_has_meta := true;
-          end if;
-          if v_has_incoming and v_has_meta then
-            v_has_reaction_stack := true;
-            exit;
-          end if;
-        end loop;
-        exit when v_has_reaction_stack;
-      end loop;
-    end if;
-
-    if v_has_reaction_stack then
-      update public.combat_state
-      set initiative_entries = v_entries,
-          updated_by_email = v_email
-      where id = 1;
-    else
-      v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
-      v_next_entry := v_entries -> v_next_idx;
-      v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
-      v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
-      v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
-
-      if v_next_idx = 0 and v_count > 0 then
-        v_reset_entries := public.combat_apply_round_transition(v_entries);
-
-        update public.combat_state
-        set initiative_entries = v_reset_entries,
-            initiative_current_index = v_next_idx,
-            updated_by_email = v_email
-        where id = 1;
-      else
-        update public.combat_state
-        set initiative_entries = v_entries,
-            initiative_current_index = v_next_idx,
-            updated_by_email = v_email
-        where id = 1;
-      end if;
-
-      perform public.combat_apply_falling(v_next_token_id);
-    end if;
-  else
-    update public.combat_state
-    set initiative_entries = v_entries,
-        updated_by_email = v_email
-    where id = 1;
-  end if;
+  update public.combat_state
+  set initiative_entries = v_entries,
+      updated_by_email = v_email
+  where id = 1;
 
   return case when v_key = 'fast_available' then 'fast' else 'slow' end;
 end;
@@ -1828,6 +1704,14 @@ as $$
 declare
   v_email text := coalesce(auth.jwt() ->> 'email', '');
   v_reactions jsonb;
+  v_entries jsonb;
+  v_entry jsonb;
+  v_next_entry jsonb;
+  v_flags jsonb;
+  v_cleaned_flags jsonb;
+  v_idx int;
+  v_has_incoming_stack boolean := false;
+  v_changed boolean := false;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -1836,8 +1720,9 @@ begin
     raise exception 'Reaction id is required';
   end if;
 
-  select coalesce(pending_reactions, '[]'::jsonb)
-  into v_reactions
+  select coalesce(pending_reactions, '[]'::jsonb),
+         coalesce(initiative_entries, '[]'::jsonb)
+  into v_reactions, v_entries
   from public.combat_state
   where id = 1
   for update;
@@ -1845,16 +1730,83 @@ begin
   if jsonb_typeof(v_reactions) <> 'array' then
     v_reactions := '[]'::jsonb;
   end if;
+  if jsonb_typeof(v_entries) <> 'array' then
+    v_entries := '[]'::jsonb;
+  end if;
 
   select coalesce(jsonb_agg(r), '[]'::jsonb)
   into v_reactions
   from jsonb_array_elements(v_reactions) as r
   where r->>'id' <> p_reaction_id;
 
-  update public.combat_state
-  set pending_reactions = v_reactions,
-      updated_by_email = v_email
-  where id = 1;
+  if jsonb_array_length(v_reactions) = 0 then
+    for v_entry in
+      select e.value
+      from jsonb_array_elements(v_entries) as e(value)
+    loop
+      if jsonb_typeof(v_entry->'used_item_flags') <> 'array' then
+        continue;
+      end if;
+      if exists (
+        select 1
+        from jsonb_array_elements_text(v_entry->'used_item_flags') as f(value)
+        where f.value like 'Incoming (%'
+           or f.value like 'Incoming Damage (%'
+      )
+      and exists (
+        select 1
+        from jsonb_array_elements_text(v_entry->'used_item_flags') as f(value)
+        where f.value like '__Incoming Meta (%'
+      ) then
+        v_has_incoming_stack := true;
+        exit;
+      end if;
+    end loop;
+  end if;
+
+  if jsonb_array_length(v_reactions) = 0 and not v_has_incoming_stack then
+    for v_idx, v_entry in
+      select e.ord - 1, e.entry
+      from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+    loop
+      if jsonb_typeof(v_entry->'used_item_flags') = 'array' then
+        v_flags := v_entry->'used_item_flags';
+      else
+        v_flags := '[]'::jsonb;
+      end if;
+
+      select coalesce(jsonb_agg(to_jsonb(f.value)), '[]'::jsonb)
+      into v_cleaned_flags
+      from jsonb_array_elements_text(v_flags) as f(value)
+      where f.value <> 'Dodged'
+        and f.value <> 'Parried'
+        and f.value <> 'Arts Chosen'
+        and f.value not like 'Incoming (%'
+        and f.value not like 'Incoming Damage (%'
+        and f.value not like '__Incoming Meta (%'
+        and not (f.value like 'Used (%' and f.value <> 'Used (Flaming Longsword)');
+
+      if v_cleaned_flags <> v_flags then
+        v_changed := true;
+      end if;
+
+      v_next_entry := jsonb_set(v_entry, '{used_item_flags}', v_cleaned_flags, true);
+      v_entries := jsonb_set(v_entries, array[v_idx::text], v_next_entry, false);
+    end loop;
+  end if;
+
+  if v_changed then
+    update public.combat_state
+    set pending_reactions = v_reactions,
+        initiative_entries = v_entries,
+        updated_by_email = v_email
+    where id = 1;
+  else
+    update public.combat_state
+    set pending_reactions = v_reactions,
+        updated_by_email = v_email
+    where id = 1;
+  end if;
 end;
 $$;
 
@@ -5260,12 +5212,10 @@ begin
     from public.characters
     where id = p_actor_token_id::uuid
     limit 1;
-  else
-    v_target_slots := coalesce(v_actor_entry->'monster_snapshot'->'equipment_slots', '{}'::jsonb);
-  end if;
-  if nullif(coalesce(v_target_slots->>'left', ''), '') is not null
-     or nullif(coalesce(v_target_slots->>'right', ''), '') is not null then
-    raise exception 'Must be unarmed to grapple or cling';
+    if nullif(coalesce(v_target_slots->>'left', ''), '') is not null
+       or nullif(coalesce(v_target_slots->>'right', ''), '') is not null then
+      raise exception 'Must be unarmed to grapple or cling';
+    end if;
   end if;
 
   if not coalesce(p_success, false) then

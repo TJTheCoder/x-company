@@ -18,7 +18,9 @@ export type CombatProps = {
   onRequestDrawGear?: () => void;
   character: CharacterType | null;
   onQueueMeleeAction?: (action: PendingMeleeAction) => void;
+  pendingMeleeAction?: PendingMeleeAction | null;
   onQueueReactionRoll?: (roll: PendingReactionRoll) => void;
+  pendingReactionRoll?: PendingReactionRoll | null;
   onResolveReactionRoll?: (roll: ResolvedReactionRoll) => void | Promise<void>;
   onResolveMeleeAttack?: (attack: ResolvedMeleeAttack) => void | Promise<void>;
   onApplyStartOfTurnEffects?: (tokenId: string) => void | Promise<void>;

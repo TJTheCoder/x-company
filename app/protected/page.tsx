@@ -1397,6 +1397,17 @@ export default function Dashboard() {
   };
 
   const usedItemFlagForName = (name: string): string => `Used (${name})`;
+  const isUsedItemFlag = (flag: string): boolean =>
+    flag.startsWith("Used (") && flag.endsWith(")");
+  const isArmorUsedItemFlag = (flag: string): boolean =>
+    isUsedItemFlag(flag) && flag !== FLAMING_LONGSWORD_USED_FLAG;
+  const isReactionStackTransientFlag = (flag: string): boolean => {
+    if (flag === DODGED_FLAG || flag === PARRIED_FLAG || flag === ARTS_CHOSEN_FLAG) return true;
+    if (findIncomingDamageFlag([flag])) return true;
+    if (isIncomingDamageMetaFlag(flag)) return true;
+    if (isArmorUsedItemFlag(flag)) return true;
+    return false;
+  };
 
   const replaceIncomingFlags = (
     flags: string[],
@@ -1572,10 +1583,7 @@ export default function Dashboard() {
       const flags = normalizeFlagList(entry.used_item_flags);
       if (index === state.targetIndex) {
         const nextFlags = flags.filter((flag) => {
-          if (flag === DODGED_FLAG || flag === PARRIED_FLAG) return false;
-          if (state.attackerIndex === state.targetIndex && flag === ARTS_CHOSEN_FLAG) return false;
-          if (findIncomingDamageFlag([flag])) return false;
-          if (isIncomingDamageMetaFlag(flag)) return false;
+          if (isReactionStackTransientFlag(flag)) return false;
           if (removableUsed.has(flag)) return false;
           return true;
         });
@@ -1585,7 +1593,11 @@ export default function Dashboard() {
         };
       }
       if (index === state.attackerIndex) {
-        const nextFlags = flags.filter((flag) => flag !== ARTS_CHOSEN_FLAG);
+        const nextFlags = flags.filter((flag) => {
+          if (isReactionStackTransientFlag(flag)) return false;
+          if (removableUsed.has(flag)) return false;
+          return true;
+        });
         return {
           ...entry,
           used_item_flags: nextFlags,
@@ -1632,9 +1644,7 @@ export default function Dashboard() {
     const attackerEntry = entries[attackerIndex];
     const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
     const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
-    const preppedTargetFlags = targetFlags.filter(
-      (flag) => flag !== DODGED_FLAG && flag !== PARRIED_FLAG && flag !== ARTS_CHOSEN_FLAG
-    );
+    const preppedTargetFlags = targetFlags.filter((flag) => !isReactionStackTransientFlag(flag));
     if (params.preResolveReaction) {
       preppedTargetFlags.push(DODGED_FLAG);
       preppedTargetFlags.push(PARRIED_FLAG);
@@ -4442,7 +4452,9 @@ export default function Dashboard() {
               onRequestDrawGear={startDrawGearFromCombat}
               character={character}
               onQueueMeleeAction={queueMeleeAction}
+              pendingMeleeAction={pendingMeleeAction}
               onQueueReactionRoll={queueReactionRoll}
+              pendingReactionRoll={pendingReactionRoll}
               onResolveReactionRoll={resolveReactionRoll}
               onResolveMeleeAttack={resolveMeleeAttack}
               onApplyStartOfTurnEffects={onApplyStartOfTurnEffects}

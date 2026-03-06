@@ -1166,6 +1166,7 @@ as $$
 declare
   v_email text := coalesce(auth.jwt() ->> 'email', '');
   v_entries jsonb;
+  v_pending_reactions jsonb;
   v_idx int;
   v_count int;
   v_current jsonb;
@@ -1178,6 +1179,12 @@ declare
   v_reset_entries jsonb;
   v_next_entry jsonb;
   v_next_token_id text;
+  v_has_reaction_stack boolean := false;
+  v_entry jsonb;
+  v_flags jsonb;
+  v_flag text;
+  v_has_incoming boolean;
+  v_has_meta boolean;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -1187,8 +1194,8 @@ begin
     raise exception 'Invalid action type';
   end if;
 
-  select initiative_entries, initiative_current_index
-  into v_entries, v_idx
+  select initiative_entries, initiative_current_index, coalesce(pending_reactions, '[]'::jsonb)
+  into v_entries, v_idx, v_pending_reactions
   from public.combat_state
   where id = 1
   for update;
@@ -1227,29 +1234,65 @@ begin
   v_after_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
   if not v_after_fast and not v_after_slow then
-    v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
-    v_next_entry := v_entries -> v_next_idx;
-    v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
-    v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
-    v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
+    if jsonb_typeof(v_pending_reactions) = 'array' and jsonb_array_length(v_pending_reactions) > 0 then
+      v_has_reaction_stack := true;
+    end if;
 
-    if v_next_idx = 0 and v_count > 0 then
-      v_reset_entries := public.combat_apply_round_transition(v_entries);
+    if not v_has_reaction_stack then
+      for v_entry in select value from jsonb_array_elements(v_entries) as e(value)
+      loop
+        v_flags := coalesce(v_entry->'used_item_flags', '[]'::jsonb);
+        if jsonb_typeof(v_flags) <> 'array' then
+          continue;
+        end if;
+        v_has_incoming := false;
+        v_has_meta := false;
+        for v_flag in select value from jsonb_array_elements_text(v_flags) as f(value)
+        loop
+          if v_flag like 'Incoming (%' or v_flag like 'Incoming Damage (%' then
+            v_has_incoming := true;
+          elsif v_flag like '__Incoming Meta (%' then
+            v_has_meta := true;
+          end if;
+          if v_has_incoming and v_has_meta then
+            v_has_reaction_stack := true;
+            exit;
+          end if;
+        end loop;
+        exit when v_has_reaction_stack;
+      end loop;
+    end if;
 
+    if v_has_reaction_stack then
       update public.combat_state
-      set initiative_entries = v_reset_entries,
-          initiative_current_index = v_next_idx,
+      set initiative_entries = v_entries,
           updated_by_email = v_email
       where id = 1;
     else
-      update public.combat_state
-      set initiative_entries = v_entries,
-          initiative_current_index = v_next_idx,
-          updated_by_email = v_email
-      where id = 1;
-    end if;
+      v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+      v_next_entry := v_entries -> v_next_idx;
+      v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
+      v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+      v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
-    perform public.combat_apply_falling(v_next_token_id);
+      if v_next_idx = 0 and v_count > 0 then
+        v_reset_entries := public.combat_apply_round_transition(v_entries);
+
+        update public.combat_state
+        set initiative_entries = v_reset_entries,
+            initiative_current_index = v_next_idx,
+            updated_by_email = v_email
+        where id = 1;
+      else
+        update public.combat_state
+        set initiative_entries = v_entries,
+            initiative_current_index = v_next_idx,
+            updated_by_email = v_email
+        where id = 1;
+      end if;
+
+      perform public.combat_apply_falling(v_next_token_id);
+    end if;
   else
     update public.combat_state
     set initiative_entries = v_entries,
@@ -1270,6 +1313,7 @@ as $$
 declare
   v_email text := coalesce(auth.jwt() ->> 'email', '');
   v_entries jsonb;
+  v_pending_reactions jsonb;
   v_idx int;
   v_count int;
   v_current jsonb;
@@ -1281,13 +1325,19 @@ declare
   v_reset_entries jsonb;
   v_next_entry jsonb;
   v_next_token_id text;
+  v_has_reaction_stack boolean := false;
+  v_entry jsonb;
+  v_flags jsonb;
+  v_flag text;
+  v_has_incoming boolean;
+  v_has_meta boolean;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
   end if;
 
-  select initiative_entries, initiative_current_index
-  into v_entries, v_idx
+  select initiative_entries, initiative_current_index, coalesce(pending_reactions, '[]'::jsonb)
+  into v_entries, v_idx, v_pending_reactions
   from public.combat_state
   where id = 1
   for update;
@@ -1331,29 +1381,65 @@ begin
   v_slow := coalesce((v_current ->> 'slow_available')::boolean, true);
 
   if not v_fast and not v_slow then
-    v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
-    v_next_entry := v_entries -> v_next_idx;
-    v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
-    v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
-    v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
+    if jsonb_typeof(v_pending_reactions) = 'array' and jsonb_array_length(v_pending_reactions) > 0 then
+      v_has_reaction_stack := true;
+    end if;
 
-    if v_next_idx = 0 and v_count > 0 then
-      v_reset_entries := public.combat_apply_round_transition(v_entries);
+    if not v_has_reaction_stack then
+      for v_entry in select value from jsonb_array_elements(v_entries) as e(value)
+      loop
+        v_flags := coalesce(v_entry->'used_item_flags', '[]'::jsonb);
+        if jsonb_typeof(v_flags) <> 'array' then
+          continue;
+        end if;
+        v_has_incoming := false;
+        v_has_meta := false;
+        for v_flag in select value from jsonb_array_elements_text(v_flags) as f(value)
+        loop
+          if v_flag like 'Incoming (%' or v_flag like 'Incoming Damage (%' then
+            v_has_incoming := true;
+          elsif v_flag like '__Incoming Meta (%' then
+            v_has_meta := true;
+          end if;
+          if v_has_incoming and v_has_meta then
+            v_has_reaction_stack := true;
+            exit;
+          end if;
+        end loop;
+        exit when v_has_reaction_stack;
+      end loop;
+    end if;
 
+    if v_has_reaction_stack then
       update public.combat_state
-      set initiative_entries = v_reset_entries,
-          initiative_current_index = v_next_idx,
+      set initiative_entries = v_entries,
           updated_by_email = v_email
       where id = 1;
     else
-      update public.combat_state
-      set initiative_entries = v_entries,
-          initiative_current_index = v_next_idx,
-          updated_by_email = v_email
-      where id = 1;
-    end if;
+      v_next_idx := case when v_idx + 1 >= v_count then 0 else v_idx + 1 end;
+      v_next_entry := v_entries -> v_next_idx;
+      v_next_token_id := nullif(coalesce(v_next_entry->>'participant_id', ''), '');
+      v_next_entry := jsonb_set(v_next_entry, '{used_item_flags}', '[]'::jsonb, true);
+      v_entries := jsonb_set(v_entries, array[v_next_idx::text], v_next_entry, false);
 
-    perform public.combat_apply_falling(v_next_token_id);
+      if v_next_idx = 0 and v_count > 0 then
+        v_reset_entries := public.combat_apply_round_transition(v_entries);
+
+        update public.combat_state
+        set initiative_entries = v_reset_entries,
+            initiative_current_index = v_next_idx,
+            updated_by_email = v_email
+        where id = 1;
+      else
+        update public.combat_state
+        set initiative_entries = v_entries,
+            initiative_current_index = v_next_idx,
+            updated_by_email = v_email
+        where id = 1;
+      end if;
+
+      perform public.combat_apply_falling(v_next_token_id);
+    end if;
   else
     update public.combat_state
     set initiative_entries = v_entries,

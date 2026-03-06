@@ -272,6 +272,7 @@ export default function Combat({
   const handledSlashArtsPhaseRef = useRef<Set<string>>(new Set());
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
+  const autoPassAttemptRef = useRef<string | null>(null);
   const isResizingPanelRef = useRef(false);
   const resizePanelStartRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -4398,6 +4399,29 @@ export default function Combat({
     });
   };
 
+  useEffect(() => {
+    const participantId = currentEntry?.participant_id ?? null;
+    const noActionsRemaining =
+      currentEntry?.fast_available === false &&
+      currentEntry?.slow_available === false;
+    const reactionStackOngoing = incomingPipelineActive || pendingReactions.length > 0;
+
+    if (!participantId || !canPass || !noActionsRemaining || reactionStackOngoing) {
+      autoPassAttemptRef.current = null;
+      return;
+    }
+    if (autoPassAttemptRef.current === participantId) return;
+    autoPassAttemptRef.current = participantId;
+    void passTurn();
+  }, [
+    currentEntry?.participant_id,
+    currentEntry?.fast_available,
+    currentEntry?.slow_available,
+    canPass,
+    incomingPipelineActive,
+    pendingReactions.length,
+  ]);
+
   const engageByTokenIds = async (actorTokenIdValue: string, targetTokenIdValue: string): Promise<boolean> => {
     if (!isDmUser) return false;
     if (actorTokenIdValue === targetTokenIdValue) return false;
@@ -4469,15 +4493,16 @@ export default function Combat({
 
   const requestDrawGear = async () => {
     if (!canUseDrawGearFromToken || !currentEntry) return;
+    if (currentEntry.kind === "player") {
+      onRequestDrawGear?.();
+      return;
+    }
+
     const actingParticipantId = currentEntry.participant_id;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
-    if (currentEntry.kind === "player") {
-      onRequestDrawGear?.();
-      return;
-    }
 
     if (!isDmUser) return;
     const monsterId = currentEntry.participant_id;

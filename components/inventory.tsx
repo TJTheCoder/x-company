@@ -131,13 +131,16 @@ export default function Inventory({
     }
 
     if (!data?.combat_mode) return true;
-    if (drawGearReturnToCombat) return true;
 
     const { error: rpcError } = await supabase.rpc("combat_use_fast_or_slow");
     if (rpcError) {
       setError(rpcError.message);
       setTimeout(() => setError(""), 3000);
       return false;
+    }
+    const { error: clearSwingError } = await supabase.rpc("combat_clear_swing_weapon");
+    if (clearSwingError) {
+      console.error("Failed to clear swing weapon after equipping:", clearSwingError);
     }
 
     return true;

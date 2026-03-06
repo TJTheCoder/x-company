@@ -28,14 +28,10 @@ type SaveInitiativeState = (
 
 export async function passTurnAction(params: {
   canPass: boolean;
-  currentParticipantId: string | null;
-  clearSwingForParticipant: (participantId: string | null) => Promise<boolean>;
   setError: (message: string | null) => void;
 }): Promise<void> {
-  const { canPass, currentParticipantId, clearSwingForParticipant, setError } = params;
+  const { canPass, setError } = params;
   if (!canPass) return;
-  const cleared = await clearSwingForParticipant(currentParticipantId);
-  if (!cleared) return;
   const supabase = createClient();
   const { error: rpcError } = await supabase.rpc("combat_pass_turn");
   if (rpcError) {

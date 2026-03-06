@@ -4393,8 +4393,6 @@ export default function Combat({
   const passTurn = async () => {
     await combatActions.passTurnAction({
       canPass,
-      currentParticipantId: currentEntry?.participant_id ?? null,
-      clearSwingForParticipant,
       setError,
     });
   };

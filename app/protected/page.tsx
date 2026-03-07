@@ -2901,7 +2901,6 @@ export default function Dashboard() {
           const attackerCanAct =
             (attackerEntry.fast_available !== false || attackerEntry.slow_available !== false) &&
             !Boolean(attackerEntry.prone) &&
-            !Boolean(attackerEntry.covered) &&
             !Boolean(attackerEntry.dead) &&
             !attackerHeld;
           const attackerFastAvailable = attackerEntry.fast_available !== false;

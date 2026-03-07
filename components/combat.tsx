@@ -979,7 +979,6 @@ export default function Combat({
     Boolean(reactionTargetEntry?.grappled_by_id) ||
     Boolean(reactionTargetEntry?.clung_onto_by_id) ||
     Boolean((reactionTargetEntry?.clung_onto_by_ids || []).length > 0);
-  const reactionTargetIsCovered = Boolean(reactionTargetEntry?.covered);
   const reactionTargetIsDead = Boolean(reactionTargetState?.dead);
   const reactionTargetIsBroken = Boolean(reactionTargetState?.physicalBroken || reactionTargetState?.mentalBroken);
   const reactionTargetIsMonster =
@@ -1007,7 +1006,6 @@ export default function Combat({
     reactionTargetActionAvailable &&
     !reactionTargetIsProne &&
     !reactionTargetIsHeld &&
-    !reactionTargetIsCovered &&
     !reactionTargetIsDead &&
     !reactionTargetIsBroken;
   const sizeForTokenId = useCallback(
@@ -1083,7 +1081,6 @@ export default function Combat({
     (reactionTargetActionAvailable || freeDodgeAvailable) &&
     !reactionTargetIsProne &&
     !reactionTargetIsHeld &&
-    !reactionTargetIsCovered &&
     !reactionTargetIsDead &&
     !reactionTargetIsBroken &&
     !isSkillBlockedForToken(reactionTargetId, "MOVE");
@@ -1146,7 +1143,6 @@ export default function Combat({
     !Boolean(currentEntry?.grappled_by_id) &&
     !Boolean(currentEntry?.clung_onto_by_id) &&
     !Boolean((currentEntry?.clung_onto_by_ids || []).length > 0) &&
-    !Boolean(currentEntry?.covered) &&
     !actorState.dead &&
     !actorState.physicalBroken &&
     !actorState.mentalBroken &&
@@ -1159,7 +1155,6 @@ export default function Combat({
     !Boolean(currentEntry?.grappled_by_id) &&
     !Boolean(currentEntry?.clung_onto_by_id) &&
     !Boolean((currentEntry?.clung_onto_by_ids || []).length > 0) &&
-    !Boolean(currentEntry?.covered) &&
     !actorState.dead &&
     !actorState.physicalBroken &&
     !actorState.mentalBroken &&
@@ -2199,8 +2194,7 @@ export default function Combat({
     !actorMentalBroken &&
     !actorHardLockedByHold &&
     !isActorClungOnto &&
-    !isActorProne &&
-    !isActorCovered;
+    !isActorProne;
   const tauntAngerTargetRange = useMemo(
     () => rangeBetweenTokens(actorTokenId, actorTauntedAngerById),
     [rangeBetweenTokens, actorTokenId, actorTauntedAngerById]
@@ -2772,7 +2766,6 @@ export default function Combat({
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
-    if (isActorCovered) return false;
     if (!actorEquippedFlamingLongsword) return false;
     if (actorLampOilCount < 1) return false;
     return !actorUsedItemFlags.has(FLAMING_LONGSWORD_USED_FLAG);
@@ -2787,7 +2780,6 @@ export default function Combat({
     actorRestrictedToRun,
     isActorProne,
     actorHardLockedByHold,
-    isActorCovered,
     actorEquippedFlamingLongsword,
     actorLampOilCount,
     actorUsedItemFlags,
@@ -2798,7 +2790,6 @@ export default function Combat({
     if (actorFlameIntensity <= 0) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
-    if (isActorCovered) return false;
     if (isSkillBlockedForToken(actorTokenId, "MOVE")) return false;
     return true;
   }, [
@@ -2813,7 +2804,6 @@ export default function Combat({
     actorRestrictedToRun,
     isActorProne,
     actorHardLockedByHold,
-    isActorCovered,
     isSkillBlockedForToken,
   ]);
   const setUsedItemFlag = useCallback(
@@ -3238,7 +3228,6 @@ export default function Combat({
     if (actorTauntAngerRestricted) return [];
     if (!currentEntry.slow_available) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
-    if (isActorCovered) return [];
     if (isActorProne || actorHardLockedByHold) return [];
     if (selectedTargetDead) return [];
     if (!selectedRange) return [];
@@ -3259,7 +3248,6 @@ export default function Combat({
     actorDead,
     actorRestrictedToCrawl,
     actorRestrictedToRun,
-    isActorCovered,
     isActorProne,
     actorHardLockedByHold,
     selectedTargetDead,

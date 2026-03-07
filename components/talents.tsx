@@ -3,12 +3,13 @@
 import { CharacterType } from "../app/protected/page";
 import talentsCatalogData from "../data/talents.json";
 
-type TalentLevel = 1 | 2 | 3;
+type TalentLevel = 1 | 2 | 3 | 4 | 5 | 6;
+const TALENT_MAX_LEVEL = 6;
 
 type TalentDefinition = {
   id: string;
   name: string;
-  effectsByLevel: Record<"1" | "2" | "3", string>;
+  effectsByLevel: Record<string, string>;
 };
 
 type TalentsProps = {
@@ -22,9 +23,9 @@ const DEFAULT_TALENT_LEVELS: Record<string, TalentLevel> = {
 const talentsCatalog = talentsCatalogData as TalentDefinition[];
 
 function clampLevel(level: number): TalentLevel {
-  if (level >= 3) return 3;
+  if (level >= TALENT_MAX_LEVEL) return TALENT_MAX_LEVEL as TalentLevel;
   if (level <= 1) return 1;
-  return 2;
+  return Math.trunc(level) as TalentLevel;
 }
 
 export default function Talents({ character }: TalentsProps) {
@@ -74,10 +75,10 @@ export default function Talents({ character }: TalentsProps) {
             </div>
 
             <div className="mt-3 space-y-2">
-              {[1, 2, 3].map((lvl) => {
-                const key = String(lvl) as "1" | "2" | "3";
+              {Array.from({ length: TALENT_MAX_LEVEL }, (_, idx) => idx + 1).map((lvl) => {
+                const key = String(lvl);
                 const unlocked = lvl <= talent.level;
-                const text = unlocked ? talent.effectsByLevel[key] : "???";
+                const text = unlocked ? talent.effectsByLevel[key] || "No additional listed effect." : "???";
                 return (
                   <div
                     key={`${talent.id}-${lvl}`}

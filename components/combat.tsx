@@ -86,6 +86,7 @@ const {
 
 const FLAMING_LONGSWORD_PROPERTY = "flaming longsword";
 const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
+const NATURAL_ARMOR_USED_FLAG = "Used (Natural Armor)";
 const LAMP_OIL_KEY = "lamp oil";
 const FAST_FOOTWORK_TALENT_ID = "talent-fast-footwork";
 const LIGHTNING_FAST_TALENT_ID = "talent-lightning-fast";
@@ -203,6 +204,9 @@ const monsterHasTrait = (snapshot: MonsterSnapshot | null | undefined, traitName
   if (!normalized) return false;
   return (snapshot?.traits || []).some((trait) => trait.trim().toLowerCase() === normalized);
 };
+
+const monsterSkillDice = (snapshot: MonsterSnapshot | null | undefined): number =>
+  Math.max(0, Math.trunc(Number(snapshot?.skill ?? snapshot?.special ?? 0) || 0));
 
 export default function Combat({
   isDM,
@@ -1028,7 +1032,7 @@ export default function Combat({
       }
       const snapshot = reactionTargetEntry.monster_snapshot;
       const attrCount = Math.max(0, opts.attribute === "STR" ? snapshot.str ?? 0 : snapshot.agl ?? 0);
-      const signedSkillPool = (snapshot.special ?? 0) + opts.bonusDice;
+      const signedSkillPool = monsterSkillDice(snapshot) + opts.bonusDice;
       const skillCount = Math.abs(signedSkillPool);
       const skillIsNegative = signedSkillPool < 0;
       const gearCount = Math.max(0, opts.gearDice);
@@ -1214,11 +1218,15 @@ export default function Combat({
 
     let armorItem: InventoryItem | null = null;
     let helmetItem: InventoryItem | null = null;
+    let naturalArmorDice = 0;
+    let naturalArmorUsed = true;
     if (currentEntry.kind === "monster") {
       const gear = currentEntry.monster_snapshot?.gear || [];
       const slots = currentEntry.monster_snapshot?.equipment_slots || { armor: null, helmet: null };
       armorItem = gear.find((item) => item.item_type === "Armor" && slotMatches(slots.armor, item)) || null;
       helmetItem = gear.find((item) => item.item_type === "Helmet" && slotMatches(slots.helmet, item)) || null;
+      naturalArmorDice = Math.max(0, Math.trunc(Number(currentEntry.monster_snapshot?.natural_armor ?? 0)));
+      naturalArmorUsed = actorUsedItemFlags.has(NATURAL_ARMOR_USED_FLAG);
     } else {
       const target = slashReactionTargetCharacter;
       const inventory = target?.inventory || [];
@@ -1247,9 +1255,13 @@ export default function Combat({
       helmetItemId: helmetItem?.id ?? null,
       helmetName: helmetItem?.name ?? null,
       helmetDice,
+      naturalArmorItemId: naturalArmorDice > 0 ? `natural-armor:${actorTokenId}` : null,
+      naturalArmorName: naturalArmorDice > 0 ? "Natural Armor" : null,
+      naturalArmorDice,
       armorUsed: {
         armor: armorUsed,
         helmet: helmetUsed,
+        naturalArmor: naturalArmorUsed,
       },
       isSlashFlow: true,
     };
@@ -1263,20 +1275,26 @@ export default function Combat({
     actorUsedItemFlags,
   ]);
   const armorPrompt =
-    pendingArmorPrompt && pendingArmorPrompt.targetCharacterId === currentUserTokenId ? pendingArmorPrompt : null;
+    pendingArmorPrompt &&
+    (pendingArmorPrompt.targetCharacterId === currentUserTokenId ||
+      (isDmViewer && pendingArmorPrompt.targetCharacterId.startsWith("monster:")))
+      ? pendingArmorPrompt
+      : null;
   const activeArmorPrompt = slashArmorPrompt || armorPrompt;
   const armorPromptUsed = activeArmorPrompt?.armorUsed || {};
   const armorPromptHelmetDice = Math.max(0, activeArmorPrompt?.helmetDice ?? 0);
   const armorPromptArmorDice = Math.max(0, activeArmorPrompt?.armorDice ?? 0);
+  const armorPromptNaturalArmorDice = Math.max(0, activeArmorPrompt?.naturalArmorDice ?? 0);
   const armorPromptCanHelmet =
     Boolean(activeArmorPrompt?.helmetItemId) && armorPromptHelmetDice > 0 && !armorPromptUsed.helmet;
   const armorPromptCanArmor =
     Boolean(activeArmorPrompt?.armorItemId) && armorPromptArmorDice > 0 && !armorPromptUsed.armor;
+  const armorPromptCanNaturalArmor = armorPromptNaturalArmorDice > 0 && !armorPromptUsed.naturalArmor;
   const shouldShowArmorPrompt =
     combatMode &&
     Boolean(activeArmorPrompt) &&
     (slashArmorPrompt ? slashCanControlPhase : true) &&
-    (armorPromptCanHelmet || armorPromptCanArmor);
+    (armorPromptCanHelmet || armorPromptCanArmor || armorPromptCanNaturalArmor);
   const artPrompt = useMemo(() => {
     if (!pendingArtPrompt) return null;
     const attackerId = pendingArtPrompt.attackerCharacterId;
@@ -1312,18 +1330,36 @@ export default function Combat({
     });
   }, [slashArmorPrompt, onResolveReactionRoll, armorPrompt, onConsumeArmorPrompt, onArmorPromptPass]);
   const handleArmorPromptRoll = useCallback(
-    async (slot: "helmet" | "armor") => {
+    async (slot: "helmet" | "armor" | "naturalArmor") => {
       if (!activeArmorPrompt) return;
       const isHelmet = slot === "helmet";
-      const gearItemId = isHelmet ? activeArmorPrompt.helmetItemId : activeArmorPrompt.armorItemId;
-      if (!gearItemId) return;
+      const isNaturalArmor = slot === "naturalArmor";
+      const gearItemId = isHelmet
+        ? activeArmorPrompt.helmetItemId
+        : isNaturalArmor
+          ? activeArmorPrompt.naturalArmorItemId
+          : activeArmorPrompt.armorItemId;
+      if (!isNaturalArmor && !gearItemId) return;
       if (slashArmorPrompt && onResolveReactionRoll) {
         if (currentEntry?.kind === "monster") {
-          const gearDice = rollD6Pool(Math.max(0, isHelmet ? armorPromptHelmetDice : armorPromptArmorDice));
+          const gearDice = rollD6Pool(
+            Math.max(
+              0,
+              isHelmet
+                ? armorPromptHelmetDice
+                : isNaturalArmor
+                  ? armorPromptNaturalArmorDice
+                  : armorPromptArmorDice
+            )
+          );
           const successes = gearDice.filter((d) => d === 6).length;
           if (isDmViewer) {
             setMonsterRollResult({
-              actionLabel: isHelmet ? `Helmet (${slashArmorPrompt.helmetName || "Helmet"})` : `Armor (${slashArmorPrompt.armorName || "Armor"})`,
+              actionLabel: isHelmet
+                ? `Helmet (${slashArmorPrompt.helmetName || "Helmet"})`
+                : isNaturalArmor
+                  ? (slashArmorPrompt.naturalArmorName || "Natural Armor")
+                  : `Armor (${slashArmorPrompt.armorName || "Armor"})`,
               attributeDice: [],
               skillDice: [],
               gearDice,
@@ -1334,7 +1370,7 @@ export default function Combat({
             id: `slash-armor-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
             reactionId: `slash-armor:${slashArmorPrompt.attack.id}:${slot}`,
             targetCharacterId: slashArmorPrompt.targetCharacterId,
-            mode: isHelmet ? "helmet" : "armor",
+            mode: isHelmet ? "helmet" : isNaturalArmor ? "naturalArmor" : "armor",
             rollType: "armor",
             totalSuccesses: successes,
             armorSlot: slot,
@@ -1350,15 +1386,18 @@ export default function Combat({
         id: `armor-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
         reactionId: `${slashArmorPrompt ? "slash-armor" : "armor"}:${activeArmorPrompt.attack.id}:${slot}`,
         targetCharacterId: activeArmorPrompt.targetCharacterId,
-        mode: isHelmet ? "helmet" : "armor",
+        mode: isHelmet ? "helmet" : isNaturalArmor ? "naturalArmor" : "armor",
         rollType: "armor",
         rollAttribute: "AGL",
         rollSkill: "MOVE",
         bonusDice: 0,
         fixedAttributeDice: 0,
         fixedSkillDice: 0,
-        fixedGearDice: Math.max(0, isHelmet ? armorPromptHelmetDice : armorPromptArmorDice),
-        gearItemId,
+        fixedGearDice: Math.max(
+          0,
+          isHelmet ? armorPromptHelmetDice : isNaturalArmor ? armorPromptNaturalArmorDice : armorPromptArmorDice
+        ),
+        gearItemId: gearItemId ?? null,
         armorSlot: slot,
         attack: activeArmorPrompt.attack,
       });
@@ -1373,6 +1412,7 @@ export default function Combat({
       currentEntry,
       armorPromptHelmetDice,
       armorPromptArmorDice,
+      armorPromptNaturalArmorDice,
       isDmViewer,
       onQueueReactionRoll,
       armorPrompt,
@@ -1469,7 +1509,7 @@ export default function Combat({
         try {
           const snapshot = currentEntry.monster_snapshot;
           const attrCount = Math.max(0, mode === "parry" ? snapshot.str ?? 0 : snapshot.agl ?? 0);
-          const signedSkillPool = (snapshot.special ?? 0) + bonusDice + tauntPenalty;
+          const signedSkillPool = monsterSkillDice(snapshot) + bonusDice + tauntPenalty;
           const skillCount = Math.abs(signedSkillPool);
           const skillIsNegative = signedSkillPool < 0;
           const gearCount = Math.max(0, mode === "parry" && parryItem ? parryItem.gearBonus : 0);
@@ -5313,7 +5353,7 @@ export default function Combat({
       const snapshot = actorMonster?.monster_snapshot;
       if (!snapshot || !onResolveMeleeAttack) return;
       const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
-      const signedSkillPool = (snapshot.special ?? 0) + proneBonusDice + tauntPenalty;
+      const signedSkillPool = monsterSkillDice(snapshot) + proneBonusDice + tauntPenalty;
       const skillIsNegative = signedSkillPool < 0;
       const skillDice = rollD6Pool(Math.abs(signedSkillPool));
       const gearDice = rollD6Pool(Math.max(0, option.gearDice ?? 0));
@@ -5390,7 +5430,7 @@ export default function Combat({
     const snapshot = actorMonster?.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack || !actorTokenId) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + Math.max(0, option.bonusDice ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + Math.max(0, option.bonusDice ?? 0) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice = rollD6Pool(Math.max(0, option.gearDice ?? 0));
@@ -5473,7 +5513,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + option.bonusDice + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + option.bonusDice + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice = rollD6Pool(Math.max(0, option.gearDice ?? 0));
@@ -5544,7 +5584,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.emp ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -5613,7 +5653,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.emp ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -5738,7 +5778,7 @@ export default function Combat({
     const snapshot = actorMonster?.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -5817,7 +5857,7 @@ export default function Combat({
     if (!snapshot || !onResolveMeleeAttack) return;
     const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + fleeRangeBonus + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + fleeRangeBonus + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -5947,7 +5987,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const rawSuccesses = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
@@ -6023,7 +6063,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.emp ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -6197,7 +6237,7 @@ export default function Combat({
     const weapon = monsterEquippedRangedWeapons(snapshot).find((w) => w.id === option.weaponItemId);
     if (!weapon) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + totalBonusDice;
+    const signedSkillPool = monsterSkillDice(snapshot) + totalBonusDice;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice = rollD6Pool(Math.max(0, weapon.gearBonus ?? 0));
@@ -6365,7 +6405,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.str ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + sizeDiff + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + sizeDiff + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const successesRaw = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
@@ -6458,7 +6498,7 @@ export default function Combat({
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
     const attributeDice = rollD6Pool(Math.max(0, againstCling ? snapshot.agl ?? 0 : snapshot.str ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + sizeDiff + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + sizeDiff + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const successesRaw = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
@@ -6700,7 +6740,7 @@ export default function Combat({
     const snapshot = currentEntry?.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return false;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
-    const signedSkillPool = (snapshot.special ?? 0) + tauntPenalty;
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
     const skillIsNegative = signedSkillPool < 0;
     const skillDice = rollD6Pool(Math.abs(signedSkillPool));
     const gearDice: number[] = [];
@@ -7058,6 +7098,14 @@ export default function Combat({
                   className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
                 >
                   Armor ({activeArmorPrompt.armorName ?? "Armor"} +{armorPromptArmorDice})
+                </button>
+              )}
+              {armorPromptCanNaturalArmor && (
+                <button
+                  onClick={() => handleArmorPromptRoll("naturalArmor")}
+                  className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600"
+                >
+                  Natural Armor (+{armorPromptNaturalArmorDice})
                 </button>
               )}
               <button

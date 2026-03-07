@@ -25,11 +25,20 @@ create table if not exists public.monsters (
   physical int not null check (physical > 0),
   mental int not null check (mental > 0),
   special int not null check (special >= 0),
+  str int not null check (str > 0),
+  agl int not null check (agl > 0),
+  wit int not null check (wit > 0),
+  emp int not null check (emp > 0),
+  skill int not null check (skill >= 0),
+  starting_spirits int not null check (starting_spirits >= 0),
+  natural_armor int not null check (natural_armor >= 0),
   size int not null default 1,
   gear jsonb not null default '[]'::jsonb,
   arts jsonb not null default '[]'::jsonb,
   range_band text not null check (range_band in ('Engaged', 'Near', 'Close', 'Long')),
   traits jsonb not null default '[]'::jsonb,
+  talent_levels jsonb not null default '{}'::jsonb,
+  talents jsonb not null default '[]'::jsonb,
   icon_url text null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -51,14 +60,36 @@ alter table public.monsters add column if not exists name text;
 alter table public.monsters add column if not exists physical int;
 alter table public.monsters add column if not exists mental int;
 alter table public.monsters add column if not exists special int;
+alter table public.monsters add column if not exists str int not null default 1;
+alter table public.monsters add column if not exists agl int not null default 1;
+alter table public.monsters add column if not exists wit int not null default 1;
+alter table public.monsters add column if not exists emp int not null default 1;
+alter table public.monsters add column if not exists skill int not null default 0;
+alter table public.monsters add column if not exists starting_spirits int not null default 0;
+alter table public.monsters add column if not exists natural_armor int not null default 0;
 alter table public.monsters add column if not exists size int;
 alter table public.monsters add column if not exists gear jsonb not null default '[]'::jsonb;
 alter table public.monsters add column if not exists arts jsonb not null default '[]'::jsonb;
 alter table public.monsters add column if not exists range_band text;
 alter table public.monsters add column if not exists traits jsonb not null default '[]'::jsonb;
+alter table public.monsters add column if not exists talent_levels jsonb not null default '{}'::jsonb;
+alter table public.monsters add column if not exists talents jsonb not null default '[]'::jsonb;
 alter table public.monsters add column if not exists icon_url text;
 alter table public.monsters add column if not exists created_at timestamptz not null default now();
 alter table public.monsters add column if not exists updated_at timestamptz not null default now();
+update public.monsters
+set str = greatest(1, case when physical is not null and str = 1 then physical * 2 else str end),
+    agl = greatest(1, case when physical is not null and agl = 1 then physical * 2 else agl end),
+    wit = greatest(1, case when mental is not null and wit = 1 then mental * 2 else wit end),
+    emp = greatest(1, case when mental is not null and emp = 1 then mental * 2 else emp end),
+    skill = greatest(0, case when special is not null and skill = 0 then special else skill end),
+    starting_spirits = greatest(
+      0,
+      case when special is not null and starting_spirits = 0 then special * 2 else starting_spirits end
+    ),
+    natural_armor = greatest(0, case when special is not null and natural_armor = 0 then special else natural_armor end),
+    talent_levels = coalesce(talent_levels, '{}'::jsonb),
+    talents = coalesce(talents, '[]'::jsonb);
 alter table public.monsters alter column size set default 1;
 update public.monsters set size = 1 where size is null;
 alter table public.monsters alter column size set not null;

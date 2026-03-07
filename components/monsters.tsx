@@ -3,12 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
+  MONSTER_TALENT_MAX_LEVEL,
   MonsterRangeBand,
   MonsterTemplate,
   monsterToArtsCsv,
   monsterToGearCsv,
+  monsterToTalentsCsv,
   monsterToTraitsCsv,
+  normalizeMonsterTemplate,
   parseMonsterArtsCsv,
+  parseMonsterTalentsCsv,
   normalizeMonsterTraitsCsv,
   parseMonsterGearCsv,
 } from "@/lib/monsters";
@@ -34,13 +38,18 @@ const OUTPUT_SIZE = 256;
 
 const initialForm = {
   name: "",
-  physical: "1",
-  mental: "1",
-  special: "0",
+  str: "2",
+  agl: "2",
+  wit: "2",
+  emp: "2",
+  skill: "0",
+  starting_spirits: "0",
+  natural_armor: "0",
   size: "1",
   gear: "",
   arts: "",
-  range_band: "Near" as MonsterRangeBand,
+  range_band: "Engaged" as MonsterRangeBand,
+  talents: "",
   traits: "",
 };
 
@@ -88,6 +97,7 @@ export default function Monsters({ isDM }: MonstersProps) {
   const isEditing = Boolean(editingId);
   const parsedGear = useMemo(() => parseMonsterGearCsv(form.gear), [form.gear]);
   const parsedArts = useMemo(() => parseMonsterArtsCsv(form.arts), [form.arts]);
+  const parsedTalents = useMemo(() => parseMonsterTalentsCsv(form.talents), [form.talents]);
   const parsedTraits = useMemo(() => normalizeMonsterTraitsCsv(form.traits), [form.traits]);
 
   const loadMonsters = async () => {
@@ -102,10 +112,9 @@ export default function Monsters({ isDM }: MonstersProps) {
       setLoading(false);
       return;
     }
-    const normalized = ((data || []) as MonsterTemplate[]).map((monster) => ({
-      ...monster,
-      size: Number.isFinite(monster.size) ? Math.trunc(monster.size) : 1,
-    }));
+    const normalized = ((data || []) as Array<MonsterTemplate & Record<string, unknown>>).map((monster) =>
+      normalizeMonsterTemplate(monster)
+    );
     setMonsters(normalized);
     setLoading(false);
   };
@@ -257,15 +266,27 @@ export default function Monsters({ isDM }: MonstersProps) {
 
   const validateForm = () => {
     const name = form.name.trim();
-    const physical = Number.parseInt(form.physical, 10);
-    const mental = Number.parseInt(form.mental, 10);
-    const special = Number.parseInt(form.special, 10);
+    const str = Number.parseInt(form.str, 10);
+    const agl = Number.parseInt(form.agl, 10);
+    const wit = Number.parseInt(form.wit, 10);
+    const emp = Number.parseInt(form.emp, 10);
+    const skill = Number.parseInt(form.skill, 10);
+    const startingSpirits = Number.parseInt(form.starting_spirits, 10);
+    const naturalArmor = Number.parseInt(form.natural_armor, 10);
     const size = Number.parseInt(form.size, 10);
 
     if (!name) return "Name is required.";
-    if (!Number.isInteger(physical) || physical <= 0) return "Physical must be an integer greater than 0.";
-    if (!Number.isInteger(mental) || mental <= 0) return "Mental must be an integer greater than 0.";
-    if (!Number.isInteger(special) || special < 0) return "Special must be a non-negative integer.";
+    if (!Number.isInteger(str) || str <= 0) return "STR must be an integer greater than 0.";
+    if (!Number.isInteger(agl) || agl <= 0) return "AGL must be an integer greater than 0.";
+    if (!Number.isInteger(wit) || wit <= 0) return "WIT must be an integer greater than 0.";
+    if (!Number.isInteger(emp) || emp <= 0) return "EMP must be an integer greater than 0.";
+    if (!Number.isInteger(skill) || skill < 0) return "Skill must be a non-negative integer.";
+    if (!Number.isInteger(startingSpirits) || startingSpirits < 0) {
+      return "Starting Spirit must be a non-negative integer.";
+    }
+    if (!Number.isInteger(naturalArmor) || naturalArmor < 0) {
+      return "Natural Armor must be a non-negative integer.";
+    }
     if (!Number.isInteger(size)) return "Size must be an integer.";
     return null;
   };
@@ -282,25 +303,35 @@ export default function Monsters({ isDM }: MonstersProps) {
     setError("");
 
     const name = form.name.trim();
-    const physical = Number.parseInt(form.physical, 10);
-    const mental = Number.parseInt(form.mental, 10);
-    const special = Number.parseInt(form.special, 10);
+    const str = Number.parseInt(form.str, 10);
+    const agl = Number.parseInt(form.agl, 10);
+    const wit = Number.parseInt(form.wit, 10);
+    const emp = Number.parseInt(form.emp, 10);
+    const skill = Number.parseInt(form.skill, 10);
+    const startingSpirits = Number.parseInt(form.starting_spirits, 10);
+    const naturalArmor = Number.parseInt(form.natural_armor, 10);
     const size = Number.parseInt(form.size, 10);
     const nowId = editingId || crypto.randomUUID();
 
-    const payload: MonsterTemplate = {
+    const payload: MonsterTemplate = normalizeMonsterTemplate({
       id: nowId,
       name,
-      physical,
-      mental,
-      special,
+      str,
+      agl,
+      wit,
+      emp,
+      skill,
+      starting_spirits: startingSpirits,
+      natural_armor: naturalArmor,
       size,
       gear: parsedGear,
       arts: parsedArts,
       range_band: form.range_band,
+      talent_levels: parsedTalents.talent_levels,
+      talents: parsedTalents.talents,
       traits: parsedTraits,
       icon_url: null,
-    };
+    });
 
     try {
       const supabase = createClient();
@@ -332,13 +363,18 @@ export default function Monsters({ isDM }: MonstersProps) {
     setEditingId(monster.id);
     setForm({
       name: monster.name,
-      physical: `${monster.physical}`,
-      mental: `${monster.mental}`,
-      special: `${monster.special}`,
+      str: `${monster.str}`,
+      agl: `${monster.agl}`,
+      wit: `${monster.wit}`,
+      emp: `${monster.emp}`,
+      skill: `${monster.skill}`,
+      starting_spirits: `${monster.starting_spirits}`,
+      natural_armor: `${monster.natural_armor}`,
       size: `${Number.isFinite(monster.size) ? Math.trunc(monster.size) : 1}`,
       gear: monsterToGearCsv(monster),
       arts: monsterToArtsCsv(monster),
       range_band: monster.range_band,
+      talents: monsterToTalentsCsv(monster),
       traits: monsterToTraitsCsv(monster),
     });
     if (iconPreviewUrl?.startsWith("blob:")) URL.revokeObjectURL(iconPreviewUrl);
@@ -439,28 +475,64 @@ export default function Monsters({ isDM }: MonstersProps) {
             />
           </label>
           <label className="block text-sm text-amber-200">
-            Physical
+            STR
             <input
-              value={form.physical}
-              onChange={(event) => setForm((prev) => ({ ...prev, physical: event.target.value }))}
+              value={form.str}
+              onChange={(event) => setForm((prev) => ({ ...prev, str: event.target.value }))}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
-              placeholder="1"
+              placeholder="2"
             />
           </label>
           <label className="block text-sm text-amber-200">
-            Mental
+            AGL
             <input
-              value={form.mental}
-              onChange={(event) => setForm((prev) => ({ ...prev, mental: event.target.value }))}
+              value={form.agl}
+              onChange={(event) => setForm((prev) => ({ ...prev, agl: event.target.value }))}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
-              placeholder="1"
+              placeholder="2"
             />
           </label>
           <label className="block text-sm text-amber-200">
-            Special
+            WIT
             <input
-              value={form.special}
-              onChange={(event) => setForm((prev) => ({ ...prev, special: event.target.value }))}
+              value={form.wit}
+              onChange={(event) => setForm((prev) => ({ ...prev, wit: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="2"
+            />
+          </label>
+          <label className="block text-sm text-amber-200">
+            EMP
+            <input
+              value={form.emp}
+              onChange={(event) => setForm((prev) => ({ ...prev, emp: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="2"
+            />
+          </label>
+          <label className="block text-sm text-amber-200">
+            Skill
+            <input
+              value={form.skill}
+              onChange={(event) => setForm((prev) => ({ ...prev, skill: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="0"
+            />
+          </label>
+          <label className="block text-sm text-amber-200">
+            Starting Spirit
+            <input
+              value={form.starting_spirits}
+              onChange={(event) => setForm((prev) => ({ ...prev, starting_spirits: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="0"
+            />
+          </label>
+          <label className="block text-sm text-amber-200">
+            Natural Armor
+            <input
+              value={form.natural_armor}
+              onChange={(event) => setForm((prev) => ({ ...prev, natural_armor: event.target.value }))}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
               placeholder="0"
             />
@@ -506,6 +578,15 @@ export default function Monsters({ isDM }: MonstersProps) {
               onChange={(event) => setForm((prev) => ({ ...prev, arts: event.target.value }))}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
               placeholder="True Sense, Sunder"
+            />
+          </label>
+          <label className="block text-sm text-amber-200 lg:col-span-2">
+            Talents
+            <input
+              value={form.talents}
+              onChange={(event) => setForm((prev) => ({ ...prev, talents: event.target.value }))}
+              className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
+              placeholder="Fast Footwork 1, Lightning Fast 3"
             />
           </label>
           <label className="block text-sm text-amber-200 lg:col-span-2">
@@ -639,12 +720,15 @@ export default function Monsters({ isDM }: MonstersProps) {
         </div>
 
         <div className="mt-4 text-xs text-amber-200/80">
-          <div>Derived: STR/AGL {(Number.parseInt(form.physical, 10) || 0) * 2}</div>
-          <div>Derived: WIT/EMP {(Number.parseInt(form.mental, 10) || 0) * 2}</div>
-          <div>Derived: Starting Spirit {(Number.parseInt(form.special, 10) || 0) * 2}</div>
-          <div>Derived: Natural Armor {Number.parseInt(form.special, 10) || 0}</div>
+          <div>{`Talent cap: ${MONSTER_TALENT_MAX_LEVEL}`}</div>
           <div>Filtered Gear: {parsedGear.length > 0 ? parsedGear.map((item) => item.name).join(", ") : "None"}</div>
           <div>Filtered Arts: {parsedArts.length > 0 ? parsedArts.map((art) => art.name).join(", ") : "None"}</div>
+          <div>
+            Normalized Talents:{" "}
+            {parsedTalents.talents.length > 0
+              ? monsterToTalentsCsv(parsedTalents)
+              : "None"}
+          </div>
           <div>Normalized Traits: {parsedTraits.length > 0 ? parsedTraits.join(", ") : "None"}</div>
         </div>
 
@@ -692,10 +776,16 @@ export default function Monsters({ isDM }: MonstersProps) {
                   <div>
                     <div className="font-semibold text-amber-100">{monster.name}</div>
                     <div className="text-xs text-amber-200/80">
-                      PHY {monster.physical} | MEN {monster.mental} | SPC {monster.special} | SIZE {monster.size ?? 1}
+                      STR {monster.str} | AGL {monster.agl} | WIT {monster.wit} | EMP {monster.emp}
+                    </div>
+                    <div className="text-xs text-amber-200/80">
+                      SKL {monster.skill} | SPI {monster.starting_spirits} | ARM {monster.natural_armor} | SIZE {monster.size ?? 1}
                     </div>
                     <div className="text-xs text-amber-200/70">
                       Range {monster.range_band} | Traits {(monster.traits || []).join(", ") || "None"}
+                    </div>
+                    <div className="text-xs text-amber-200/70">
+                      Talents {monsterToTalentsCsv(monster) || "None"}
                     </div>
                   </div>
                 </div>

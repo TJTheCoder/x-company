@@ -69,7 +69,7 @@ export type EquipmentSlots = {
 
 export type TalentProgress = {
   id: string;
-  level: 1 | 2 | 3;
+  level: number;
 };
 
 export type ArtKind = "true" | "demon" | "monster" | "angel" | "mortal" | "nature";
@@ -185,7 +185,7 @@ export type ResolvedMeleeAttack = {
   shootAmmoItem?: InventoryItem | null;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   skipReaction?: boolean;
-  armorUsed?: { helmet?: boolean; armor?: boolean };
+  armorUsed?: { helmet?: boolean; armor?: boolean; naturalArmor?: boolean };
   armorSkipped?: boolean;
   sunderResolved?: boolean;
   laggingBladeResolved?: boolean;
@@ -196,7 +196,7 @@ export type PendingReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "naturalArmor" | "insight";
   rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
@@ -205,7 +205,7 @@ export type PendingReactionRoll = {
   fixedSkillDice?: number;
   fixedGearDice?: number;
   gearItemId?: string | null;
-  armorSlot?: "armor" | "helmet";
+  armorSlot?: "armor" | "helmet" | "naturalArmor";
   applyProne?: boolean;
   attack?: ResolvedMeleeAttack;
   taunt?: {
@@ -221,10 +221,10 @@ export type ResolvedReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "insight";
+  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "naturalArmor" | "insight";
   rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
-  armorSlot?: "armor" | "helmet";
+  armorSlot?: "armor" | "helmet" | "naturalArmor";
   applyProne?: boolean;
   attack?: ResolvedMeleeAttack;
   taunt?: {
@@ -246,7 +246,10 @@ export type PendingArmorPrompt = {
   armorItemId?: string | null;
   armorName?: string | null;
   armorDice?: number;
-  armorUsed?: { helmet?: boolean; armor?: boolean };
+  naturalArmorItemId?: string | null;
+  naturalArmorName?: string | null;
+  naturalArmorDice?: number;
+  armorUsed?: { helmet?: boolean; armor?: boolean; naturalArmor?: boolean };
 };
 
 export type PendingArtPromptOption =
@@ -314,6 +317,7 @@ export type NotificationData = {
 const ADMIN_EMAIL = "drocasma9@gmail.com";
 const FLAME_MAX_INTENSITY = 9;
 const FLAMING_LONGSWORD_USED_FLAG = "Used (Flaming Longsword)";
+const NATURAL_ARMOR_LABEL = "Natural Armor";
 const artsCatalog = artsCatalogData as Art[];
 
 type ParsedArtCost = {
@@ -879,6 +883,28 @@ export default function Dashboard() {
     return Math.max(0, Math.trunc(item.gearBonus ?? 0));
   };
 
+  const monsterSkillDice = (snapshot: Record<string, unknown> | null | undefined): number =>
+    Math.max(0, Math.trunc(Number(snapshot?.skill ?? snapshot?.special ?? 0) || 0));
+
+  const monsterMaxAttributeForSnapshot = (
+    snapshot: Record<string, unknown> | null | undefined,
+    attribute: keyof Attributes
+  ): number => {
+    const explicitKey = `max_${attribute.toLowerCase()}`;
+    const explicitValue = Number(snapshot?.[explicitKey] ?? 0);
+    if (Number.isFinite(explicitValue) && explicitValue > 0) {
+      return Math.max(0, Math.trunc(explicitValue));
+    }
+    const currentValue = Number(snapshot?.[attribute.toLowerCase()] ?? 0);
+    if (Number.isFinite(currentValue) && currentValue > 0) {
+      return Math.max(0, Math.trunc(currentValue));
+    }
+    if (attribute === "STR" || attribute === "AGL") {
+      return Math.max(0, Math.trunc(Number(snapshot?.physical ?? 0) * 2));
+    }
+    return Math.max(0, Math.trunc(Number(snapshot?.mental ?? 0) * 2));
+  };
+
   const isChainmailArmorItem = (item: InventoryItem): boolean => {
     if (item.item_type !== "Armor") return false;
     const props = Array.isArray(item.properties) ? item.properties : [];
@@ -1281,6 +1307,7 @@ export default function Dashboard() {
     fast_footwork_dodge_used?: boolean | null;
     prone?: boolean | null;
     monster_snapshot?: {
+      natural_armor?: number | null;
       gear?: InventoryItem[] | null;
       equipment_slots?: EquipmentSlots | null;
     } | null;
@@ -1300,7 +1327,7 @@ export default function Dashboard() {
   };
 
   type SlashProtectionOption = {
-    slot: "armor" | "helmet";
+    slot: "armor" | "helmet" | "naturalArmor";
     itemId: string;
     itemName: string;
     dice: number;
@@ -1522,6 +1549,15 @@ export default function Dashboard() {
             dice,
           });
         }
+      }
+      const naturalArmorDice = Math.max(0, Math.trunc(Number(snapshot.natural_armor ?? 0)));
+      if (naturalArmorDice > 0) {
+        options.push({
+          slot: "naturalArmor",
+          itemId: `natural-armor:${targetTokenId}`,
+          itemName: NATURAL_ARMOR_LABEL,
+          dice: naturalArmorDice,
+        });
       }
       return options;
     }
@@ -2059,10 +2095,7 @@ export default function Dashboard() {
 
         const attrKey = healAttribute.toLowerCase();
         const currentValue = Math.max(0, Number(snapshot[attrKey] ?? 0));
-        const baseMax =
-          healAttribute === "STR" || healAttribute === "AGL"
-            ? Math.max(0, Number(snapshot.physical ?? 0) * 2)
-            : Math.max(0, Number(snapshot.mental ?? 0) * 2);
+        const baseMax = monsterMaxAttributeForSnapshot(snapshot, healAttribute);
         const maxValue = Math.max(baseMax, currentValue);
         const nextValue = Math.min(maxValue, currentValue + healAmount);
 
@@ -2155,7 +2188,7 @@ export default function Dashboard() {
           .maybeSingle<{
             initiative_entries: Array<{
               participant_id: string;
-              monster_snapshot?: { wit?: number | null; special?: number | null } | null;
+              monster_snapshot?: { wit?: number | null; skill?: number | null; special?: number | null } | null;
             }> | null;
           }>();
         if (combatError || !combatState) {
@@ -2167,11 +2200,11 @@ export default function Dashboard() {
         );
         const snapshot = entry?.monster_snapshot;
         const witValue = Math.max(0, Number(snapshot?.wit ?? 0));
-        const specialValue = Math.max(0, Number(snapshot?.special ?? 0));
+        const skillValue = monsterSkillDice(snapshot as Record<string, unknown> | null | undefined);
         if (witValue > 0) {
           const insightSuccesses =
             rollD6Pool(witValue).filter((d) => d === 6).length +
-            rollD6Pool(specialValue).filter((d) => d === 6).length;
+            rollD6Pool(skillValue).filter((d) => d === 6).length;
           const remaining = Math.max(0, tauntSuccesses - insightSuccesses);
           await applyTauntToCombatState({
             ...tauntPayload,
@@ -3235,9 +3268,10 @@ export default function Dashboard() {
               remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
               armorUsed.armor = true;
             }
-            if (remainingSuccesses > 0 && naturalArmorDice > 0) {
+            if (remainingSuccesses > 0 && !armorUsed.naturalArmor && naturalArmorDice > 0) {
               const armorRoll = rollArmorDice(naturalArmorDice);
               remainingSuccesses = Math.max(0, remainingSuccesses - armorRoll.successes);
+              armorUsed.naturalArmor = true;
             }
           }
         }

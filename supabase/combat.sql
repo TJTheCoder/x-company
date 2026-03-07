@@ -2264,6 +2264,8 @@ declare
   v_target_entry jsonb;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_target_uuid uuid;
+  v_target_owner_email text;
   v_actor_effective_roll_num double precision;
   v_target_effective_roll_num double precision;
 begin
@@ -2311,19 +2313,40 @@ begin
   end if;
 
   if not v_is_dm then
-    begin
-      v_actor_uuid := p_actor_token_id::uuid;
-    exception when others then
-      raise exception 'Only player characters can feint';
-    end;
+    if coalesce(v_actor_entry->>'kind', '') = 'monster' then
+      if coalesce(v_target_entry->>'kind', '') <> 'player' then
+        raise exception 'Only targeted players can resolve monster feints';
+      end if;
 
-    select email into v_actor_owner_email
-    from public.characters
-    where id = v_actor_uuid
-    limit 1;
+      begin
+        v_target_uuid := p_target_token_id::uuid;
+      exception when others then
+        raise exception 'Only targeted players can resolve monster feints';
+      end;
 
-    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
-      raise exception 'You can only feint with your own character';
+      select email into v_target_owner_email
+      from public.characters
+      where id = v_target_uuid
+      limit 1;
+
+      if v_target_owner_email is null or lower(v_target_owner_email) <> lower(v_email) then
+        raise exception 'Only targeted players can resolve monster feints';
+      end if;
+    else
+      begin
+        v_actor_uuid := p_actor_token_id::uuid;
+      exception when others then
+        raise exception 'Only player characters can feint';
+      end;
+
+      select email into v_actor_owner_email
+      from public.characters
+      where id = v_actor_uuid
+      limit 1;
+
+      if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+        raise exception 'You can only feint with your own character';
+      end if;
     end if;
   end if;
 
@@ -4144,6 +4167,8 @@ declare
   v_target_size int := 1;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_target_uuid uuid;
+  v_target_owner_email text;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -4218,19 +4243,40 @@ begin
   end if;
 
   if not v_is_dm then
-    begin
-      v_actor_uuid := p_actor_token_id::uuid;
-    exception when others then
-      raise exception 'Only player characters can shove';
-    end;
+    if coalesce(v_actor_entry->>'kind', '') = 'monster' then
+      if coalesce(v_target_entry->>'kind', '') <> 'player' then
+        raise exception 'Only targeted players can resolve monster shoves';
+      end if;
 
-    select email into v_actor_owner_email
-    from public.characters
-    where id = v_actor_uuid
-    limit 1;
+      begin
+        v_target_uuid := p_target_token_id::uuid;
+      exception when others then
+        raise exception 'Only targeted players can resolve monster shoves';
+      end;
 
-    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
-      raise exception 'You can only shove using your own character';
+      select email into v_target_owner_email
+      from public.characters
+      where id = v_target_uuid
+      limit 1;
+
+      if v_target_owner_email is null or lower(v_target_owner_email) <> lower(v_email) then
+        raise exception 'Only targeted players can resolve monster shoves';
+      end if;
+    else
+      begin
+        v_actor_uuid := p_actor_token_id::uuid;
+      exception when others then
+        raise exception 'Only player characters can shove';
+      end;
+
+      select email into v_actor_owner_email
+      from public.characters
+      where id = v_actor_uuid
+      limit 1;
+
+      if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+        raise exception 'You can only shove using your own character';
+      end if;
     end if;
   end if;
 
@@ -4419,6 +4465,7 @@ declare
   v_actor_uuid uuid;
   v_actor_owner_email text;
   v_target_uuid uuid;
+  v_target_owner_email text;
   v_target_inventory jsonb;
   v_target_slots jsonb;
   v_target_item jsonb;
@@ -4509,19 +4556,40 @@ begin
   end if;
 
   if not v_is_dm then
-    begin
-      v_actor_uuid := p_actor_token_id::uuid;
-    exception when others then
-      raise exception 'Only player characters can disarm';
-    end;
+    if coalesce(v_actor_entry->>'kind', '') = 'monster' then
+      if coalesce(v_target_entry->>'kind', '') <> 'player' then
+        raise exception 'Only targeted players can resolve monster disarms';
+      end if;
 
-    select email into v_actor_owner_email
-    from public.characters
-    where id = v_actor_uuid
-    limit 1;
+      begin
+        v_target_uuid := p_target_token_id::uuid;
+      exception when others then
+        raise exception 'Only targeted players can resolve monster disarms';
+      end;
 
-    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
-      raise exception 'You can only disarm using your own character';
+      select email into v_target_owner_email
+      from public.characters
+      where id = v_target_uuid
+      limit 1;
+
+      if v_target_owner_email is null or lower(v_target_owner_email) <> lower(v_email) then
+        raise exception 'Only targeted players can resolve monster disarms';
+      end if;
+    else
+      begin
+        v_actor_uuid := p_actor_token_id::uuid;
+      exception when others then
+        raise exception 'Only player characters can disarm';
+      end;
+
+      select email into v_actor_owner_email
+      from public.characters
+      where id = v_actor_uuid
+      limit 1;
+
+      if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+        raise exception 'You can only disarm using your own character';
+      end if;
     end if;
   end if;
 
@@ -5043,6 +5111,7 @@ declare
   v_target_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_target_owner_email text;
   v_actor_size int := 1;
   v_target_size int := 1;
   v_actor_kind text;
@@ -5138,19 +5207,40 @@ begin
   end if;
 
   if not v_is_dm then
-    begin
-      v_actor_uuid := p_actor_token_id::uuid;
-    exception when others then
-      raise exception 'Only player characters can use this action';
-    end;
+    if coalesce(v_actor_entry->>'kind', '') = 'monster' then
+      if coalesce(v_target_entry->>'kind', '') <> 'player' then
+        raise exception 'Only targeted players can resolve monster grapple/cling';
+      end if;
 
-    select email into v_actor_owner_email
-    from public.characters
-    where id = v_actor_uuid
-    limit 1;
+      begin
+        v_target_uuid := p_target_token_id::uuid;
+      exception when others then
+        raise exception 'Only targeted players can resolve monster grapple/cling';
+      end;
 
-    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
-      raise exception 'You can only use this action with your own character';
+      select email into v_target_owner_email
+      from public.characters
+      where id = v_target_uuid
+      limit 1;
+
+      if v_target_owner_email is null or lower(v_target_owner_email) <> lower(v_email) then
+        raise exception 'Only targeted players can resolve monster grapple/cling';
+      end if;
+    else
+      begin
+        v_actor_uuid := p_actor_token_id::uuid;
+      exception when others then
+        raise exception 'Only player characters can use this action';
+      end;
+
+      select email into v_actor_owner_email
+      from public.characters
+      where id = v_actor_uuid
+      limit 1;
+
+      if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+        raise exception 'You can only use this action with your own character';
+      end if;
     end if;
   end if;
 

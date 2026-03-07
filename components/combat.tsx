@@ -275,6 +275,8 @@ export default function Combat({
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
   const autoPassAttemptRef = useRef<string | null>(null);
+  const autoClearedBrokenSwingRef = useRef<Set<string>>(new Set());
+  const autoClearingBrokenSwingRef = useRef(false);
   const isResizingPanelRef = useRef(false);
   const resizePanelStartRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -4814,6 +4816,62 @@ export default function Combat({
       setError,
     });
   };
+
+  useEffect(() => {
+    if (!combatMode || initiativeEntries.length === 0) {
+      autoClearedBrokenSwingRef.current.clear();
+      autoClearingBrokenSwingRef.current = false;
+      return;
+    }
+
+    let nextParticipantId: string | null = null;
+    let nextKey: string | null = null;
+    const activeKeys = new Set<string>();
+
+    for (const entry of initiativeEntries) {
+      if (!entry.swing_weapon_item_id) continue;
+      const tokenId = tokenIdFromParticipantId(entry.participant_id);
+      if (!tokenId) continue;
+      const canMutate = isDmUser || (entry.kind === "player" && tokenId === currentUserTokenId);
+      if (!canMutate) continue;
+      const state = tokenStateById.get(tokenId);
+      const shouldClear = Boolean(state?.dead || state?.physicalBroken || state?.mentalBroken);
+      if (!shouldClear) continue;
+      const key = `${entry.participant_id}:${entry.swing_weapon_item_id}`;
+      activeKeys.add(key);
+      if (!nextKey && !autoClearedBrokenSwingRef.current.has(key)) {
+        nextKey = key;
+        nextParticipantId = entry.participant_id;
+      }
+    }
+
+    for (const key of Array.from(autoClearedBrokenSwingRef.current)) {
+      if (!activeKeys.has(key)) {
+        autoClearedBrokenSwingRef.current.delete(key);
+      }
+    }
+
+    if (!nextKey || !nextParticipantId || autoClearingBrokenSwingRef.current) return;
+
+    autoClearedBrokenSwingRef.current.add(nextKey);
+    autoClearingBrokenSwingRef.current = true;
+    void clearSwingForParticipant(nextParticipantId, { preserveAim: true })
+      .then((cleared) => {
+        if (!cleared) {
+          autoClearedBrokenSwingRef.current.delete(nextKey!);
+        }
+      })
+      .finally(() => {
+        autoClearingBrokenSwingRef.current = false;
+      });
+  }, [
+    combatMode,
+    initiativeEntries,
+    isDmUser,
+    currentUserTokenId,
+    tokenStateById,
+    clearSwingForParticipant,
+  ]);
 
   useEffect(() => {
     const participantId = currentEntry?.participant_id ?? null;

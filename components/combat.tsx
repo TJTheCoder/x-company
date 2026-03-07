@@ -1115,10 +1115,10 @@ export default function Combat({
     !pendingReactionIsFirearm &&
     !isSkillBlockedForToken(reactionTargetId, "MELEE");
   const parryOptions = useMemo(() => {
-    if (!pendingReaction || !canParryReaction || !reactionManeuver || !REACTION_MANEUVER_SET.has(reactionManeuver)) {
+    if (!pendingReaction || !reactionManeuver || !REACTION_MANEUVER_SET.has(reactionManeuver)) {
       return [] as Array<{ id: string; name: string; gearBonus: number; kind: "weapon" | "shield" }>;
     }
-    if (reactionManeuver === "Shove") return [];
+    if (reactionManeuver === "Shove" || reactionManeuver === "Shoot" || pendingReactionIsFirearm) return [];
     if (reactionTargetIsMonster) {
       const snapshot = reactionTargetEntry?.monster_snapshot;
       if (!snapshot) return [];
@@ -1156,7 +1156,7 @@ export default function Combat({
         kind: "shield" as const,
       })),
     ];
-  }, [pendingReaction, canParryReaction, reactionManeuver, character, reactionTargetIsMonster, reactionTargetEntry]);
+  }, [pendingReaction, reactionManeuver, pendingReactionIsFirearm, character, reactionTargetIsMonster, reactionTargetEntry]);
   const slashReactionTargetIsMonster = currentEntry?.kind === "monster";
   const slashReactionTargetCharacter = actorTokenId ? characterById.get(actorTokenId) || null : null;
   const slashReactionTalentSource = slashReactionTargetIsMonster
@@ -1193,7 +1193,7 @@ export default function Combat({
     slashIncomingDamage?.type !== "Shoot" &&
     !isSkillBlockedForToken(actorTokenId, "MELEE");
   const slashParryOptions = useMemo(() => {
-    if (!slashCanParryReaction || !slashIncomingActive) {
+    if (!slashIncomingActive || slashIncomingDamage?.type === "Shoot") {
       return [] as Array<{ id: string; name: string; gearBonus: number; kind: "weapon" | "shield" }>;
     }
     if (slashReactionTargetIsMonster) {
@@ -1233,7 +1233,7 @@ export default function Combat({
         kind: "shield" as const,
       })),
     ];
-  }, [slashCanParryReaction, slashIncomingActive, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
+  }, [slashIncomingActive, slashIncomingDamage?.type, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
   const shouldShowReactionModal =
     ((Boolean(pendingReaction) &&
       REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
@@ -1241,7 +1241,6 @@ export default function Combat({
       viewerCanControlReaction) ||
       (slashReactionPhase && slashCanControlPhase)) &&
     combatMode;
-  const canControlPendingReactionChoices = canDodgeReaction || canParryReaction;
   const effectiveProtectionDice = (item: InventoryItem | null | undefined): number => {
     if (!item) return 0;
     if (
@@ -7304,42 +7303,40 @@ export default function Combat({
                     ))}
                 </>
               ) : (
-                canControlPendingReactionChoices && (
-                  <>
+                <>
+                  <button
+                    onClick={() => void resolvePendingReaction("dodge-stand")}
+                    disabled={isResolvingReaction || !canDodgeReaction}
+                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                      freeDodgeAvailable
+                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                    }`}
+                  >
+                    Dodge (Standing)
+                  </button>
+                  <button
+                    onClick={() => void resolvePendingReaction("dodge-prone")}
+                    disabled={isResolvingReaction || !canDodgeReaction}
+                    className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                      freeDodgeAvailable
+                        ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
+                        : "bg-orange-700 text-orange-100 hover:bg-orange-600"
+                    }`}
+                  >
+                    Dodge (Fall Prone)
+                  </button>
+                  {parryOptions.map((option) => (
                     <button
-                      onClick={() => void resolvePendingReaction("dodge-stand")}
-                      disabled={isResolvingReaction || !canDodgeReaction}
-                      className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
-                        freeDodgeAvailable
-                          ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
-                          : "bg-orange-700 text-orange-100 hover:bg-orange-600"
-                      }`}
+                      key={`parry-${option.id}`}
+                      onClick={() => void resolvePendingReaction("parry", option)}
+                      disabled={isResolvingReaction || !canParryReaction}
+                      className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
                     >
-                      Dodge (Standing)
+                      {`Parry (${option.name})`}
                     </button>
-                    <button
-                      onClick={() => void resolvePendingReaction("dodge-prone")}
-                      disabled={isResolvingReaction || !canDodgeReaction}
-                      className={`w-full rounded px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
-                        freeDodgeAvailable
-                          ? "bg-sky-700 text-sky-100 hover:bg-sky-600"
-                          : "bg-orange-700 text-orange-100 hover:bg-orange-600"
-                      }`}
-                    >
-                      Dodge (Fall Prone)
-                    </button>
-                    {parryOptions.map((option) => (
-                      <button
-                        key={`parry-${option.id}`}
-                        onClick={() => void resolvePendingReaction("parry", option)}
-                        disabled={isResolvingReaction || !canParryReaction}
-                        className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600 disabled:opacity-60"
-                      >
-                        {`Parry (${option.name})`}
-                      </button>
-                    ))}
-                  </>
-                )
+                  ))}
+                </>
               )}
               <button
                 onClick={() => void resolvePendingReaction("pass")}

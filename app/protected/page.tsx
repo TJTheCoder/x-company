@@ -1019,6 +1019,10 @@ export default function Dashboard() {
     return attack.firearmAttack === true;
   };
 
+  const isBulletAmmoItem = (item: InventoryItem | null | undefined): boolean => {
+    return hasItemProperty(item, "bullet");
+  };
+
   const applyTemporaryArmorRollEffectiveBonuses = (
     items: InventoryItem[],
     options: { applyChainmailPenalty: boolean; applyWoodenBonus: boolean }
@@ -2926,6 +2930,7 @@ export default function Dashboard() {
     if (attack.maneuver === "Shoot" && !didSucceed) {
       if (
         attack.shootAmmoItem &&
+        !isBulletAmmoItem(attack.shootAmmoItem) &&
         attack.shootTargetZoneId !== null &&
         attack.shootTargetZoneId !== undefined &&
         attack.shootTargetZoneId > 0

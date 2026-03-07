@@ -93,6 +93,18 @@ const LIGHT_CROSSBOW: CanonicalItem = {
   properties: ["Loading"],
 };
 
+const MATCHLOCK_RIFLE: CanonicalItem = {
+  key: "matchlock rifle",
+  name: "Matchlock Rifle",
+  weight: 2,
+  gearBonus: 1,
+  itemType: "Ranged Weapon",
+  wield: "2H",
+  damage: 3,
+  rangeBand: "Long",
+  properties: ["Loading", "Firearm"],
+};
+
 const PLATE_ARMOR: CanonicalItem = {
   key: "plate armor",
   name: "Plate Armor",
@@ -188,6 +200,7 @@ const ARROW: CanonicalItem = {
   name: "Arrow",
   weight: 0.2,
   itemType: "Ammunition",
+  properties: ["Arrow"],
 };
 
 const WOODEN_ARROW: CanonicalItem = {
@@ -195,8 +208,18 @@ const WOODEN_ARROW: CanonicalItem = {
   name: "Wooden Arrow",
   weight: 0.2,
   itemType: "Ammunition",
-  properties: ["Wooden"],
+  properties: ["Arrow", "Wooden"],
 };
+
+const BULLET: CanonicalItem = {
+  key: "bullet",
+  name: "Bullet",
+  weight: 0.2,
+  itemType: "Ammunition",
+  properties: ["Bullet"],
+};
+
+const WOODEN_BULLET = withWoodenProperty(BULLET, "wooden bullet", "Wooden Bullet");
 
 const TORCH: CanonicalItem = {
   key: "torch",
@@ -219,6 +242,7 @@ const CATALOG: CanonicalItem[] = [
   WOODEN_GREATSWORD,
   LEATHER_ARMOR,
   LIGHT_CROSSBOW,
+  MATCHLOCK_RIFLE,
   PLATE_ARMOR,
   SHORTBOW,
   SHORTSWORD,
@@ -233,6 +257,8 @@ const CATALOG: CanonicalItem[] = [
   SMALL_SHIELD,
   ARROW,
   WOODEN_ARROW,
+  BULLET,
+  WOODEN_BULLET,
   LAMP_OIL,
   TORCH,
 ];

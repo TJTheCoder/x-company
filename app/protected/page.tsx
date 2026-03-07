@@ -143,6 +143,7 @@ export type PendingMeleeAction = {
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
   woodenAttack?: boolean;
+  firearmAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
 };
 
@@ -185,6 +186,7 @@ export type ResolvedMeleeAttack = {
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
   woodenAttack?: boolean;
+  firearmAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   skipReaction?: boolean;
   armorUsed?: { helmet?: boolean; armor?: boolean; naturalArmor?: boolean };
@@ -926,6 +928,11 @@ export default function Dashboard() {
     return hasItemProperty(attack.shootAmmoItem, "wooden");
   };
 
+  const isFirearmAttack = (attack: ResolvedMeleeAttack | null | undefined): boolean => {
+    if (!attack) return false;
+    return attack.firearmAttack === true;
+  };
+
   const applyTemporaryArmorRollEffectiveBonuses = (
     items: InventoryItem[],
     options: { applyChainmailPenalty: boolean; applyWoodenBonus: boolean }
@@ -1236,7 +1243,8 @@ export default function Dashboard() {
         disarmTargetItemId: null,
         disarmZoneId: null,
       },
-      preResolveReaction: true,
+      preResolveDodged: true,
+      preResolveParried: true,
       preResolveArtsChosen: true,
       autoUseProtectionWhenNoDamageTotal: false,
     });
@@ -1663,7 +1671,8 @@ export default function Dashboard() {
     attackerTokenId: string;
     incoming: IncomingDamageFlag;
     meta: IncomingDamageMeta;
-    preResolveReaction?: boolean;
+    preResolveDodged?: boolean;
+    preResolveParried?: boolean;
     preResolveArtsChosen?: boolean;
     autoUseProtectionWhenNoDamageTotal?: boolean;
   }): Promise<boolean> => {
@@ -1696,10 +1705,8 @@ export default function Dashboard() {
     const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
     const attackerFlags = normalizeFlagList(attackerEntry.used_item_flags);
     const preppedTargetFlags = targetFlags.filter((flag) => !isReactionStackTransientFlag(flag));
-    if (params.preResolveReaction) {
-      preppedTargetFlags.push(DODGED_FLAG);
-      preppedTargetFlags.push(PARRIED_FLAG);
-    }
+    if (params.preResolveDodged) preppedTargetFlags.push(DODGED_FLAG);
+    if (params.preResolveParried) preppedTargetFlags.push(PARRIED_FLAG);
     if (params.incoming.totalDamage === null && params.autoUseProtectionWhenNoDamageTotal !== false) {
       const protectionOptions = await resolveSlashProtectionOptions(params.targetTokenId, targetEntry);
       for (const option of protectionOptions) {
@@ -1754,7 +1761,11 @@ export default function Dashboard() {
     if (!isFlagFlowTriggerManeuver(attack.maneuver)) return false;
     const flowManeuver: FlagFlowManeuver =
       attack.maneuver === "Grapple Attack" ? "Strike" : attack.maneuver;
-    const preResolveReaction = attack.maneuver === "Grapple Attack";
+    const preResolveDodged =
+      attack.maneuver === "Grapple Attack" ||
+      (attack.maneuver === "Shoot" && isFirearmAttack(attack));
+    const preResolveParried =
+      attack.maneuver === "Grapple Attack" || attack.maneuver === "Shoot";
     const hasIncomingDamageTotal =
       flowManeuver !== "Grapple" &&
       flowManeuver !== "Cling" &&
@@ -1776,19 +1787,21 @@ export default function Dashboard() {
     const meta: IncomingDamageMeta = {
       attackerTokenId: attack.attackerCharacterId,
       attackId: attack.id,
-      weaponName: preResolveReaction ? "Strike" : attack.weaponName,
+      weaponName: attack.maneuver === "Grapple Attack" ? "Strike" : attack.weaponName,
       weaponBaseDamage: Math.max(0, Math.trunc(attack.weaponBaseDamage ?? 0)),
       rangeAtAttack: attack.rangeAtAttack ?? null,
       disarmTargetItemId: attack.disarmTargetItemId ?? null,
       disarmZoneId: attack.disarmZoneId ?? null,
       woodenAttack: isWoodenAttack(attack),
+      firearmAttack: isFirearmAttack(attack),
     };
     return initializeIncomingFlagFlow({
       targetTokenId: attack.targetCharacterId,
       attackerTokenId: attack.attackerCharacterId,
       incoming,
       meta,
-      preResolveReaction,
+      preResolveDodged,
+      preResolveParried,
       autoUseProtectionWhenNoDamageTotal: true,
     });
   };
@@ -1908,7 +1921,8 @@ export default function Dashboard() {
     const shouldOfferReaction =
       !attack.skipReaction &&
       successes > 0 &&
-      reactionEligibleManeuvers.has(attack.maneuver);
+      reactionEligibleManeuvers.has(attack.maneuver) &&
+      !(attack.maneuver === "Shoot" && isFirearmAttack(attack));
     if (isFlagFlowTriggerManeuver(attack.maneuver) && !attack.skipReaction && successes > 0) {
       const startedSlashFlow = await beginSlashIncomingDamageFlow(attack, successes);
       if (startedSlashFlow) {
@@ -2355,6 +2369,7 @@ export default function Dashboard() {
             shootTargetZoneId: attack.shootTargetZoneId ?? null,
             shootAmmoItem: attack.shootAmmoItem ?? null,
             woodenAttack: isWoodenAttack(attack),
+            firearmAttack: isFirearmAttack(attack),
             rangeAtAttack: attack.rangeAtAttack ?? null,
             createdAt: new Date().toISOString(),
           };
@@ -3084,6 +3099,7 @@ export default function Dashboard() {
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
           woodenAttack: slashState.meta.woodenAttack ?? false,
+          firearmAttack: slashState.meta.firearmAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           armorSkipped: incomingHasDamageTotal,
@@ -3739,6 +3755,7 @@ export default function Dashboard() {
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
           woodenAttack: slashState.meta.woodenAttack ?? false,
+          firearmAttack: slashState.meta.firearmAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           sunderResolved: true,
@@ -3764,6 +3781,7 @@ export default function Dashboard() {
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
           woodenAttack: slashState.meta.woodenAttack ?? false,
+          firearmAttack: slashState.meta.firearmAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           slashFlow: true,
@@ -3802,6 +3820,7 @@ export default function Dashboard() {
         disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
         disarmZoneId: slashState.meta.disarmZoneId ?? null,
         woodenAttack: slashState.meta.woodenAttack ?? false,
+        firearmAttack: slashState.meta.firearmAttack ?? false,
         rangeAtAttack: slashState.meta.rangeAtAttack,
         skipReaction: true,
         armorSkipped: incomingHasDamageTotal,

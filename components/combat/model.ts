@@ -179,6 +179,7 @@ export type PendingReaction = {
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
   woodenAttack?: boolean;
+  firearmAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   createdAt?: string | null;
 };
@@ -690,6 +691,7 @@ export function normalizePendingReactions(raw: PendingReaction[] | null | undefi
       shootAmmoItem:
         v.shootAmmoItem && typeof v.shootAmmoItem === "object" ? (v.shootAmmoItem as InventoryItem) : null,
       woodenAttack: v.woodenAttack === true,
+      firearmAttack: v.firearmAttack === true,
       rangeAtAttack:
         v.rangeAtAttack === "Engaged" ||
         v.rangeAtAttack === "Near" ||
@@ -1092,6 +1094,42 @@ export function isAmmunition(item: InventoryItem): boolean {
   return (item.item_type || "").toLowerCase() === "ammunition";
 }
 
+export function itemHasProperty(item: InventoryItem | null | undefined, propertyName: string): boolean {
+  if (!item) return false;
+  const normalizedProperty = propertyName.trim().toLowerCase();
+  const props = Array.isArray(item.properties) ? item.properties : [];
+  return props.some((value) => String(value).trim().toLowerCase() === normalizedProperty);
+}
+
+export function isFirearmWeapon(item: InventoryItem | null | undefined): boolean {
+  return Boolean(item && (item.item_type || "").toLowerCase() === "ranged weapon" && itemHasProperty(item, "firearm"));
+}
+
+export function isBulletAmmo(item: InventoryItem | null | undefined): boolean {
+  if (!item || !isAmmunition(item)) return false;
+  if (itemHasProperty(item, "bullet")) return true;
+  const normalizedKey = String(item.item_key || "").trim().toLowerCase();
+  const normalizedName = String(item.name || "").trim().toLowerCase();
+  return (
+    normalizedKey === "bullet" ||
+    normalizedKey === "wooden bullet" ||
+    normalizedName === "bullet" ||
+    normalizedName === "wooden bullet"
+  );
+}
+
+export function isAmmoCompatibleWithWeapon(
+  ammo: InventoryItem | null | undefined,
+  weapon: InventoryItem | null | undefined
+): boolean {
+  if (!ammo || !weapon || !isAmmunition(ammo)) return false;
+  return isFirearmWeapon(weapon) ? isBulletAmmo(ammo) : !isBulletAmmo(ammo);
+}
+
+export function hasCompatibleAmmo(items: InventoryItem[], weapon: InventoryItem | null | undefined): boolean {
+  return items.some((item) => isAmmoCompatibleWithWeapon(item, weapon));
+}
+
 export function readiedHandForWeapon(
   slots: { left?: string | null; right?: string | null } | null | undefined,
   weapon: { id: string; name: string }
@@ -1112,6 +1150,28 @@ export function cloneAmmoUnit(item: InventoryItem): InventoryItem {
     id: `ammo:${crypto.randomUUID()}`,
     quantity: 1,
   };
+}
+
+export function consumeFirstCompatibleAmmo(
+  items: InventoryItem[],
+  weapon: InventoryItem | null | undefined
+): { nextItems: InventoryItem[]; ammo: InventoryItem | null } {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!isAmmoCompatibleWithWeapon(item, weapon)) continue;
+    const qty = Math.max(1, item.quantity || 1);
+    const ammo = cloneAmmoUnit(item);
+    if (qty <= 1) {
+      return {
+        nextItems: [...items.slice(0, i), ...items.slice(i + 1)],
+        ammo,
+      };
+    }
+    const nextItems = [...items];
+    nextItems[i] = { ...item, quantity: qty - 1 };
+    return { nextItems, ammo };
+  }
+  return { nextItems: items, ammo: null };
 }
 
 export function consumeFirstAmmo(items: InventoryItem[]): { nextItems: InventoryItem[]; ammo: InventoryItem | null } {

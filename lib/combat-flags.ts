@@ -21,6 +21,7 @@ export type IncomingDamageMeta = {
   disarmTargetItemId?: string | null;
   disarmZoneId?: number | null;
   woodenAttack?: boolean | null;
+  firearmAttack?: boolean | null;
 };
 
 const clampInt = (value: number): number => {
@@ -117,6 +118,7 @@ export const buildIncomingDamageMetaFlag = (meta: IncomingDamageMeta): string =>
         : ""
     ),
     encodePart(meta.woodenAttack ? "1" : ""),
+    encodePart(meta.firearmAttack ? "1" : ""),
   ].join("|");
   return `${INCOMING_META_PREFIX}${serialized})`;
 };
@@ -126,7 +128,7 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
   if (!raw.startsWith(INCOMING_META_PREFIX) || !raw.endsWith(")")) return null;
   const body = raw.slice(INCOMING_META_PREFIX.length, -1);
   const parts = body.split("|");
-  const [attackerPart, attackPart, weaponPart, p4, p5, p6, p7, p8] = parts;
+  const [attackerPart, attackPart, weaponPart, p4, p5, p6, p7, p8, p9] = parts;
   if (!attackerPart || !attackPart) return null;
   const hasWeaponBase = parts.length >= 7;
   const weaponBasePart = hasWeaponBase ? p4 : "";
@@ -138,6 +140,7 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
   const disarmItemValue = decodePart(disarmItemPart || "").trim();
   const disarmZoneValue = decodePart(disarmZonePart || "").trim();
   const woodenAttackValue = decodePart(woodenAttackPart || "").trim();
+  const firearmAttackValue = decodePart((parts.length >= 9 ? p9 : "") || "").trim();
   const parsedWeaponBase = weaponBaseValue ? Number.parseInt(weaponBaseValue, 10) : Number.NaN;
   const parsedDisarmZone = disarmZoneValue ? Number.parseInt(disarmZoneValue, 10) : Number.NaN;
   return {
@@ -149,6 +152,7 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
     disarmTargetItemId: disarmItemValue || null,
     disarmZoneId: Number.isFinite(parsedDisarmZone) ? Math.trunc(parsedDisarmZone) : null,
     woodenAttack: woodenAttackValue === "1",
+    firearmAttack: firearmAttackValue === "1",
   };
 };
 

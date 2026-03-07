@@ -78,9 +78,11 @@ const {
   isParryingWeapon,
   playerEquippedRangedWeapons,
   monsterEquippedRangedWeapons,
-  isAmmunition,
+  isFirearmWeapon,
+  isAmmoCompatibleWithWeapon,
+  hasCompatibleAmmo,
   readiedHandForWeapon,
-  consumeFirstAmmo,
+  consumeFirstCompatibleAmmo,
   cycleMonsterDrawGear,
 } = combatModel;
 
@@ -897,6 +899,7 @@ export default function Combat({
         disarmTargetItemId: metaRecord.value.disarmTargetItemId ?? null,
         disarmZoneId: metaRecord.value.disarmZoneId ?? null,
         woodenAttack: metaRecord.value.woodenAttack === true,
+        firearmAttack: metaRecord.value.firearmAttack === true,
         rangeAtAttack: metaRecord.value.rangeAtAttack ?? null,
         skipReaction: true,
         slashFlow: true,
@@ -936,6 +939,7 @@ export default function Combat({
       disarmTargetItemId: slashIncomingMeta.disarmTargetItemId ?? null,
       disarmZoneId: slashIncomingMeta.disarmZoneId ?? null,
       woodenAttack: slashIncomingMeta.woodenAttack === true,
+      firearmAttack: slashIncomingMeta.firearmAttack === true,
       rangeAtAttack: slashIncomingMeta.rangeAtAttack ?? null,
       skipReaction: true,
       slashFlow: true,
@@ -1074,6 +1078,7 @@ export default function Combat({
   const sizeDelta = pendingReaction
     ? sizeForTokenId(reactionTargetId) - sizeForTokenId(pendingReaction.attackerCharacterId)
     : 0;
+  const pendingReactionIsFirearm = pendingReaction?.firearmAttack === true;
   const canDodgeReaction =
     combatMode &&
     Boolean(pendingReaction) &&
@@ -1083,8 +1088,13 @@ export default function Combat({
     !reactionTargetIsHeld &&
     !reactionTargetIsDead &&
     !reactionTargetIsBroken &&
+    !pendingReactionIsFirearm &&
     !isSkillBlockedForToken(reactionTargetId, "MOVE");
-  const canParryReaction = canReact && !isSkillBlockedForToken(reactionTargetId, "MELEE");
+  const canParryReaction =
+    canReact &&
+    reactionManeuver !== "Shoot" &&
+    !pendingReactionIsFirearm &&
+    !isSkillBlockedForToken(reactionTargetId, "MELEE");
   const parryOptions = useMemo(() => {
     if (!pendingReaction || !canParryReaction || !reactionManeuver || !REACTION_MANEUVER_SET.has(reactionManeuver)) {
       return [] as Array<{ id: string; name: string; gearBonus: number; kind: "weapon" | "shield" }>;
@@ -1146,6 +1156,7 @@ export default function Combat({
     !actorState.dead &&
     !actorState.physicalBroken &&
     !actorState.mentalBroken &&
+    !Boolean(slashIncomingMeta?.firearmAttack) &&
     !isSkillBlockedForToken(actorTokenId, "MOVE");
   const slashCanParryReaction =
     slashReactionPhase &&
@@ -1158,6 +1169,7 @@ export default function Combat({
     !actorState.dead &&
     !actorState.physicalBroken &&
     !actorState.mentalBroken &&
+    slashIncomingDamage?.type !== "Shoot" &&
     !isSkillBlockedForToken(actorTokenId, "MELEE");
   const slashParryOptions = useMemo(() => {
     if (!slashCanParryReaction || !slashIncomingActive) {
@@ -1598,6 +1610,7 @@ export default function Combat({
         shootTargetZoneId: pendingReaction.shootTargetZoneId ?? null,
         shootAmmoItem: pendingReaction.shootAmmoItem ?? null,
         woodenAttack: pendingReaction.woodenAttack ?? false,
+        firearmAttack: pendingReaction.firearmAttack ?? false,
         rangeAtAttack: pendingReaction.rangeAtAttack ?? null,
         skipReaction: true,
       };
@@ -2166,6 +2179,7 @@ export default function Combat({
             : [];
       const weapon = sourceWeapons.find((w) => w.id === currentReadied.weaponItemId);
       if (!weapon) return false;
+      if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return false;
       return weaponSupportsRange(weapon.range_band, targetRange);
     },
     [
@@ -3270,9 +3284,8 @@ export default function Combat({
     const options: Array<{ weaponItemId: string; weaponName: string; isLoading: boolean; hand: "left" | "right" | "both" }> = [];
     if (currentEntry.kind === "player") {
       if (!actorCharacter || !character || actorCharacter.id !== character.id) return [];
-      const ammoExists = (character.inventory || []).some(isAmmunition);
-      if (!ammoExists) return [];
       for (const weapon of playerEquippedRangedWeapons(character)) {
+        if (!hasCompatibleAmmo(character.inventory || [], weapon)) continue;
         const hand = readiedHandForWeapon(character.equipment_slots, weapon);
         if (!hand) continue;
         const props = (weapon.properties || []).map((p) => p.toLowerCase());
@@ -3288,9 +3301,8 @@ export default function Combat({
     } else {
       const snapshot = currentEntry.monster_snapshot;
       if (!snapshot) return [];
-      const ammoExists = (snapshot.gear || []).some(isAmmunition);
-      if (!ammoExists) return [];
       for (const weapon of monsterEquippedRangedWeapons(snapshot)) {
+        if (!hasCompatibleAmmo(snapshot.gear || [], weapon)) continue;
         const hand = readiedHandForWeapon(snapshot.equipment_slots, weapon);
         if (!hand) continue;
         const props = (weapon.properties || []).map((p) => p.toLowerCase());
@@ -3413,6 +3425,7 @@ export default function Combat({
           : [];
     const weapon = sourceWeapons.find((w) => w.id === currentReadied.weaponItemId);
     if (!weapon) return [];
+    if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return [];
     if (!weaponSupportsRange(weapon.range_band, selectedRange)) return [];
     const rangePenalty =
       selectedRange === "Close" ? -1 : selectedRange === "Long" ? -2 : selectedRange === "Distant" ? -3 : 0;
@@ -3932,20 +3945,17 @@ export default function Combat({
       const heldRanged = playerEquippedRangedWeapons(player);
       let readiedWeapon: InventoryItem | null = null;
       let readiedHand: "left" | "right" | "both" | null = null;
+      let readiedAmmo: InventoryItem | null = null;
       for (const weapon of heldRanged) {
         const hand = readiedHandForWeapon(player.equipment_slots, weapon);
         if (!hand) continue;
+        const consumed = consumeFirstCompatibleAmmo(player.inventory || [], weapon);
+        if (!consumed.ammo) continue;
         readiedWeapon = weapon;
         readiedHand = hand;
+        readiedAmmo = consumed.ammo;
+        updatedPlayers.push({ id: player.id, inventory: consumed.nextItems });
         break;
-      }
-      let readiedAmmo: InventoryItem | null = null;
-      if (readiedWeapon) {
-        const consumed = consumeFirstAmmo(player.inventory || []);
-        if (consumed.ammo) {
-          readiedAmmo = consumed.ammo;
-          updatedPlayers.push({ id: player.id, inventory: consumed.nextItems });
-        }
       }
       return {
         participant_id: `player:${player.id}`,
@@ -3981,26 +3991,30 @@ export default function Combat({
       const ranged = monsterEquippedRangedWeapons(snapshot);
       let readiedWeapon: InventoryItem | null = null;
       let readiedHand: "left" | "right" | "both" | null = null;
+      let readiedAmmo: InventoryItem | null = null;
+      let nextGear: InventoryItem[] | null = null;
       for (const weapon of ranged) {
         const hand = readiedHandForWeapon(snapshot.equipment_slots, weapon);
         if (!hand) continue;
+        const consumed = consumeFirstCompatibleAmmo(snapshot.gear || [], weapon);
+        if (!consumed.ammo) continue;
         readiedWeapon = weapon;
         readiedHand = hand;
+        readiedAmmo = consumed.ammo;
+        nextGear = consumed.nextItems;
         break;
       }
-      if (!readiedWeapon) return monster;
-      const consumed = consumeFirstAmmo(snapshot.gear || []);
-      if (!consumed.ammo) return monster;
+      if (!readiedWeapon || !readiedAmmo || !nextGear) return monster;
       monsterReadiedById.set(monster.id, {
         weapon: readiedWeapon,
         hand: readiedHand!,
-        ammo: consumed.ammo,
+        ammo: readiedAmmo,
       });
       return {
         ...monster,
         monster_snapshot: {
           ...snapshot,
-          gear: consumed.nextItems,
+          gear: nextGear,
         },
       };
     });
@@ -6142,7 +6156,9 @@ export default function Combat({
 
     if (currentEntry.kind === "player") {
       if (!character || !actorCharacter || character.id !== actorCharacter.id) return;
-      const consumed = consumeFirstAmmo(character.inventory || []);
+      const weapon = playerEquippedRangedWeapons(character).find((item) => item.id === option.weaponItemId) || null;
+      if (!weapon) return;
+      const consumed = consumeFirstCompatibleAmmo(character.inventory || [], weapon);
       if (!consumed.ammo) return;
       const supabase = createClient();
       const { error: updateError } = await supabase
@@ -6168,7 +6184,10 @@ export default function Combat({
     if (!latest) return;
     const actorEntry = latest.freshEntries.find((entry) => entry.participant_id === currentEntry.participant_id) || null;
     if (!actorEntry?.monster_snapshot) return;
-    const latestConsumed = consumeFirstAmmo(actorEntry.monster_snapshot.gear || []);
+    const weapon =
+      monsterEquippedRangedWeapons(actorEntry.monster_snapshot).find((item) => item.id === option.weaponItemId) || null;
+    if (!weapon) return;
+    const latestConsumed = consumeFirstCompatibleAmmo(actorEntry.monster_snapshot.gear || [], weapon);
     if (!latestConsumed.ammo) return;
     const nextSnapshot = { ...actorEntry.monster_snapshot, gear: latestConsumed.nextItems };
     const nextEntries = latest.freshEntries.map((entry) =>
@@ -6224,6 +6243,18 @@ export default function Combat({
     if (isSkillBlockedForToken(actorTokenId, "MARKSMANSHIP")) return;
     if (isActorCovered) return;
     if (isActorEngaged) return;
+    const sourceWeapons =
+      currentEntry.kind === "player"
+        ? actorCharacter && character && actorCharacter.id === character.id
+          ? playerEquippedRangedWeapons(character)
+          : []
+        : currentEntry.monster_snapshot
+          ? monsterEquippedRangedWeapons(currentEntry.monster_snapshot)
+          : [];
+    const weapon = sourceWeapons.find((item) => item.id === option.weaponItemId) || null;
+    if (!weapon) return;
+    if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return;
+    const firearmAttack = isFirearmWeapon(weapon);
     const didConsume = await consumeAction("slow");
     if (!didConsume) return;
     const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
@@ -6246,7 +6277,7 @@ export default function Combat({
         targetName,
         weaponItemId: option.weaponItemId,
         weaponName: option.weaponName,
-        weaponBaseDamage: Math.max(0, (playerEquippedRangedWeapons(character).find((w) => w.id === option.weaponItemId)?.damage ?? 0)),
+        weaponBaseDamage: Math.max(0, weapon.damage ?? 0),
         maneuver: "Shoot",
         rollAttribute: "AGL",
         rollSkill: "MARKSMANSHIP",
@@ -6255,6 +6286,7 @@ export default function Combat({
         shootTargetZoneId: option.targetZoneId,
         shootAmmoItem: currentReadied.ammoItem,
         woodenAttack: itemHasProperty(currentReadied.ammoItem, "wooden"),
+        firearmAttack,
         rangeAtAttack: selectedRange,
       });
       setSelectedTokenId(null);
@@ -6263,8 +6295,6 @@ export default function Combat({
 
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot || !onResolveMeleeAttack) return;
-    const weapon = monsterEquippedRangedWeapons(snapshot).find((w) => w.id === option.weaponItemId);
-    if (!weapon) return;
     const attributeDice = rollD6Pool(Math.max(0, snapshot.agl ?? 0));
     const signedSkillPool = monsterSkillDice(snapshot) + totalBonusDice;
     const skillIsNegative = signedSkillPool < 0;
@@ -6299,6 +6329,7 @@ export default function Combat({
       shootTargetZoneId: option.targetZoneId,
       shootAmmoItem: currentReadied.ammoItem,
       woodenAttack: itemHasProperty(currentReadied.ammoItem, "wooden"),
+      firearmAttack,
       rangeAtAttack: selectedRange,
     });
   };

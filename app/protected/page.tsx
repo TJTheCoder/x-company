@@ -773,6 +773,92 @@ export default function Dashboard() {
     setArtRollReturnToCombat(false);
   };
 
+  useEffect(() => {
+    const isDmViewer = isAdmin && !simulatePlayerMode;
+    const currentTokenId = character?.id ?? null;
+    if (activeTab === "combat") return;
+    if (!isDmViewer && !currentTokenId) return;
+    if (
+      pendingMeleeAction ||
+      pendingReactionRoll ||
+      pendingArtRoll ||
+      meleeRollReturnToCombat ||
+      reactionRollReturnToCombat ||
+      artRollReturnToCombat
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const checkCombatAttention = async () => {
+      const supabase = createClient();
+      const { data, error } = await supabase
+        .from("combat_state")
+        .select("combat_mode, pending_reactions, initiative_entries")
+        .eq("id", 1)
+        .maybeSingle<{
+          combat_mode?: boolean | null;
+          pending_reactions?: Array<{ targetCharacterId?: string | null }> | null;
+          initiative_entries?: Array<{
+            participant_id?: string | null;
+            kind?: "player" | "monster" | null;
+            used_item_flags?: string[] | null;
+          }> | null;
+        }>();
+      if (cancelled || error || !data?.combat_mode) return;
+
+      const pendingReactions = Array.isArray(data.pending_reactions) ? data.pending_reactions : [];
+      const initiativeEntries = Array.isArray(data.initiative_entries) ? data.initiative_entries : [];
+      const hasPendingReaction = pendingReactions.some((reaction) => {
+        const targetTokenId = String(reaction?.targetCharacterId || "").trim();
+        if (!targetTokenId) return false;
+        return isDmViewer
+          ? targetTokenId.startsWith("monster:")
+          : Boolean(currentTokenId && tokenMatchesParticipant(targetTokenId, currentTokenId));
+      });
+      const hasIncomingFlow = initiativeEntries.some((entry) => {
+        const flags = Array.isArray(entry?.used_item_flags)
+          ? entry.used_item_flags.filter((value): value is string => typeof value === "string")
+          : [];
+        const incomingRecord = findIncomingDamageFlag(flags);
+        const metaRecord = findIncomingDamageMetaFlag(flags);
+        if (!incomingRecord || !metaRecord) return false;
+        const participantId = String(entry?.participant_id || "").trim();
+        return isDmViewer
+          ? participantId.startsWith("monster:") || metaRecord.value.attackerTokenId.startsWith("monster:")
+          : Boolean(
+              currentTokenId &&
+                (tokenMatchesParticipant(participantId, currentTokenId) ||
+                  tokenMatchesParticipant(metaRecord.value.attackerTokenId, currentTokenId))
+            );
+      });
+
+      if (hasPendingReaction || hasIncomingFlow) {
+        setActiveTab("combat");
+      }
+    };
+
+    void checkCombatAttention();
+    const intervalId = window.setInterval(() => {
+      void checkCombatAttention();
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    activeTab,
+    isAdmin,
+    simulatePlayerMode,
+    character?.id,
+    pendingMeleeAction,
+    pendingReactionRoll,
+    pendingArtRoll,
+    meleeRollReturnToCombat,
+    reactionRollReturnToCombat,
+    artRollReturnToCombat,
+  ]);
+
   const rollD6Pool = (count: number): number[] =>
     Array.from({ length: Math.max(0, count) }, () => Math.floor(Math.random() * 6) + 1);
 
@@ -2391,16 +2477,30 @@ export default function Dashboard() {
     };
 
     const removeParticipantFromCombat = async (tokenId: string) => {
+      const { error: rpcError } = await supabase.rpc("combat_remove_participant", {
+        p_actor_token_id: tokenId,
+      });
+      if (!rpcError) return;
+
+      console.error("Failed to remove participant from combat via RPC:", rpcError);
+      if (userEmail !== ADMIN_EMAIL) {
+        return;
+      }
+
       const { data: combatState, error: combatError } = await supabase
         .from("combat_state")
-        .select("initiative_entries, initiative_current_index, initiative_monsters, token_positions, engagements")
+        .select(
+          "initiative_entries, initiative_current_index, initiative_monsters, token_positions, token_elevations, engagements, pending_reactions"
+        )
         .eq("id", 1)
         .maybeSingle<{
           initiative_entries: Array<{ participant_id: string }> | null;
           initiative_current_index: number | null;
           initiative_monsters: Array<{ id: string }> | null;
           token_positions: Array<{ character_id: string }> | null;
+          token_elevations: Array<{ character_id: string; elevation: number }> | null;
           engagements: Array<{ a: string; b: string }> | null;
+          pending_reactions: Array<{ attackerCharacterId?: string | null; targetCharacterId?: string | null }> | null;
         }>();
       if (combatError || !combatState) {
         if (combatError) console.error("Failed to load combat state for flee:", combatError);
@@ -2409,15 +2509,28 @@ export default function Dashboard() {
 
       const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
       const tokens = Array.isArray(combatState.token_positions) ? combatState.token_positions : [];
+      const elevations = Array.isArray(combatState.token_elevations) ? combatState.token_elevations : [];
       const edges = Array.isArray(combatState.engagements) ? combatState.engagements : [];
       const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+      const pendingReactions = Array.isArray(combatState.pending_reactions) ? combatState.pending_reactions : [];
       const isMonster = tokenId.startsWith("monster:");
       const participantId = isMonster ? tokenId : `player:${tokenId}`;
       const removedEntryIndex = entries.findIndex((entry) => entry.participant_id === participantId);
       const nextEntries = entries.filter((entry) => entry.participant_id !== participantId);
       const nextTokens = tokens.filter((token) => token.character_id !== tokenId);
+      const nextElevations = elevations.filter((token) => token.character_id !== tokenId);
       const nextEdges = edges.filter((edge) => edge.a !== tokenId && edge.b !== tokenId);
       const nextMonsters = isMonster ? monsters.filter((monster) => monster.id !== tokenId) : monsters;
+      const nextPendingReactions = pendingReactions.filter((reaction) => {
+        const attackerId = String(reaction?.attackerCharacterId || "").trim();
+        const targetId = String(reaction?.targetCharacterId || "").trim();
+        return (
+          attackerId !== tokenId &&
+          attackerId !== participantId &&
+          targetId !== tokenId &&
+          targetId !== participantId
+        );
+      });
 
       let nextCurrent = combatState.initiative_current_index;
       if (nextEntries.length === 0) {
@@ -2435,14 +2548,18 @@ export default function Dashboard() {
         initiative_current_index: number | null;
         initiative_monsters: Array<{ id: string }>;
         token_positions: Array<{ character_id: string }>;
+        token_elevations: Array<{ character_id: string; elevation: number }>;
         engagements: Array<{ a: string; b: string }>;
+        pending_reactions: Array<{ attackerCharacterId?: string | null; targetCharacterId?: string | null }>;
         combat_mode?: boolean;
       } = {
         initiative_entries: nextEntries,
         initiative_current_index: nextCurrent,
         initiative_monsters: nextMonsters,
         token_positions: nextTokens,
+        token_elevations: nextElevations,
         engagements: nextEdges,
+        pending_reactions: nextPendingReactions,
       };
       if (nextEntries.length === 0) {
         combatUpdate.combat_mode = false;

@@ -1843,6 +1843,172 @@ $$;
 
 grant execute on function public.combat_clear_reaction(text) to authenticated;
 
+create or replace function public.combat_remove_participant(
+  p_actor_token_id text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := coalesce(auth.jwt() ->> 'email', '');
+  v_is_dm boolean := v_email = 'drocasma9@gmail.com';
+  v_entries jsonb;
+  v_current_index int;
+  v_monsters jsonb;
+  v_tokens jsonb;
+  v_elevations jsonb;
+  v_engagements jsonb;
+  v_reactions jsonb;
+  v_entry jsonb;
+  v_entry_idx int;
+  v_entry_kind text;
+  v_entry_email text;
+  v_actor_uuid uuid;
+  v_actor_owner_email text;
+  v_participant_id text;
+  v_next_entries jsonb;
+  v_next_monsters jsonb;
+  v_next_tokens jsonb;
+  v_next_elevations jsonb;
+  v_next_engagements jsonb;
+  v_next_reactions jsonb;
+  v_next_count int;
+  v_next_index int;
+begin
+  if v_email = '' then
+    raise exception 'Not authenticated';
+  end if;
+  if p_actor_token_id is null or btrim(p_actor_token_id) = '' then
+    raise exception 'Actor token is required';
+  end if;
+
+  select coalesce(initiative_entries, '[]'::jsonb),
+         initiative_current_index,
+         coalesce(initiative_monsters, '[]'::jsonb),
+         coalesce(token_positions, '[]'::jsonb),
+         coalesce(token_elevations, '[]'::jsonb),
+         coalesce(engagements, '[]'::jsonb),
+         coalesce(pending_reactions, '[]'::jsonb)
+  into v_entries, v_current_index, v_monsters, v_tokens, v_elevations, v_engagements, v_reactions
+  from public.combat_state
+  where id = 1
+  for update;
+
+  select e.ord - 1, e.entry
+  into v_entry_idx, v_entry
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' = p_actor_token_id
+     or e.entry->>'participant_id' = ('player:' || p_actor_token_id)
+  order by e.ord
+  limit 1;
+
+  if v_entry_idx is null then
+    if left(p_actor_token_id, 8) = 'monster:' then
+      v_participant_id := p_actor_token_id;
+    else
+      v_participant_id := 'player:' || p_actor_token_id;
+    end if;
+  else
+    v_participant_id := coalesce(v_entry->>'participant_id', '');
+    v_entry_kind := coalesce(v_entry->>'kind', '');
+    v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
+  end if;
+
+  if not v_is_dm then
+    if coalesce(v_entry_kind, '') <> 'player' then
+      raise exception 'You can only remove your own character';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'You can only remove your own character';
+    end;
+
+    select email into v_actor_owner_email
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+
+    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
+      raise exception 'You can only remove your own character';
+    end if;
+    if v_entry_email is null or lower(v_entry_email) <> lower(v_email) then
+      raise exception 'You can only remove your own character';
+    end if;
+  end if;
+
+  select coalesce(jsonb_agg(e.entry), '[]'::jsonb)
+  into v_next_entries
+  from jsonb_array_elements(v_entries) with ordinality as e(entry, ord)
+  where e.entry->>'participant_id' <> v_participant_id;
+
+  select coalesce(jsonb_agg(mon.value), '[]'::jsonb)
+  into v_next_monsters
+  from jsonb_array_elements(v_monsters) as mon(value)
+  where coalesce(mon.value->>'id', '') <> p_actor_token_id;
+
+  select coalesce(jsonb_agg(tok.value), '[]'::jsonb)
+  into v_next_tokens
+  from jsonb_array_elements(v_tokens) as tok(value)
+  where coalesce(tok.value->>'character_id', '') <> p_actor_token_id;
+
+  select coalesce(jsonb_agg(el.value), '[]'::jsonb)
+  into v_next_elevations
+  from jsonb_array_elements(v_elevations) as el(value)
+  where coalesce(el.value->>'character_id', '') <> p_actor_token_id;
+
+  select coalesce(jsonb_agg(edge.value), '[]'::jsonb)
+  into v_next_engagements
+  from jsonb_array_elements(v_engagements) as edge(value)
+  where coalesce(edge.value->>'a', '') <> p_actor_token_id
+    and coalesce(edge.value->>'b', '') <> p_actor_token_id;
+
+  select coalesce(jsonb_agg(r.value), '[]'::jsonb)
+  into v_next_reactions
+  from jsonb_array_elements(v_reactions) as r(value)
+  where coalesce(r.value->>'attackerCharacterId', '') <> p_actor_token_id
+    and coalesce(r.value->>'attackerCharacterId', '') <> v_participant_id
+    and coalesce(r.value->>'targetCharacterId', '') <> p_actor_token_id
+    and coalesce(r.value->>'targetCharacterId', '') <> v_participant_id;
+
+  v_next_count := jsonb_array_length(v_next_entries);
+  if v_next_count = 0 then
+    v_next_index := null;
+  elsif v_current_index is null then
+    v_next_index := null;
+  elsif v_entry_idx is null then
+    v_next_index := v_current_index;
+  elsif v_entry_idx = v_current_index then
+    if v_current_index >= v_next_count then
+      v_next_index := 0;
+    else
+      v_next_index := v_current_index;
+    end if;
+  elsif v_entry_idx < v_current_index then
+    v_next_index := v_current_index - 1;
+  else
+    v_next_index := v_current_index;
+  end if;
+
+  update public.combat_state
+  set initiative_entries = v_next_entries,
+      initiative_current_index = v_next_index,
+      initiative_monsters = v_next_monsters,
+      token_positions = v_next_tokens,
+      token_elevations = v_next_elevations,
+      engagements = v_next_engagements,
+      pending_reactions = v_next_reactions,
+      combat_mode = case when v_next_count = 0 then false else combat_mode end,
+      updated_by_email = v_email
+  where id = 1;
+end;
+$$;
+
+grant execute on function public.combat_remove_participant(text) to authenticated;
+
 create or replace function public.combat_use_reaction_action(
   p_actor_token_id text
 )
@@ -2053,8 +2219,8 @@ declare
   v_actor_owner_email text;
   v_used boolean := false;
   v_has_talent boolean := false;
-  v_talent_levels jsonb;
-  v_talents jsonb;
+  v_talent_levels jsonb := '{}'::jsonb;
+  v_talents jsonb := '[]'::jsonb;
   v_level int := 0;
   v_talent jsonb;
 begin
@@ -2093,17 +2259,18 @@ begin
 
   v_entry_kind := coalesce(v_entry->>'kind', '');
   v_entry_email := nullif(coalesce(v_entry->>'user_email', ''), '');
-  if v_entry_kind <> 'player' then
-    return false;
-  end if;
-
-  begin
-    v_actor_uuid := p_actor_token_id::uuid;
-  exception when others then
-    return false;
-  end;
 
   if not v_is_dm then
+    if v_entry_kind <> 'player' then
+      raise exception 'Only the DM can react for monsters';
+    end if;
+
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      raise exception 'You can only react for your own character';
+    end;
+
     select email into v_actor_owner_email
     from public.characters
     where id = v_actor_uuid
@@ -2126,11 +2293,24 @@ begin
     return false;
   end if;
 
-  select coalesce(talent_levels, '{}'::jsonb), coalesce(talents, '[]'::jsonb)
-  into v_talent_levels, v_talents
-  from public.characters
-  where id = v_actor_uuid
-  limit 1;
+  if v_entry_kind = 'player' then
+    begin
+      v_actor_uuid := p_actor_token_id::uuid;
+    exception when others then
+      return false;
+    end;
+
+    select coalesce(talent_levels, '{}'::jsonb), coalesce(talents, '[]'::jsonb)
+    into v_talent_levels, v_talents
+    from public.characters
+    where id = v_actor_uuid
+    limit 1;
+  elsif v_entry_kind = 'monster' then
+    v_talent_levels := coalesce(v_entry->'monster_snapshot'->'talent_levels', '{}'::jsonb);
+    v_talents := coalesce(v_entry->'monster_snapshot'->'talents', '[]'::jsonb);
+  else
+    return false;
+  end if;
 
   if jsonb_typeof(v_talent_levels) = 'object' then
     begin
@@ -4357,6 +4537,7 @@ declare
   v_email text := coalesce(auth.jwt() ->> 'email', '');
   v_is_dm boolean := v_email = 'drocasma9@gmail.com';
   v_entries jsonb;
+  v_elevations jsonb;
   v_count int;
   v_entry jsonb;
   v_entry_idx int;
@@ -4368,6 +4549,9 @@ declare
   v_target_entry jsonb;
   v_actor_size int := 1;
   v_target_size int := 1;
+  v_elevation int := 0;
+  v_existing_fall int := 0;
+  v_can_fly boolean := false;
 begin
   if v_email = '' then
     raise exception 'Not authenticated';
@@ -4376,8 +4560,8 @@ begin
     raise exception 'Actor token is required';
   end if;
 
-  select initiative_entries
-  into v_entries
+  select initiative_entries, coalesce(token_elevations, '[]'::jsonb)
+  into v_entries, v_elevations
   from public.combat_state
   where id = 1
   for update;
@@ -4457,7 +4641,46 @@ begin
     end if;
   end if;
 
+  begin
+    select coalesce((el.value->>'elevation')::int, 0)
+    into v_elevation
+    from jsonb_array_elements(v_elevations) as el(value)
+    where el.value->>'character_id' = p_actor_token_id
+    limit 1;
+  exception when others then
+    v_elevation := 0;
+  end;
+  v_elevation := greatest(0, coalesce(v_elevation, 0));
+
+  begin
+    v_existing_fall := greatest(0, coalesce((v_entry->>'falling_zones')::int, 0));
+  exception when others then
+    v_existing_fall := 0;
+  end;
+
+  if v_entry_kind = 'monster' then
+    select exists (
+      select 1
+      from jsonb_array_elements_text(
+        case
+          when jsonb_typeof(v_entry->'monster_snapshot'->'traits') = 'array'
+          then coalesce(v_entry->'monster_snapshot'->'traits', '[]'::jsonb)
+          else '[]'::jsonb
+        end
+      ) as tr(value)
+      where lower(btrim(tr.value)) = 'flight'
+    )
+    into v_can_fly;
+  end if;
+
   v_entry := jsonb_set(v_entry, '{prone}', 'false'::jsonb, true);
+  if v_elevation > 0 then
+    if v_can_fly then
+      v_entry := jsonb_set(v_entry, '{falling_zones}', 'null'::jsonb, true);
+    else
+      v_entry := jsonb_set(v_entry, '{falling_zones}', to_jsonb(greatest(1, v_existing_fall)), true);
+    end if;
+  end if;
   v_entries := jsonb_set(v_entries, array[v_entry_idx::text], v_entry, false);
 
   update public.combat_state

@@ -135,6 +135,12 @@ const tokenIdFromParticipantId = (participantId: string | null | undefined): str
   return raw.startsWith("player:") ? raw.slice("player:".length) : raw;
 };
 
+const tokenIdsMatch = (left: string | null | undefined, right: string | null | undefined): boolean => {
+  const normalizedLeft = tokenIdFromParticipantId(left);
+  const normalizedRight = tokenIdFromParticipantId(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+};
+
 type GroupedItemDisplay = {
   key: string;
   label: string;
@@ -963,7 +969,7 @@ export default function Combat({
   const pendingReaction = useMemo(() => {
     if (pendingReactions.length === 0) return null;
     if (currentUserTokenId) {
-      const matches = pendingReactions.filter((reaction) => reaction.targetCharacterId === currentUserTokenId);
+      const matches = pendingReactions.filter((reaction) => tokenIdsMatch(reaction.targetCharacterId, currentUserTokenId));
       if (matches.length > 0) {
         return matches.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""))[0];
       }
@@ -1015,7 +1021,7 @@ export default function Combat({
     Boolean(pendingReaction) &&
     (reactionTargetIsMonster
       ? isDmViewer
-      : Boolean(reactionTargetId && reactionTargetId === currentUserTokenId));
+      : tokenIdsMatch(reactionTargetId, currentUserTokenId));
   const canReact =
     combatMode &&
     Boolean(pendingReaction) &&
@@ -1235,6 +1241,7 @@ export default function Combat({
       viewerCanControlReaction) ||
       (slashReactionPhase && slashCanControlPhase)) &&
     combatMode;
+  const canControlPendingReactionChoices = canDodgeReaction || canParryReaction;
   const effectiveProtectionDice = (item: InventoryItem | null | undefined): number => {
     if (!item) return 0;
     if (
@@ -1328,7 +1335,7 @@ export default function Combat({
   ]);
   const armorPrompt =
     pendingArmorPrompt &&
-    (pendingArmorPrompt.targetCharacterId === currentUserTokenId ||
+    (tokenIdsMatch(pendingArmorPrompt.targetCharacterId, currentUserTokenId) ||
       (isDmViewer && pendingArmorPrompt.targetCharacterId.startsWith("monster:")))
       ? pendingArmorPrompt
       : null;
@@ -1352,7 +1359,7 @@ export default function Combat({
     const attackerId = pendingArtPrompt.attackerCharacterId;
     const attackerIsMonster = attackerId.startsWith("monster:");
     if (attackerIsMonster && isDmViewer) return pendingArtPrompt;
-    if (!attackerIsMonster && attackerId === currentUserTokenId) return pendingArtPrompt;
+    if (!attackerIsMonster && tokenIdsMatch(attackerId, currentUserTokenId)) return pendingArtPrompt;
     return null;
   }, [pendingArtPrompt, isDmViewer, currentUserTokenId]);
   const shouldShowArtPrompt =
@@ -1762,11 +1769,28 @@ export default function Combat({
           reducedSuccesses = Math.max(0, baseAttack.totalSuccesses - roll.successes);
         }
 
-        const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
-          p_actor_token_id: reactionTargetId,
-        });
-        if (consumeError) {
-          setError(consumeError.message);
+        let usedFreeDodge = false;
+        if (reactionTargetIsMonster && (mode === "dodge-stand" || mode === "dodge-prone")) {
+          const { data: freeDodgeData, error: freeDodgeError } = await supabase.rpc(
+            "combat_consume_fast_footwork_dodge",
+            {
+              p_actor_token_id: reactionTargetId,
+            }
+          );
+          if (freeDodgeError) {
+            setError(freeDodgeError.message);
+          } else {
+            usedFreeDodge = Boolean(freeDodgeData);
+          }
+        }
+
+        if (!usedFreeDodge) {
+          const { error: consumeError } = await supabase.rpc("combat_use_reaction_action", {
+            p_actor_token_id: reactionTargetId,
+          });
+          if (consumeError) {
+            setError(consumeError.message);
+          }
         }
 
         if (mode === "dodge-prone") {
@@ -2741,7 +2765,7 @@ export default function Combat({
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
-    if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
+    if (!currentEntry.slow_available) return false;
     if (!(isActorGrappled || isActorClungOnto)) return false;
     return selectedIsActorOrHoldCounterpart;
   }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
@@ -4612,7 +4636,7 @@ export default function Combat({
     }
 
     const actingParticipantId = currentEntry.participant_id;
-    const didConsume = await consumeFastOrSlow();
+    const didConsume = await consumeAction("slow");
     if (!didConsume) return;
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
@@ -5538,7 +5562,7 @@ export default function Combat({
     const zoneId = zoneIdAtPoint(zoneRegionMap, actorToken);
     if (zoneId === null) return;
 
-    const didConsume = await consumeFastOrSlow();
+    const didConsume = await consumeAction("slow");
     if (!didConsume) return;
     const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
     const swingCleared = await clearSwingForParticipant(actingParticipantId);
@@ -6538,7 +6562,7 @@ export default function Combat({
     const againstCling = actorClungOntoByIds.includes(otherTokenId);
     const rollSkill = againstCling ? "MOVE" : "MELEE";
     if (isSkillBlockedForToken(actorTokenId, rollSkill)) return;
-    const didConsume = await consumeFastOrSlow();
+    const didConsume = await consumeAction("slow");
     if (!didConsume) return;
     const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
@@ -7280,7 +7304,7 @@ export default function Combat({
                     ))}
                 </>
               ) : (
-                canReact && (
+                canControlPendingReactionChoices && (
                   <>
                     <button
                       onClick={() => void resolvePendingReaction("dodge-stand")}

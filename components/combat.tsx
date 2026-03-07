@@ -208,6 +208,24 @@ const monsterHasTrait = (snapshot: MonsterSnapshot | null | undefined, traitName
 const monsterSkillDice = (snapshot: MonsterSnapshot | null | undefined): number =>
   Math.max(0, Math.trunc(Number(snapshot?.skill ?? snapshot?.special ?? 0) || 0));
 
+const monsterSizeValue = (snapshot: MonsterSnapshot | null | undefined): number => {
+  const parsed = Number(snapshot?.size ?? 1);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : 1;
+};
+
+const itemHasProperty = (item: InventoryItem | null | undefined, propertyName: string): boolean => {
+  if (!item) return false;
+  const normalizedProperty = propertyName.trim().toLowerCase();
+  const props = Array.isArray(item.properties) ? item.properties : [];
+  return props.some((value) => String(value).trim().toLowerCase() === normalizedProperty);
+};
+
+const attackHasWoodenProperty = (attack: ResolvedMeleeAttack | null | undefined): boolean => {
+  if (!attack) return false;
+  if (attack.woodenAttack) return true;
+  return itemHasProperty(attack.shootAmmoItem, "wooden");
+};
+
 export default function Combat({
   isDM,
   userEmail,
@@ -878,6 +896,7 @@ export default function Combat({
         swingBonusDamage: 0,
         disarmTargetItemId: metaRecord.value.disarmTargetItemId ?? null,
         disarmZoneId: metaRecord.value.disarmZoneId ?? null,
+        woodenAttack: metaRecord.value.woodenAttack === true,
         rangeAtAttack: metaRecord.value.rangeAtAttack ?? null,
         skipReaction: true,
         slashFlow: true,
@@ -916,6 +935,7 @@ export default function Combat({
       swingBonusDamage: 0,
       disarmTargetItemId: slashIncomingMeta.disarmTargetItemId ?? null,
       disarmZoneId: slashIncomingMeta.disarmZoneId ?? null,
+      woodenAttack: slashIncomingMeta.woodenAttack === true,
       rangeAtAttack: slashIncomingMeta.rangeAtAttack ?? null,
       skipReaction: true,
       slashFlow: true,
@@ -998,7 +1018,7 @@ export default function Combat({
           (item) => item.participant_id === tokenId || item.participant_id === `player:${tokenId}`
         ) || null;
       if (entry?.kind === "monster") {
-        return Math.max(1, entry.monster_snapshot?.size ?? monsterByParticipantId.get(tokenId)?.monster_snapshot?.size ?? 1);
+        return monsterSizeValue(entry.monster_snapshot || monsterByParticipantId.get(tokenId)?.monster_snapshot || null);
       }
       return 1;
     },
@@ -1236,12 +1256,22 @@ export default function Combat({
     }
 
     const applyChainmailPenalty = attack.maneuver === "Shoot";
-    const armorDiceBase = effectiveProtectionDice(armorItem);
-    const armorDice =
-      applyChainmailPenalty && isChainmailArmorItem(armorItem)
-        ? Math.max(0, armorDiceBase - 3)
-        : armorDiceBase;
-    const helmetDice = effectiveProtectionDice(helmetItem);
+    const applyWoodenArmorBonus = attackHasWoodenProperty(attack);
+    const adjustProtectionDice = (item: InventoryItem | null | undefined): number => {
+      let dice = effectiveProtectionDice(item);
+      if (applyChainmailPenalty && isChainmailArmorItem(item)) {
+        dice = Math.max(0, dice - 3);
+      }
+      if (applyWoodenArmorBonus) {
+        dice = Math.max(0, dice * 2);
+      }
+      return dice;
+    };
+    const armorDice = adjustProtectionDice(armorItem);
+    const helmetDice = adjustProtectionDice(helmetItem);
+    if (applyWoodenArmorBonus) {
+      naturalArmorDice = Math.max(0, naturalArmorDice * 2);
+    }
     const armorUsed = armorItem ? actorUsedItemFlags.has(`Used (${armorItem.name})`) : true;
     const helmetUsed = helmetItem ? actorUsedItemFlags.has(`Used (${helmetItem.name})`) : true;
 
@@ -1572,6 +1602,7 @@ export default function Combat({
         destinationY: pendingReaction.destinationY ?? undefined,
         shootTargetZoneId: pendingReaction.shootTargetZoneId ?? null,
         shootAmmoItem: pendingReaction.shootAmmoItem ?? null,
+        woodenAttack: pendingReaction.woodenAttack ?? false,
         rangeAtAttack: pendingReaction.rangeAtAttack ?? null,
         skipReaction: true,
       };
@@ -1786,7 +1817,7 @@ export default function Combat({
   const actorSize = useMemo(() => {
     if (!currentEntry) return 1;
     if (currentEntry.kind === "monster") {
-      return Math.trunc(currentEntry.monster_snapshot?.size ?? 1);
+      return monsterSizeValue(currentEntry.monster_snapshot);
     }
     return 1;
   }, [currentEntry]);
@@ -1817,7 +1848,7 @@ export default function Combat({
   const selectedTargetSize = useMemo(() => {
     if (!selectedTokenId) return null;
     if (selectedTokenId.startsWith("monster:")) {
-      return Math.trunc(monsterByParticipantId.get(selectedTokenId)?.monster_snapshot?.size ?? 1);
+      return monsterSizeValue(monsterByParticipantId.get(selectedTokenId)?.monster_snapshot || null);
     }
     return 1;
   }, [selectedTokenId, monsterByParticipantId]);
@@ -2828,6 +2859,7 @@ export default function Combat({
         weaponName: string;
         weaponBaseDamage: number;
         gearDice: number;
+        woodenAttack?: boolean;
       }>;
     }
     if (!selectedTokenId || !selectedRange) return [];
@@ -2857,6 +2889,7 @@ export default function Combat({
       weaponName: string;
       weaponBaseDamage: number;
       gearDice: number;
+      woodenAttack?: boolean;
     }> = [];
     if (!currentEntry.slow_available) return options;
 
@@ -2898,6 +2931,7 @@ export default function Combat({
             weaponName: item.name,
             weaponBaseDamage: baseDamage,
             gearDice,
+            woodenAttack: properties.includes("wooden"),
           });
         }
         if (isStabWeapon) {
@@ -2907,6 +2941,7 @@ export default function Combat({
             weaponName: item.name,
             weaponBaseDamage: baseDamage,
             gearDice,
+            woodenAttack: properties.includes("wooden"),
           });
         }
       }
@@ -2938,6 +2973,7 @@ export default function Combat({
             weaponName: weapon.name,
             weaponBaseDamage: weapon.damage,
             gearDice: weapon.gearBonus,
+            woodenAttack: weapon.properties.includes("wooden"),
           });
         }
         if (isStabWeapon) {
@@ -2947,6 +2983,7 @@ export default function Combat({
             weaponName: weapon.name,
             weaponBaseDamage: weapon.damage,
             gearDice: weapon.gearBonus,
+            woodenAttack: weapon.properties.includes("wooden"),
           });
         }
       }
@@ -4124,8 +4161,8 @@ export default function Combat({
         );
       const tokenSize = (tokenId: string) => {
         if (!tokenId.startsWith("monster:")) return baseDiameter;
-        const size = Math.trunc(monsterByParticipantId.get(tokenId)?.monster_snapshot?.size ?? 1);
-        const scale = Math.pow(2, Math.max(1, size) - 1);
+        const size = monsterSizeValue(monsterByParticipantId.get(tokenId)?.monster_snapshot || null);
+        const scale = Math.pow(2, size - 1);
         return Number.isFinite(scale) && scale > 0 ? baseDiameter * scale : baseDiameter;
       };
 
@@ -5307,6 +5344,7 @@ export default function Combat({
     weaponName: string;
     weaponBaseDamage: number;
     gearDice: number;
+    woodenAttack?: boolean;
   }) => {
     if (!selectedTokenId || !currentEntry || !isMyTurn) return;
     if (selectedTokenId === actorTokenId) return;
@@ -5345,6 +5383,7 @@ export default function Combat({
         requiredSuccesses: 1,
         swingBonusDamage,
         bonusDice: proneBonusDice + tauntPenalty,
+        woodenAttack: option.woodenAttack ?? false,
         rangeAtAttack: selectedRange,
       });
       setSelectedTokenId(null);
@@ -5384,6 +5423,7 @@ export default function Combat({
         totalSuccesses: successes,
         requiredSuccesses: 1,
         swingBonusDamage,
+        woodenAttack: option.woodenAttack ?? false,
         rangeAtAttack: selectedRange,
       });
     }
@@ -6226,6 +6266,7 @@ export default function Combat({
         bonusDice: totalBonusDice,
         shootTargetZoneId: option.targetZoneId,
         shootAmmoItem: currentReadied.ammoItem,
+        woodenAttack: itemHasProperty(currentReadied.ammoItem, "wooden"),
         rangeAtAttack: selectedRange,
       });
       setSelectedTokenId(null);
@@ -6269,6 +6310,7 @@ export default function Combat({
       requiredSuccesses: 1,
       shootTargetZoneId: option.targetZoneId,
       shootAmmoItem: currentReadied.ammoItem,
+      woodenAttack: itemHasProperty(currentReadied.ammoItem, "wooden"),
       rangeAtAttack: selectedRange,
     });
   };
@@ -6470,7 +6512,7 @@ export default function Combat({
 
     const targetSize =
       otherTokenId.startsWith("monster:")
-        ? Math.trunc(monsterByParticipantId.get(otherTokenId)?.monster_snapshot?.size ?? 1)
+        ? monsterSizeValue(monsterByParticipantId.get(otherTokenId)?.monster_snapshot || null)
         : 1;
     const sizeDiff = actorSize - targetSize;
     const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
@@ -7817,7 +7859,7 @@ export default function Combat({
                   const baseDiameter = 40;
                   const monsterSize =
                     token.type === "monster"
-                      ? Math.trunc(monsterByParticipantId.get(token.character_id)?.monster_snapshot?.size ?? 1)
+                      ? monsterSizeValue(monsterByParticipantId.get(token.character_id)?.monster_snapshot || null)
                       : 1;
                   const scale = token.type === "monster" ? Math.pow(2, monsterSize - 1) : 1;
                   const diameter = Number.isFinite(scale) && scale > 0 ? baseDiameter * scale : baseDiameter;
@@ -7835,7 +7877,7 @@ export default function Combat({
                     if (targetToken) {
                       const targetIsMonster = attachedTargetId.startsWith("monster:");
                       const targetSize = targetIsMonster
-                        ? Math.trunc(monsterByParticipantId.get(attachedTargetId)?.monster_snapshot?.size ?? 1)
+                        ? monsterSizeValue(monsterByParticipantId.get(attachedTargetId)?.monster_snapshot || null)
                         : 1;
                       const targetScale = targetIsMonster ? Math.pow(2, targetSize - 1) : 1;
                       const targetDiameter =

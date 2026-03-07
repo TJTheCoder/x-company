@@ -20,6 +20,7 @@ export type IncomingDamageMeta = {
   rangeAtAttack: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   disarmTargetItemId?: string | null;
   disarmZoneId?: number | null;
+  woodenAttack?: boolean | null;
 };
 
 const clampInt = (value: number): number => {
@@ -115,6 +116,7 @@ export const buildIncomingDamageMetaFlag = (meta: IncomingDamageMeta): string =>
         ? String(Math.trunc(meta.disarmZoneId))
         : ""
     ),
+    encodePart(meta.woodenAttack ? "1" : ""),
   ].join("|");
   return `${INCOMING_META_PREFIX}${serialized})`;
 };
@@ -124,16 +126,18 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
   if (!raw.startsWith(INCOMING_META_PREFIX) || !raw.endsWith(")")) return null;
   const body = raw.slice(INCOMING_META_PREFIX.length, -1);
   const parts = body.split("|");
-  const [attackerPart, attackPart, weaponPart, p4, p5, p6, p7] = parts;
+  const [attackerPart, attackPart, weaponPart, p4, p5, p6, p7, p8] = parts;
   if (!attackerPart || !attackPart) return null;
   const hasWeaponBase = parts.length >= 7;
   const weaponBasePart = hasWeaponBase ? p4 : "";
   const rangePart = hasWeaponBase ? p5 : p4;
   const disarmItemPart = hasWeaponBase ? p6 : p5;
   const disarmZonePart = hasWeaponBase ? p7 : p6;
+  const woodenAttackPart = parts.length >= 8 ? p8 : "";
   const weaponBaseValue = decodePart(weaponBasePart || "").trim();
   const disarmItemValue = decodePart(disarmItemPart || "").trim();
   const disarmZoneValue = decodePart(disarmZonePart || "").trim();
+  const woodenAttackValue = decodePart(woodenAttackPart || "").trim();
   const parsedWeaponBase = weaponBaseValue ? Number.parseInt(weaponBaseValue, 10) : Number.NaN;
   const parsedDisarmZone = disarmZoneValue ? Number.parseInt(disarmZoneValue, 10) : Number.NaN;
   return {
@@ -144,6 +148,7 @@ export const parseIncomingDamageMetaFlag = (flag: string): IncomingDamageMeta | 
     rangeAtAttack: parseRange(decodePart(rangePart || "")),
     disarmTargetItemId: disarmItemValue || null,
     disarmZoneId: Number.isFinite(parsedDisarmZone) ? Math.trunc(parsedDisarmZone) : null,
+    woodenAttack: woodenAttackValue === "1",
   };
 };
 

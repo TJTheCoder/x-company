@@ -300,7 +300,7 @@ export function normalizeMonsterTemplate(monster: Partial<MonsterTemplate> & Rec
     normalizeMonsterInt(monster.special, 0, { min: 0 }),
     { min: 0 }
   );
-  const size = normalizeMonsterInt(monster.size, 1, { min: 1 });
+  const size = normalizeMonsterInt(monster.size, 1);
   const talentData = normalizeMonsterTalentData(
     (monster.talent_levels || {}) as Record<string, unknown>,
     (monster.talents || []) as Array<{ id?: string | null; level?: unknown } | null | undefined>

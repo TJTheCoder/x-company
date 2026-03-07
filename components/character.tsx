@@ -248,6 +248,7 @@ export default function Character({
       destinationY: pending.destinationY,
       shootTargetZoneId: pending.shootTargetZoneId,
       shootAmmoItem: pending.shootAmmoItem,
+      woodenAttack: pending.woodenAttack,
       rangeAtAttack: pending.rangeAtAttack,
     };
 

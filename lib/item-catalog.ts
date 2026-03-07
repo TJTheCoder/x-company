@@ -12,6 +12,13 @@ type CanonicalItem = {
   properties?: string[];
 };
 
+const withWoodenProperty = (item: CanonicalItem, key: string, name: string): CanonicalItem => ({
+  ...item,
+  key,
+  name,
+  properties: [...(item.properties || []), "Wooden"],
+});
+
 const SHORTSWORD: CanonicalItem = {
   key: "shortsword",
   name: "Shortsword",
@@ -24,6 +31,8 @@ const SHORTSWORD: CanonicalItem = {
   properties: ["Edged", "Pointed", "Parrying"],
 };
 
+const WOODEN_SHORTSWORD = withWoodenProperty(SHORTSWORD, "wooden shortsword", "Wooden Shortsword");
+
 const LONGSWORD: CanonicalItem = {
   key: "longsword",
   name: "Longsword",
@@ -35,6 +44,8 @@ const LONGSWORD: CanonicalItem = {
   rangeBand: "Engaged",
   properties: ["Edged", "Pointed", "Parrying"],
 };
+
+const WOODEN_LONGSWORD = withWoodenProperty(LONGSWORD, "wooden longsword", "Wooden Longsword");
 
 const FLAMING_LONGSWORD: CanonicalItem = {
   key: "flaming longsword",
@@ -59,6 +70,8 @@ const GREATSWORD: CanonicalItem = {
   rangeBand: "Engaged",
   properties: ["Heavy", "Edged", "Pointed", "Parrying"],
 };
+
+const WOODEN_GREATSWORD = withWoodenProperty(GREATSWORD, "wooden greatsword", "Wooden Greatsword");
 
 const LEATHER_ARMOR: CanonicalItem = {
   key: "leather armor",
@@ -117,7 +130,7 @@ const STAFF: CanonicalItem = {
   wield: "2H",
   damage: 1,
   rangeBand: "Near",
-  properties: ["Blunt", "Hook", "Parrying"],
+  properties: ["Blunt", "Hook", "Parrying", "Wooden"],
 };
 
 const STUDDED_LEATHER_CAP: CanonicalItem = {
@@ -137,7 +150,7 @@ const WOODEN_CLUB: CanonicalItem = {
   wield: "1H",
   damage: 1,
   rangeBand: "Engaged",
-  properties: ["Blunt"],
+  properties: ["Blunt", "Wooden"],
 };
 
 const HEAVY_CROSSBOW: CanonicalItem = {
@@ -170,18 +183,19 @@ const SMALL_SHIELD: CanonicalItem = {
   wield: "1H",
 };
 
-const ARROW_IRON_HEAD: CanonicalItem = {
-  key: "arrow (iron head)",
-  name: "Arrow (Iron Head)",
+const ARROW: CanonicalItem = {
+  key: "arrow",
+  name: "Arrow",
   weight: 0.2,
   itemType: "Ammunition",
 };
 
-const ARROW_WOODEN_HEAD: CanonicalItem = {
-  key: "arrow (wooden head)",
-  name: "Arrow (Wooden Head)",
+const WOODEN_ARROW: CanonicalItem = {
+  key: "wooden arrow",
+  name: "Wooden Arrow",
   weight: 0.2,
   itemType: "Ammunition",
+  properties: ["Wooden"],
 };
 
 const TORCH: CanonicalItem = {
@@ -202,20 +216,23 @@ const CATALOG: CanonicalItem[] = [
   CHAINMAIL,
   FLAMING_LONGSWORD,
   GREATSWORD,
+  WOODEN_GREATSWORD,
   LEATHER_ARMOR,
   LIGHT_CROSSBOW,
   PLATE_ARMOR,
   SHORTBOW,
   SHORTSWORD,
+  WOODEN_SHORTSWORD,
   LONGSWORD,
+  WOODEN_LONGSWORD,
   STAFF,
   STUDDED_LEATHER_CAP,
   WOODEN_CLUB,
   HEAVY_CROSSBOW,
   LARGE_SHIELD,
   SMALL_SHIELD,
-  ARROW_IRON_HEAD,
-  ARROW_WOODEN_HEAD,
+  ARROW,
+  WOODEN_ARROW,
   LAMP_OIL,
   TORCH,
 ];

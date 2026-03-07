@@ -142,6 +142,7 @@ export type PendingMeleeAction = {
   destinationY?: number;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  woodenAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
 };
 
@@ -183,6 +184,7 @@ export type ResolvedMeleeAttack = {
   destinationY?: number;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  woodenAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   skipReaction?: boolean;
   armorUsed?: { helmet?: boolean; armor?: boolean; naturalArmor?: boolean };
@@ -911,9 +913,22 @@ export default function Dashboard() {
     return props.some((value) => String(value).trim().toLowerCase() === "chainmail");
   };
 
+  const hasItemProperty = (item: InventoryItem | null | undefined, propertyName: string): boolean => {
+    if (!item) return false;
+    const normalizedProperty = propertyName.trim().toLowerCase();
+    const props = Array.isArray(item.properties) ? item.properties : [];
+    return props.some((value) => String(value).trim().toLowerCase() === normalizedProperty);
+  };
+
+  const isWoodenAttack = (attack: ResolvedMeleeAttack | null | undefined): boolean => {
+    if (!attack) return false;
+    if (attack.woodenAttack) return true;
+    return hasItemProperty(attack.shootAmmoItem, "wooden");
+  };
+
   const applyTemporaryArmorRollEffectiveBonuses = (
     items: InventoryItem[],
-    options: { applyChainmailPenalty: boolean; applyWoodenHeadBonus: boolean }
+    options: { applyChainmailPenalty: boolean; applyWoodenBonus: boolean }
   ): { items: InventoryItem[]; changed: boolean } => {
     let changed = false;
     const nextItems = items.map((item) => {
@@ -923,7 +938,7 @@ export default function Dashboard() {
       if (options.applyChainmailPenalty && isChainmailArmorItem(item)) {
         targetEffective = Math.max(0, targetEffective - 3);
       }
-      if (options.applyWoodenHeadBonus) {
+      if (options.applyWoodenBonus) {
         targetEffective = Math.max(0, targetEffective * 2);
       }
       const currentEffective =
@@ -1766,6 +1781,7 @@ export default function Dashboard() {
       rangeAtAttack: attack.rangeAtAttack ?? null,
       disarmTargetItemId: attack.disarmTargetItemId ?? null,
       disarmZoneId: attack.disarmZoneId ?? null,
+      woodenAttack: isWoodenAttack(attack),
     };
     return initializeIncomingFlagFlow({
       targetTokenId: attack.targetCharacterId,
@@ -1992,12 +2008,6 @@ export default function Dashboard() {
         .trim()
         .toLowerCase();
       return rangeBand === "engaged";
-    };
-    const isWoodenHeadArrow = (ammo: InventoryItem | null | undefined): boolean => {
-      if (!ammo) return false;
-      const normalizedName = String(ammo.name || "").trim().toLowerCase();
-      const normalizedKey = String(ammo.item_key || "").trim().toLowerCase();
-      return normalizedName === "arrow (wooden head)" || normalizedKey === "arrow (wooden head)";
     };
     const isShortOrGreaterRangeBand = (rangeBand: string | null | undefined): boolean => {
       const normalized = String(rangeBand || "").trim().toLowerCase();
@@ -2344,6 +2354,7 @@ export default function Dashboard() {
             destinationY: attack.destinationY ?? null,
             shootTargetZoneId: attack.shootTargetZoneId ?? null,
             shootAmmoItem: attack.shootAmmoItem ?? null,
+            woodenAttack: isWoodenAttack(attack),
             rangeAtAttack: attack.rangeAtAttack ?? null,
             createdAt: new Date().toISOString(),
           };
@@ -3073,6 +3084,7 @@ export default function Dashboard() {
           swingBonusDamage: 0,
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
+          woodenAttack: slashState.meta.woodenAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           armorSkipped: incomingHasDamageTotal,
@@ -3090,14 +3102,14 @@ export default function Dashboard() {
     };
     const armorSkipped = Boolean(attack.armorSkipped);
     let remainingSuccesses = successes;
-    const applyWoodenHeadArmorBonus = attack.maneuver === "Shoot" && isWoodenHeadArrow(attack.shootAmmoItem);
+    const applyWoodenArmorBonus = isWoodenAttack(attack);
     const applyChainmailPenalty =
       (
         attack.maneuver === "Shoot" ||
         attack.maneuver === "Stab" ||
         (attack.maneuver === "Strike" && (await isStrikeWithShortOrGreaterDefaultRange()))
       );
-    const naturalArmorMultiplier = applyWoodenHeadArmorBonus ? 2 : 1;
+    const naturalArmorMultiplier = applyWoodenArmorBonus ? 2 : 1;
 
     if (armorSkipped && remainingSuccesses > 0) {
       if (attack.targetCharacterId.startsWith("monster:")) {
@@ -3220,7 +3232,7 @@ export default function Dashboard() {
             const normalizedGear = resetEffectiveBonusesForArmorItems(snapshot.gear || []);
             const adjustedGear = applyTemporaryArmorRollEffectiveBonuses(normalizedGear.items, {
               applyChainmailPenalty,
-              applyWoodenHeadBonus: applyWoodenHeadArmorBonus,
+              applyWoodenBonus: applyWoodenArmorBonus,
             });
             const snapshotForRoll = { ...snapshot, gear: adjustedGear.items };
             if (normalizedGear.changed || adjustedGear.changed) {
@@ -3289,7 +3301,7 @@ export default function Dashboard() {
           const normalizedInventory = resetEffectiveBonusesForArmorItems(target.inventory || []);
           const adjustedInventory = applyTemporaryArmorRollEffectiveBonuses(normalizedInventory.items, {
             applyChainmailPenalty,
-            applyWoodenHeadBonus: applyWoodenHeadArmorBonus,
+            applyWoodenBonus: applyWoodenArmorBonus,
           });
           const targetForRoll = { ...target, inventory: adjustedInventory.items };
           if (normalizedInventory.changed || adjustedInventory.changed) {
@@ -3727,6 +3739,7 @@ export default function Dashboard() {
           swingBonusDamage: 0,
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
+          woodenAttack: slashState.meta.woodenAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           sunderResolved: true,
@@ -3751,6 +3764,7 @@ export default function Dashboard() {
           swingBonusDamage: 0,
           disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
           disarmZoneId: slashState.meta.disarmZoneId ?? null,
+          woodenAttack: slashState.meta.woodenAttack ?? false,
           rangeAtAttack: slashState.meta.rangeAtAttack,
           skipReaction: true,
           slashFlow: true,
@@ -3788,6 +3802,7 @@ export default function Dashboard() {
         swingBonusDamage: 0,
         disarmTargetItemId: slashState.meta.disarmTargetItemId ?? null,
         disarmZoneId: slashState.meta.disarmZoneId ?? null,
+        woodenAttack: slashState.meta.woodenAttack ?? false,
         rangeAtAttack: slashState.meta.rangeAtAttack,
         skipReaction: true,
         armorSkipped: incomingHasDamageTotal,

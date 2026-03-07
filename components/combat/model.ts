@@ -178,6 +178,7 @@ export type PendingReaction = {
   destinationY?: number | null;
   shootTargetZoneId?: number | null;
   shootAmmoItem?: InventoryItem | null;
+  woodenAttack?: boolean;
   rangeAtAttack?: "Engaged" | "Near" | "Close" | "Long" | "Distant" | null;
   createdAt?: string | null;
 };
@@ -688,6 +689,7 @@ export function normalizePendingReactions(raw: PendingReaction[] | null | undefi
       shootTargetZoneId: typeof v.shootTargetZoneId === "number" ? v.shootTargetZoneId : null,
       shootAmmoItem:
         v.shootAmmoItem && typeof v.shootAmmoItem === "object" ? (v.shootAmmoItem as InventoryItem) : null,
+      woodenAttack: v.woodenAttack === true,
       rangeAtAttack:
         v.rangeAtAttack === "Engaged" ||
         v.rangeAtAttack === "Near" ||

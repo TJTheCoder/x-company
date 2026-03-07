@@ -177,8 +177,13 @@ const groupItemsForDisplay = (items: InventoryItem[]): GroupedItemDisplay[] => {
   return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label));
 };
 
+type TalentCarrier = {
+  talent_levels?: Record<string, number> | null;
+  talents?: Array<{ id?: string | null; level?: number | null } | null | undefined> | null;
+};
+
 const hasTalentLevelAtLeast = (
-  character: CharacterLite | null | undefined,
+  character: TalentCarrier | null | undefined,
   talentId: string,
   minLevel: number
 ): boolean => {
@@ -275,6 +280,12 @@ export default function Combat({
     zoneId: number;
     items: InventoryItem[];
     hasCover: boolean;
+  } | null>(null);
+  const [tokenHoverInfo, setTokenHoverInfo] = useState<{
+    tokenId: string;
+    x: number;
+    y: number;
+    tooltip: string;
   } | null>(null);
   const [characters, setCharacters] = useState<CharacterLite[]>([]);
   const [excludedPlayerIds, setExcludedPlayerIds] = useState<string[]>([]);
@@ -988,14 +999,16 @@ export default function Combat({
   const reactionTargetIsMonster =
     Boolean(reactionTargetId?.startsWith("monster:")) || reactionTargetEntry?.kind === "monster";
   const reactionTargetCharacter = reactionTargetId ? characterById.get(reactionTargetId) || null : null;
+  const reactionTargetTalentSource = reactionTargetIsMonster
+    ? reactionTargetEntry?.monster_snapshot || null
+    : reactionTargetCharacter;
   const reactionTargetHasFastFootworkLv1 = hasTalentLevelAtLeast(
-    reactionTargetCharacter,
+    reactionTargetTalentSource,
     FAST_FOOTWORK_TALENT_ID,
     1
   );
   const freeDodgeAvailable =
     Boolean(pendingReaction) &&
-    !reactionTargetIsMonster &&
     reactionTargetHasFastFootworkLv1 &&
     !Boolean(reactionTargetEntry?.fast_footwork_dodge_used);
   const viewerCanControlReaction =
@@ -1140,10 +1153,12 @@ export default function Combat({
   }, [pendingReaction, canParryReaction, reactionManeuver, character, reactionTargetIsMonster, reactionTargetEntry]);
   const slashReactionTargetIsMonster = currentEntry?.kind === "monster";
   const slashReactionTargetCharacter = actorTokenId ? characterById.get(actorTokenId) || null : null;
+  const slashReactionTalentSource = slashReactionTargetIsMonster
+    ? currentEntry?.monster_snapshot || null
+    : slashReactionTargetCharacter;
   const slashFreeDodgeAvailable =
     slashIncomingActive &&
-    !slashReactionTargetIsMonster &&
-    hasTalentLevelAtLeast(slashReactionTargetCharacter, FAST_FOOTWORK_TALENT_ID, 1) &&
+    hasTalentLevelAtLeast(slashReactionTalentSource, FAST_FOOTWORK_TALENT_ID, 1) &&
     !Boolean(currentEntry?.fast_footwork_dodge_used);
   const slashCanDodgeReaction =
     slashReactionPhase &&
@@ -7091,6 +7106,13 @@ export default function Combat({
     await saveZoneLines([]);
   };
 
+  const hoverCardClassName =
+    "pointer-events-none absolute z-20 max-w-[280px] rounded border border-amber-400/80 bg-gray-900/95 px-2 py-1 text-xs text-amber-100 shadow-xl";
+  const hoverCardStyle = (x: number, y: number) => ({
+    left: Math.min(x + 12, (mapContainerRef.current?.clientWidth ?? 0) - 290),
+    top: Math.max(8, y - 8),
+  });
+
   return (
     <>
       {shouldShowArtPrompt && artPrompt && (
@@ -7756,7 +7778,10 @@ export default function Combat({
               hasCover,
             });
           }}
-          onMouseLeave={() => setZoneHoverInfo(null)}
+          onMouseLeave={() => {
+            setZoneHoverInfo(null);
+            setTokenHoverInfo(null);
+          }}
           onDrop={onDrop}
           onClick={(event) => {
             const targetNode = event.target as HTMLElement | null;
@@ -7857,18 +7882,34 @@ export default function Combat({
                     const a = tokenByCharacterId.get(edge.a);
                     const b = tokenByCharacterId.get(edge.b);
                     if (!a || !b) return null;
+                    const x1 = imageRect.x + a.x * imageRect.w;
+                    const y1 = imageRect.y + a.y * imageRect.h;
+                    const x2 = imageRect.x + b.x * imageRect.w;
+                    const y2 = imageRect.y + b.y * imageRect.h;
                     return (
-                      <line
-                        key={`engagement-${idx}-${edge.a}-${edge.b}`}
-                        x1={imageRect.x + a.x * imageRect.w}
-                        y1={imageRect.y + a.y * imageRect.h}
-                        x2={imageRect.x + b.x * imageRect.w}
-                        y2={imageRect.y + b.y * imageRect.h}
-                        stroke="#60a5fa"
-                        strokeWidth={3}
-                        strokeDasharray="8 6"
-                        opacity={0.95}
-                      />
+                      <g key={`engagement-${idx}-${edge.a}-${edge.b}`}>
+                        <line
+                          x1={x1}
+                          y1={y1}
+                          x2={x2}
+                          y2={y2}
+                          stroke="rgba(0, 0, 0, 0.9)"
+                          strokeWidth={5}
+                          strokeDasharray="8 6"
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={x1}
+                          y1={y1}
+                          x2={x2}
+                          y2={y2}
+                          stroke="#60a5fa"
+                          strokeWidth={3}
+                          strokeDasharray="8 6"
+                          strokeLinecap="round"
+                          opacity={0.95}
+                        />
+                      </g>
                     );
                   })}
                 </svg>
@@ -7926,6 +7967,32 @@ export default function Combat({
                     key={token.character_id}
                     data-combat-token="true"
                     draggable={draggableTokenCharacterIds.has(token.character_id)}
+                    onMouseEnter={(event) => {
+                      const rect = mapContainerRef.current?.getBoundingClientRect();
+                      if (!rect) return;
+                      setZoneHoverInfo(null);
+                      setTokenHoverInfo({
+                        tokenId: token.character_id,
+                        x: event.clientX - rect.left,
+                        y: event.clientY - rect.top,
+                        tooltip: token.tooltip,
+                      });
+                    }}
+                    onMouseMove={(event) => {
+                      const rect = mapContainerRef.current?.getBoundingClientRect();
+                      if (!rect) return;
+                      setTokenHoverInfo({
+                        tokenId: token.character_id,
+                        x: event.clientX - rect.left,
+                        y: event.clientY - rect.top,
+                        tooltip: token.tooltip,
+                      });
+                    }}
+                    onMouseLeave={() => {
+                      setTokenHoverInfo((prev) =>
+                        prev?.tokenId === token.character_id ? null : prev
+                      );
+                    }}
                     onDragStart={(event) => {
                       if (!draggableTokenCharacterIds.has(token.character_id)) return;
                       draggedTokenRef.current = token.character_id;
@@ -7952,7 +8019,6 @@ export default function Combat({
                       left: imageRect.x + displayX * imageRect.w,
                       top: imageRect.y + displayY * imageRect.h,
                     }}
-                    title={token.tooltip}
                   >
                     {token.icon_url ? (
                       <img
@@ -8041,14 +8107,26 @@ export default function Combat({
             </div>
           )}
 
-          {zoneHoverInfo && (
+          {tokenHoverInfo && (
             <div
-              className="pointer-events-none absolute z-20 max-w-[280px] rounded border border-amber-400/80 bg-gray-900/95 px-2 py-1 text-xs text-amber-100 shadow-xl"
-              style={{
-                left: Math.min(zoneHoverInfo.x + 12, (mapContainerRef.current?.clientWidth ?? 0) - 290),
-                top: Math.max(8, zoneHoverInfo.y - 8),
-              }}
+              className={hoverCardClassName}
+              style={hoverCardStyle(tokenHoverInfo.x, tokenHoverInfo.y)}
             >
+              {tokenHoverInfo.tooltip
+                .split("\n")
+                .filter((line) => line.trim().length > 0)
+                .map((line, idx) => (
+                  <div
+                    key={`token-hover-line-${idx}`}
+                    className={idx === 0 ? "font-semibold text-amber-300" : undefined}
+                  >
+                    {line}
+                  </div>
+                ))}
+            </div>
+          )}
+          {!tokenHoverInfo && zoneHoverInfo && (
+            <div className={hoverCardClassName} style={hoverCardStyle(zoneHoverInfo.x, zoneHoverInfo.y)}>
               <div className="font-semibold text-amber-300">{`Zone ${zoneHoverInfo.zoneId}`}</div>
               {zoneHoverInfo.items.length > 0 && (
                 <div>

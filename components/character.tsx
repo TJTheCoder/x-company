@@ -230,7 +230,7 @@ export default function Character({
     activeMeleeAttackRef.current = null;
     setActiveMeleeAttack(null);
 
-    void onResolveMeleeAttack({
+    const resolvedAttack: ResolvedMeleeAttack = {
       id: pending.id,
       attackerCharacterId: pending.attackerCharacterId,
       attackerName: pending.attackerName,
@@ -249,8 +249,15 @@ export default function Character({
       shootTargetZoneId: pending.shootTargetZoneId,
       shootAmmoItem: pending.shootAmmoItem,
       rangeAtAttack: pending.rangeAtAttack,
-    });
-    onMeleeRollCleared();
+    };
+
+    void Promise.resolve(onResolveMeleeAttack(resolvedAttack))
+      .catch((error) => {
+        console.error("Failed to resolve melee attack roll:", error);
+      })
+      .finally(() => {
+        onMeleeRollCleared();
+      });
   };
 
   const resolveReactionRollForRoll = (attr: keyof Attributes, roll: RollState) => {
@@ -259,7 +266,7 @@ export default function Character({
     activeReactionRollRef.current = null;
     setActiveReactionRoll(null);
 
-    void onResolveReactionRoll({
+    const resolvedRoll: ResolvedReactionRoll = {
       id: pending.id,
       reactionId: pending.reactionId,
       targetCharacterId: pending.targetCharacterId,
@@ -270,8 +277,15 @@ export default function Character({
       applyProne: pending.applyProne,
       attack: pending.attack,
       taunt: pending.taunt,
-    });
-    onReactionRollCleared();
+    };
+
+    void Promise.resolve(onResolveReactionRoll(resolvedRoll))
+      .catch((error) => {
+        console.error("Failed to resolve reaction roll:", error);
+      })
+      .finally(() => {
+        onReactionRollCleared();
+      });
   };
 
   const applySpiritDelta = (delta: number) => {

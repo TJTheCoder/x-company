@@ -14,6 +14,7 @@ export type MonsterTalentProgress = {
 export type MonsterTemplate = {
   id: string;
   name: string;
+  is_spirit: boolean;
   str: number;
   agl: number;
   wit: number;
@@ -39,6 +40,7 @@ export type MonsterTemplate = {
 export type MonsterSnapshot = {
   template_id: string;
   name: string;
+  is_spirit: boolean;
   size: number;
   skill: number;
   natural_armor: number;
@@ -282,12 +284,17 @@ export function monsterToTalentsCsv(monster: {
     .join(", ");
 }
 
+export const monsterIsSpirit = (
+  monster: { is_spirit?: boolean | null; spirit?: boolean | null } | null | undefined
+): boolean => Boolean(monster?.is_spirit ?? monster?.spirit);
+
 export function normalizeMonsterTemplate(monster: Partial<MonsterTemplate> & Record<string, unknown>): MonsterTemplate {
+  const isSpirit = monsterIsSpirit(monster);
   const physical = normalizeMonsterInt(monster.physical, 1, { min: 1 });
   const mental = normalizeMonsterInt(monster.mental, 1, { min: 1 });
   const skill = normalizeMonsterInt(monster.skill ?? monster.special, 0, { min: 0 });
-  const str = normalizeMonsterInt(monster.str, physical * 2, { min: 1 });
-  const agl = normalizeMonsterInt(monster.agl, physical * 2, { min: 1 });
+  const str = isSpirit ? 0 : normalizeMonsterInt(monster.str, physical * 2, { min: 1 });
+  const agl = isSpirit ? 0 : normalizeMonsterInt(monster.agl, physical * 2, { min: 1 });
   const wit = normalizeMonsterInt(monster.wit, mental * 2, { min: 1 });
   const emp = normalizeMonsterInt(monster.emp, mental * 2, { min: 1 });
   const startingSpirits = normalizeMonsterInt(
@@ -308,6 +315,7 @@ export function normalizeMonsterTemplate(monster: Partial<MonsterTemplate> & Rec
   return {
     id: String(monster.id || ""),
     name: String(monster.name || "").trim(),
+    is_spirit: isSpirit,
     str,
     agl,
     wit,
@@ -348,6 +356,7 @@ export function buildMonsterSnapshot(monster: MonsterTemplate): MonsterSnapshot 
   return {
     template_id: normalized.id,
     name: normalized.name,
+    is_spirit: normalized.is_spirit,
     size,
     skill: normalized.skill,
     natural_armor: normalized.natural_armor,
@@ -408,6 +417,7 @@ export function formatMonsterTooltip(snapshot: MonsterSnapshot): string {
   const currentSpirit = snapshot.spirits_current ?? snapshot.starting_spirits;
   return [
     snapshot.name,
+    snapshot.is_spirit ? "Type: Spirit" : "Type: Monster",
     `Size: ${snapshot.size}`,
     `STR ${snapshot.str}/${snapshot.max_str ?? snapshot.str} | AGL ${snapshot.agl}/${snapshot.max_agl ?? snapshot.agl}`,
     `WIT ${snapshot.wit}/${snapshot.max_wit ?? snapshot.wit} | EMP ${snapshot.emp}/${snapshot.max_emp ?? snapshot.emp}`,

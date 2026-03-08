@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { applyGearDamageToItem, normalizeInventoryItems } from "@/lib/item-catalog";
+import { monsterIsSpirit } from "@/lib/monsters";
 import {
   ARTS_CHOSEN_FLAG,
   DODGED_FLAG,
@@ -135,6 +136,7 @@ export type PendingMeleeAction = {
     | "Heal"
     | "Taunt (Anger)"
     | "Taunt (Distract)"
+    | "Spook"
     | "Snuff";
   rollAttribute?: keyof Attributes;
   rollSkill?: string;
@@ -181,6 +183,7 @@ export type ResolvedMeleeAttack = {
     | "Heal"
     | "Taunt (Anger)"
     | "Taunt (Distract)"
+    | "Spook"
     | "Snuff";
   totalSuccesses: number;
   requiredSuccesses?: number;
@@ -217,7 +220,8 @@ export type PendingReactionRoll = {
     | "naturalArmor"
     | "insight"
     | "oppose-break-free"
-    | "oppose-taunt";
+    | "oppose-taunt"
+    | "oppose-spook";
   rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
@@ -252,7 +256,8 @@ export type ResolvedReactionRoll = {
     | "naturalArmor"
     | "insight"
     | "oppose-break-free"
-    | "oppose-taunt";
+    | "oppose-taunt"
+    | "oppose-spook";
   rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
   armorSlot?: "armor" | "helmet" | "naturalArmor";
@@ -1054,6 +1059,53 @@ export default function Dashboard() {
     return hasItemProperty(attack.shootAmmoItem, "wooden");
   };
 
+  const isSpiritMonsterSnapshot = (snapshot: Record<string, unknown> | null | undefined): boolean =>
+    monsterIsSpirit(snapshot as { is_spirit?: boolean | null; spirit?: boolean | null } | null | undefined);
+
+  const canWoodenAttackAffectSpirit = (attack: ResolvedMeleeAttack | null | undefined): boolean => {
+    if (!attack || !isWoodenAttack(attack)) return false;
+    return attack.maneuver === "Slash" || attack.maneuver === "Stab" || attack.maneuver === "Shoot";
+  };
+
+  const isSpiritImmuneToAttack = (
+    attack: ResolvedMeleeAttack | null | undefined,
+    targetIsSpirit: boolean
+  ): boolean => {
+    if (!attack || !targetIsSpirit) return false;
+    if (attack.maneuver === "Slash" || attack.maneuver === "Stab" || attack.maneuver === "Shoot") {
+      return !canWoodenAttackAffectSpirit(attack);
+    }
+    return (
+      attack.maneuver === "Strike" ||
+      attack.maneuver === "Grapple Attack" ||
+      attack.maneuver === "Shove" ||
+      attack.maneuver === "Disarm" ||
+      attack.maneuver === "Grapple" ||
+      attack.maneuver === "Cling" ||
+      attack.maneuver === "Break Free"
+    );
+  };
+
+  const loadMonsterSpiritTargetState = async (tokenId: string): Promise<boolean> => {
+    if (!tokenId.startsWith("monster:")) return false;
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_monsters, initiative_entries")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_monsters: Array<{ id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+        initiative_entries: Array<{ participant_id: string; monster_snapshot?: Record<string, unknown> | null }> | null;
+      }>();
+    if (error || !data) {
+      if (error) console.error("Failed to load spirit target state:", error);
+      return false;
+    }
+    const entry = (data.initiative_entries || []).find((item) => item.participant_id === tokenId) || null;
+    const monster = (data.initiative_monsters || []).find((item) => item.id === tokenId) || null;
+    return isSpiritMonsterSnapshot(entry?.monster_snapshot || monster?.monster_snapshot || null);
+  };
+
   const isFirearmAttack = (attack: ResolvedMeleeAttack | null | undefined): boolean => {
     if (!attack) return false;
     return attack.firearmAttack === true;
@@ -1529,19 +1581,20 @@ export default function Dashboard() {
   ): maneuver is FlagFlowManeuver | "Grapple Attack" =>
     isFlagFlowManeuver(maneuver) || maneuver === "Grapple Attack";
 
-  type OpposedRollManeuver = "Break Free" | "Taunt (Anger)" | "Taunt (Distract)";
+  type OpposedRollManeuver = "Break Free" | "Taunt (Anger)" | "Taunt (Distract)" | "Spook";
 
   const isOpposedRollManeuver = (
     maneuver: ResolvedMeleeAttack["maneuver"]
   ): maneuver is OpposedRollManeuver =>
     maneuver === "Break Free" ||
     maneuver === "Taunt (Anger)" ||
-    maneuver === "Taunt (Distract)";
+    maneuver === "Taunt (Distract)" ||
+    maneuver === "Spook";
 
   const opposingReactionModeForManeuver = (
     maneuver: OpposedRollManeuver
-  ): "oppose-break-free" | "oppose-taunt" =>
-    maneuver === "Break Free" ? "oppose-break-free" : "oppose-taunt";
+  ): "oppose-break-free" | "oppose-taunt" | "oppose-spook" =>
+    maneuver === "Break Free" ? "oppose-break-free" : maneuver === "Spook" ? "oppose-spook" : "oppose-taunt";
 
   const flagFlowManeuverFromIncoming = (incoming: IncomingDamageFlag): FlagFlowManeuver =>
     incoming.type === "Stab"
@@ -2031,13 +2084,15 @@ export default function Dashboard() {
     successes: number
   ): Promise<boolean> => {
     if (!isFlagFlowTriggerManeuver(attack.maneuver)) return false;
+    const targetIsSpirit = await loadMonsterSpiritTargetState(attack.targetCharacterId);
     const flowManeuver: FlagFlowManeuver =
       attack.maneuver === "Grapple Attack" ? "Strike" : attack.maneuver;
     const preResolveDodged =
       attack.maneuver === "Grapple Attack" ||
-      (attack.maneuver === "Shoot" && isFirearmAttack(attack));
+      (attack.maneuver === "Shoot" && isFirearmAttack(attack)) ||
+      targetIsSpirit;
     const preResolveParried =
-      attack.maneuver === "Grapple Attack" || attack.maneuver === "Shoot";
+      attack.maneuver === "Grapple Attack" || attack.maneuver === "Shoot" || targetIsSpirit;
     const hasIncomingDamageTotal =
       flowManeuver !== "Grapple" &&
       flowManeuver !== "Cling" &&
@@ -2084,6 +2139,10 @@ export default function Dashboard() {
     const supabase = createClient();
     const flowActorTokenId = character?.id ?? attack.attackerCharacterId;
     const didSucceed = successes >= requiredSuccesses;
+    const targetIsSpirit = await loadMonsterSpiritTargetState(attack.targetCharacterId);
+    if (isSpiritImmuneToAttack(attack, targetIsSpirit)) {
+      return;
+    }
     const reactionEligibleManeuvers = new Set<ResolvedMeleeAttack["maneuver"]>([
       "Shove",
       "Disarm",
@@ -2715,6 +2774,193 @@ export default function Dashboard() {
       }
     };
 
+    const applyDirectAttributeDamage = async (
+      targetTokenId: string,
+      damageAttribute: keyof Attributes,
+      damage: number
+    ) => {
+      const appliedDamage = Math.max(0, damage);
+      if (appliedDamage <= 0) return;
+
+      if (targetTokenId.startsWith("monster:")) {
+        const { data: combatState, error: combatError } = await supabase
+          .from("combat_state")
+          .select("initiative_monsters, initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_monsters: Array<{
+              id: string;
+              monster_snapshot?: {
+                is_spirit?: boolean;
+                str?: number;
+                agl?: number;
+                wit?: number;
+                emp?: number;
+              } | null;
+            }> | null;
+            initiative_entries: Array<{
+              participant_id: string;
+              prone?: boolean | null;
+              monster_snapshot?: {
+                is_spirit?: boolean;
+                str?: number;
+                agl?: number;
+                wit?: number;
+                emp?: number;
+              } | null;
+            }> | null;
+          }>();
+        if (combatError || !combatState) {
+          if (combatError) console.error("Failed to load combat state for direct damage:", combatError);
+          return;
+        }
+
+        const monsters = Array.isArray(combatState.initiative_monsters) ? combatState.initiative_monsters : [];
+        const entries = Array.isArray(combatState.initiative_entries) ? combatState.initiative_entries : [];
+        const targetEntry = entries.find((entry) => entry.participant_id === targetTokenId) || null;
+        const targetMonster = monsters.find((monster) => monster.id === targetTokenId) || null;
+        const snapshot = targetEntry?.monster_snapshot || targetMonster?.monster_snapshot || null;
+        if (!snapshot) return;
+
+        const attrKey = damageAttribute.toLowerCase() as "str" | "agl" | "wit" | "emp";
+        const currentValue = Math.max(0, Number(snapshot[attrKey] ?? 0));
+        const nextValue = Math.max(0, currentValue - appliedDamage);
+        const targetIsSpiritMonster = isSpiritMonsterSnapshot(snapshot);
+
+        const nextMonsters = monsters.map((monster) => {
+          if (monster.id !== targetTokenId || !monster.monster_snapshot) return monster;
+          return {
+            ...monster,
+            monster_snapshot: {
+              ...monster.monster_snapshot,
+              [attrKey]: nextValue,
+            },
+          };
+        });
+
+        const nextEntries = entries.map((entry) => {
+          if (entry.participant_id !== targetTokenId || !entry.monster_snapshot) return entry;
+          const nextStr =
+            damageAttribute === "STR"
+              ? nextValue
+              : Math.max(0, Number(entry.monster_snapshot.str ?? 0));
+          const nextAgl =
+            damageAttribute === "AGL"
+              ? nextValue
+              : Math.max(0, Number(entry.monster_snapshot.agl ?? 0));
+          const nextWit =
+            damageAttribute === "WIT"
+              ? nextValue
+              : Math.max(0, Number(entry.monster_snapshot.wit ?? 0));
+          const nextEmp =
+            damageAttribute === "EMP"
+              ? nextValue
+              : Math.max(0, Number(entry.monster_snapshot.emp ?? 0));
+          const isPhysBroken = !targetIsSpiritMonster && (nextStr <= 0 || nextAgl <= 0);
+          return {
+            ...entry,
+            prone:
+              damageAttribute === "STR" || damageAttribute === "AGL"
+                ? isPhysBroken ? true : entry.prone
+                : entry.prone,
+            monster_snapshot: {
+              ...entry.monster_snapshot,
+              [attrKey]: nextValue,
+            },
+          };
+        });
+
+        const { error: updateError } = await supabase
+          .from("combat_state")
+          .update({
+            initiative_monsters: nextMonsters,
+            initiative_entries: nextEntries,
+          })
+          .eq("id", 1);
+        if (updateError) {
+          console.error("Failed to apply direct monster damage:", updateError);
+          return;
+        }
+
+        if (targetIsSpiritMonster) {
+          const nextEntry = nextEntries.find((entry) => entry.participant_id === targetTokenId) || null;
+          const nextWit = Math.max(0, Number(nextEntry?.monster_snapshot?.wit ?? 0));
+          const nextEmp = Math.max(0, Number(nextEntry?.monster_snapshot?.emp ?? 0));
+          if (nextWit <= 0 || nextEmp <= 0) {
+            await removeParticipantFromCombat(targetTokenId);
+            return;
+          }
+        }
+
+        await pruneBrokenOnlyEngagements();
+        return;
+      }
+
+      const { data: target, error: targetError } = await supabase
+        .from("characters")
+        .select("id, attributes, spirits")
+        .eq("id", targetTokenId)
+        .maybeSingle<{ id: string; attributes: Attributes; spirits: number }>();
+      if (targetError || !target) {
+        if (targetError) console.error("Failed to load target for direct damage:", targetError);
+        return;
+      }
+
+      const nextAttributes: Attributes = {
+        ...target.attributes,
+        [damageAttribute]: Math.max(0, (target.attributes[damageAttribute] ?? 0) - appliedDamage),
+      };
+      const shouldZeroSpirit = Object.values(nextAttributes).some((value) => value <= 0);
+      const updates: Partial<CharacterType> = shouldZeroSpirit
+        ? { attributes: nextAttributes, spirits: 0 }
+        : { attributes: nextAttributes };
+
+      const { error: updateError } = await supabase
+        .from("characters")
+        .update(updates)
+        .eq("id", targetTokenId);
+      if (updateError) {
+        console.error("Failed to apply direct damage:", updateError);
+        return;
+      }
+
+      if (character?.id === targetTokenId) {
+        updateCharacter(updates);
+      }
+
+      if (
+        (damageAttribute === "STR" || damageAttribute === "AGL") &&
+        ((nextAttributes.STR ?? 0) <= 0 || (nextAttributes.AGL ?? 0) <= 0)
+      ) {
+        const { data: combatState } = await supabase
+          .from("combat_state")
+          .select("initiative_entries")
+          .eq("id", 1)
+          .maybeSingle<{
+            initiative_entries: Array<Record<string, unknown>> | null;
+          }>();
+        const entries = Array.isArray(combatState?.initiative_entries) ? combatState.initiative_entries : [];
+        if (entries.length > 0) {
+          const nextEntries = entries.map((entry) => {
+            const participantId = String(entry.participant_id ?? "");
+            if (participantId !== targetTokenId && participantId !== `player:${targetTokenId}`) {
+              return entry;
+            }
+            return {
+              ...entry,
+              prone: true,
+            };
+          });
+          await supabase
+            .from("combat_state")
+            .update({ initiative_entries: nextEntries })
+            .eq("id", 1);
+        }
+      }
+
+      await pruneBrokenOnlyEngagements();
+    };
+
     const markTargetDead = async (targetTokenId: string) => {
       if (targetTokenId.startsWith("monster:")) {
         const { data: combatState, error: combatError } = await supabase
@@ -3037,6 +3283,31 @@ export default function Dashboard() {
       if (breakFreeError) {
         console.error("Failed to resolve break free:", breakFreeError);
       }
+      return;
+    }
+
+    if (attack.maneuver === "Spook") {
+      if (!attack.skipReaction && successes > 0) {
+        const startedOpposingFlow = await initializeOpposingFlow({
+          targetTokenId: attack.targetCharacterId,
+          attackerTokenId: attack.attackerCharacterId,
+          opposing: {
+            type: "Spook",
+            successes,
+          },
+          meta: {
+            attackerTokenId: attack.attackerCharacterId,
+            attackId: attack.id,
+            weaponName: attack.weaponName,
+          },
+        });
+        if (startedOpposingFlow) {
+          return;
+        }
+      }
+
+      if (!didSucceed) return;
+      await applyDirectAttributeDamage(attack.targetCharacterId, "WIT", successes);
       return;
     }
 
@@ -3395,7 +3666,7 @@ export default function Dashboard() {
     };
     const armorSkipped = Boolean(attack.armorSkipped);
     let remainingSuccesses = successes;
-    const applyWoodenArmorBonus = isWoodenAttack(attack);
+    const applyWoodenArmorBonus = isWoodenAttack(attack) && !targetIsSpirit;
     const applyChainmailPenalty =
       (
         attack.maneuver === "Shoot" ||
@@ -3658,6 +3929,8 @@ export default function Dashboard() {
       Math.max(0, attack.swingBonusDamage ?? 0);
     if (damage <= 0) return;
 
+    const damageAttribute: keyof Attributes = targetIsSpirit && canWoodenAttackAffectSpirit(attack) ? "WIT" : "STR";
+
     if (attack.targetCharacterId.startsWith("monster:")) {
       const { data: combatState, error: combatError } = await supabase
         .from("combat_state")
@@ -3667,8 +3940,11 @@ export default function Dashboard() {
           initiative_monsters: Array<{
             id: string;
             monster_snapshot?: {
+              is_spirit?: boolean;
               str?: number;
               agl?: number;
+              wit?: number;
+              emp?: number;
               natural_armor?: number;
               gear?: InventoryItem[];
               equipment_slots?: { armor?: string | null; helmet?: string | null };
@@ -3677,8 +3953,11 @@ export default function Dashboard() {
           initiative_entries: Array<{
             participant_id: string;
             monster_snapshot?: {
+              is_spirit?: boolean;
               str?: number;
               agl?: number;
+              wit?: number;
+              emp?: number;
               natural_armor?: number;
               gear?: InventoryItem[];
               equipment_slots?: { armor?: string | null; helmet?: string | null };
@@ -3700,26 +3979,39 @@ export default function Dashboard() {
 
       const nextMonsters = monsters.map((monster) => {
         if (monster.id !== attack.targetCharacterId || !monster.monster_snapshot) return monster;
+        const currentValue = Number(
+          damageAttribute === "WIT" ? monster.monster_snapshot.wit ?? 0 : monster.monster_snapshot.str ?? 0
+        );
         return {
           ...monster,
           monster_snapshot: {
             ...monster.monster_snapshot,
-            str: Math.max(0, (monster.monster_snapshot.str ?? 0) - mitigatedDamage),
+            [damageAttribute.toLowerCase()]: Math.max(0, currentValue - mitigatedDamage),
           },
         };
       });
 
       const nextEntries = entries.map((entry) => {
         if (entry.participant_id !== attack.targetCharacterId || !entry.monster_snapshot) return entry;
-        const nextStr = Math.max(0, (entry.monster_snapshot.str ?? 0) - mitigatedDamage);
+        const nextStr =
+          damageAttribute === "STR"
+            ? Math.max(0, (entry.monster_snapshot.str ?? 0) - mitigatedDamage)
+            : Math.max(0, entry.monster_snapshot.str ?? 0);
         const nextAgl = Math.max(0, entry.monster_snapshot.agl ?? 0);
-        const isPhysBroken = nextStr <= 0 || nextAgl <= 0;
+        const nextWit =
+          damageAttribute === "WIT"
+            ? Math.max(0, (entry.monster_snapshot.wit ?? 0) - mitigatedDamage)
+            : Math.max(0, entry.monster_snapshot.wit ?? 0);
+        const nextEmp = Math.max(0, entry.monster_snapshot.emp ?? 0);
+        const entryIsSpirit = isSpiritMonsterSnapshot(entry.monster_snapshot);
+        const isPhysBroken = !entryIsSpirit && (nextStr <= 0 || nextAgl <= 0);
         return {
           ...entry,
           prone: isPhysBroken ? true : entry.prone,
           monster_snapshot: {
             ...entry.monster_snapshot,
             str: nextStr,
+            wit: nextWit,
           },
         };
       });
@@ -3746,6 +4038,15 @@ export default function Dashboard() {
         });
         if (flowUpdateError) {
           console.error("Failed to apply monster melee damage via flow state fallback:", flowUpdateError);
+        }
+      }
+      if (targetIsSpirit) {
+        const targetEntry = nextEntries.find((entry) => entry.participant_id === attack.targetCharacterId) || null;
+        const nextWit = Number(targetEntry?.monster_snapshot?.wit ?? 0);
+        const nextEmp = Number(targetEntry?.monster_snapshot?.emp ?? 0);
+        if (nextWit <= 0 || nextEmp <= 0) {
+          await removeParticipantFromCombat(attack.targetCharacterId);
+          return;
         }
       }
       if (await isEngagedStrikeContact()) {
@@ -3783,7 +4084,7 @@ export default function Dashboard() {
 
     const nextAttributes: Attributes = {
       ...target.attributes,
-      STR: Math.max(0, (target.attributes.STR ?? 0) - mitigatedDamage),
+      [damageAttribute]: Math.max(0, (target.attributes[damageAttribute] ?? 0) - mitigatedDamage),
     };
     const shouldZeroSpirit = Object.values(nextAttributes).some((value) => value <= 0);
     const updates: Partial<CharacterType> = shouldZeroSpirit
@@ -3875,12 +4176,20 @@ export default function Dashboard() {
       if (!updated) return;
 
       const opposingHeld = Math.max(0, opposingState.opposing.successes);
-      const resisted =
-        roll.mode === opposingReactionModeForManeuver(roll.attack.maneuver) &&
-        Math.max(0, roll.totalSuccesses) >= opposingHeld;
+      const opposingSuccesses =
+        roll.mode === opposingReactionModeForManeuver(roll.attack.maneuver)
+          ? Math.max(0, roll.totalSuccesses)
+          : 0;
+      const resisted = opposingSuccesses >= opposingHeld;
+      const remainingSuccesses =
+        roll.attack.maneuver === "Spook"
+          ? Math.max(0, roll.attack.totalSuccesses - opposingSuccesses)
+          : resisted
+            ? 0
+            : Math.max(0, roll.attack.totalSuccesses);
       await resolveMeleeAttack({
         ...roll.attack,
-        totalSuccesses: resisted ? 0 : Math.max(0, roll.attack.totalSuccesses),
+        totalSuccesses: remainingSuccesses,
         skipReaction: true,
       });
       return;

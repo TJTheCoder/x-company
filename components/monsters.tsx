@@ -38,6 +38,7 @@ const OUTPUT_SIZE = 256;
 
 const initialForm = {
   name: "",
+  is_spirit: false,
   str: "2",
   agl: "2",
   wit: "2",
@@ -266,6 +267,7 @@ export default function Monsters({ isDM }: MonstersProps) {
 
   const validateForm = () => {
     const name = form.name.trim();
+    const isSpirit = form.is_spirit;
     const str = Number.parseInt(form.str, 10);
     const agl = Number.parseInt(form.agl, 10);
     const wit = Number.parseInt(form.wit, 10);
@@ -276,8 +278,12 @@ export default function Monsters({ isDM }: MonstersProps) {
     const size = Number.parseInt(form.size, 10);
 
     if (!name) return "Name is required.";
-    if (!Number.isInteger(str) || str <= 0) return "STR must be an integer greater than 0.";
-    if (!Number.isInteger(agl) || agl <= 0) return "AGL must be an integer greater than 0.";
+    if (!Number.isInteger(str) || (!isSpirit && str <= 0) || (isSpirit && str !== 0)) {
+      return isSpirit ? "Spirit STR must be 0." : "STR must be an integer greater than 0.";
+    }
+    if (!Number.isInteger(agl) || (!isSpirit && agl <= 0) || (isSpirit && agl !== 0)) {
+      return isSpirit ? "Spirit AGL must be 0." : "AGL must be an integer greater than 0.";
+    }
     if (!Number.isInteger(wit) || wit <= 0) return "WIT must be an integer greater than 0.";
     if (!Number.isInteger(emp) || emp <= 0) return "EMP must be an integer greater than 0.";
     if (!Number.isInteger(skill) || skill < 0) return "Skill must be a non-negative integer.";
@@ -303,6 +309,7 @@ export default function Monsters({ isDM }: MonstersProps) {
     setError("");
 
     const name = form.name.trim();
+    const isSpirit = form.is_spirit;
     const str = Number.parseInt(form.str, 10);
     const agl = Number.parseInt(form.agl, 10);
     const wit = Number.parseInt(form.wit, 10);
@@ -316,8 +323,9 @@ export default function Monsters({ isDM }: MonstersProps) {
     const payload: MonsterTemplate = normalizeMonsterTemplate({
       id: nowId,
       name,
-      str,
-      agl,
+      is_spirit: isSpirit,
+      str: isSpirit ? 0 : str,
+      agl: isSpirit ? 0 : agl,
       wit,
       emp,
       skill,
@@ -363,6 +371,7 @@ export default function Monsters({ isDM }: MonstersProps) {
     setEditingId(monster.id);
     setForm({
       name: monster.name,
+      is_spirit: monster.is_spirit,
       str: `${monster.str}`,
       agl: `${monster.agl}`,
       wit: `${monster.wit}`,
@@ -475,12 +484,31 @@ export default function Monsters({ isDM }: MonstersProps) {
             />
           </label>
           <label className="block text-sm text-amber-200">
+            <span className="mb-2 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={form.is_spirit}
+                onChange={(event) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    is_spirit: event.target.checked,
+                    str: event.target.checked ? "0" : prev.str === "0" ? "2" : prev.str,
+                    agl: event.target.checked ? "0" : prev.agl === "0" ? "2" : prev.agl,
+                  }))
+                }
+                className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-amber-500 focus:ring-amber-400"
+              />
+              <span>Spirit</span>
+            </span>
+          </label>
+          <label className="block text-sm text-amber-200">
             STR
             <input
               value={form.str}
               onChange={(event) => setForm((prev) => ({ ...prev, str: event.target.value }))}
+              disabled={form.is_spirit}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
-              placeholder="2"
+              placeholder={form.is_spirit ? "0" : "2"}
             />
           </label>
           <label className="block text-sm text-amber-200">
@@ -488,8 +516,9 @@ export default function Monsters({ isDM }: MonstersProps) {
             <input
               value={form.agl}
               onChange={(event) => setForm((prev) => ({ ...prev, agl: event.target.value }))}
+              disabled={form.is_spirit}
               className="mt-1 w-full rounded bg-gray-800 px-3 py-2 text-amber-100 ring-1 ring-gray-600 outline-none focus:ring-amber-400"
-              placeholder="2"
+              placeholder={form.is_spirit ? "0" : "2"}
             />
           </label>
           <label className="block text-sm text-amber-200">
@@ -775,6 +804,9 @@ export default function Monsters({ isDM }: MonstersProps) {
                   )}
                   <div>
                     <div className="font-semibold text-amber-100">{monster.name}</div>
+                    <div className="text-xs text-amber-200/80">
+                      {monster.is_spirit ? "Spirit" : "Monster"}
+                    </div>
                     <div className="text-xs text-amber-200/80">
                       STR {monster.str} | AGL {monster.agl} | WIT {monster.wit} | EMP {monster.emp}
                     </div>

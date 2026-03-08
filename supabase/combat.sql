@@ -22,11 +22,12 @@ create table if not exists public.combat_state (
 create table if not exists public.monsters (
   id uuid primary key,
   name text not null,
+  is_spirit boolean not null default false,
   physical int not null check (physical > 0),
   mental int not null check (mental > 0),
   special int not null check (special >= 0),
-  str int not null check (str > 0),
-  agl int not null check (agl > 0),
+  str int not null check (str >= 0),
+  agl int not null check (agl >= 0),
   wit int not null check (wit > 0),
   emp int not null check (emp > 0),
   skill int not null check (skill >= 0),
@@ -57,6 +58,7 @@ alter table public.combat_state add column if not exists initiative_current_inde
 alter table public.combat_state add column if not exists pending_reactions jsonb not null default '[]'::jsonb;
 
 alter table public.monsters add column if not exists name text;
+alter table public.monsters add column if not exists is_spirit boolean not null default false;
 alter table public.monsters add column if not exists physical int;
 alter table public.monsters add column if not exists mental int;
 alter table public.monsters add column if not exists special int;
@@ -77,9 +79,19 @@ alter table public.monsters add column if not exists talents jsonb not null defa
 alter table public.monsters add column if not exists icon_url text;
 alter table public.monsters add column if not exists created_at timestamptz not null default now();
 alter table public.monsters add column if not exists updated_at timestamptz not null default now();
+alter table public.monsters drop constraint if exists monsters_str_check;
+alter table public.monsters add constraint monsters_str_check check (str >= 0);
+alter table public.monsters drop constraint if exists monsters_agl_check;
+alter table public.monsters add constraint monsters_agl_check check (agl >= 0);
 update public.monsters
-set str = greatest(1, case when physical is not null and str = 1 then physical * 2 else str end),
-    agl = greatest(1, case when physical is not null and agl = 1 then physical * 2 else agl end),
+set str = case
+      when coalesce(is_spirit, false) then 0
+      else greatest(1, case when physical is not null and str = 1 then physical * 2 else str end)
+    end,
+    agl = case
+      when coalesce(is_spirit, false) then 0
+      else greatest(1, case when physical is not null and agl = 1 then physical * 2 else agl end)
+    end,
     wit = greatest(1, case when mental is not null and wit = 1 then mental * 2 else wit end),
     emp = greatest(1, case when mental is not null and emp = 1 then mental * 2 else emp end),
     skill = greatest(0, case when special is not null and skill = 0 then special else skill end),
@@ -967,8 +979,13 @@ begin
     elsif v_is_monster then
       v_dead := v_dead or coalesce((v_entry.entry->'monster_snapshot'->>'dead')::boolean, false);
       v_broken :=
-        coalesce((v_entry.entry->'monster_snapshot'->>'str')::int, 1) <= 0
-        or coalesce((v_entry.entry->'monster_snapshot'->>'agl')::int, 1) <= 0
+        (
+          not coalesce((v_entry.entry->'monster_snapshot'->>'is_spirit')::boolean, false)
+          and (
+            coalesce((v_entry.entry->'monster_snapshot'->>'str')::int, 1) <= 0
+            or coalesce((v_entry.entry->'monster_snapshot'->>'agl')::int, 1) <= 0
+          )
+        )
         or coalesce((v_entry.entry->'monster_snapshot'->>'wit')::int, 1) <= 0
         or coalesce((v_entry.entry->'monster_snapshot'->>'emp')::int, 1) <= 0;
     end if;

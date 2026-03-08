@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { createClient } from "@/lib/supabase/client";
 import type { InventoryItem, ResolvedMeleeAttack } from "@/app/protected/page";
 import { addItemToInventory, isImplementedItem, normalizeInventoryItems, splitOneFromStack } from "@/lib/item-catalog";
-import { buildMonsterSnapshot, formatMonsterTooltip } from "@/lib/monsters";
+import { buildMonsterSnapshot, formatMonsterTooltip, monsterIsSpirit } from "@/lib/monsters";
 import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
 import {
   ARTS_CHOSEN_FLAG,
@@ -609,9 +609,10 @@ export default function Combat({
       const snap = monster.monster_snapshot || null;
       const p = getPhysicalBrokenAttributes({ STR: snap?.str, AGL: snap?.agl });
       const m = getMentalBrokenAttributes({ WIT: snap?.wit, EMP: snap?.emp });
+      const isSpirit = monsterIsSpirit(snap);
       map.set(monster.id, {
         dead: Boolean(snap?.dead),
-        physicalBroken: p.length > 0,
+        physicalBroken: !isSpirit && p.length > 0,
         mentalBroken: m.length > 0,
         physicalBrokenAttrs: p,
         mentalBrokenAttrs: m,
@@ -642,9 +643,10 @@ export default function Combat({
         const snap = entry.monster_snapshot || monsterByParticipantId.get(tokenId)?.monster_snapshot || null;
         const p = getPhysicalBrokenAttributes({ STR: snap?.str, AGL: snap?.agl });
         const m = getMentalBrokenAttributes({ WIT: snap?.wit, EMP: snap?.emp });
+        const isSpirit = monsterIsSpirit(snap);
         map.set(tokenId, {
           dead: Boolean(existing?.dead || entry.dead || snap?.dead),
-          physicalBroken: Boolean(existing?.physicalBroken) || p.length > 0,
+          physicalBroken: Boolean(existing?.physicalBroken) || (!isSpirit && p.length > 0),
           mentalBroken: Boolean(existing?.mentalBroken) || m.length > 0,
           physicalBrokenAttrs: p,
           mentalBrokenAttrs: m,
@@ -676,8 +678,22 @@ export default function Combat({
         physicalBroken: false,
         mentalBroken: false,
         physicalBrokenAttrs: [] as string[],
-        mentalBrokenAttrs: [] as string[],
-      };
+      mentalBrokenAttrs: [] as string[],
+    };
+  const tokenIsSpirit = useCallback(
+    (tokenId: string | null | undefined): boolean => {
+      if (!tokenId || tokenId.startsWith("player:")) return false;
+      const entry =
+        initiativeEntries.find(
+          (item) => item.participant_id === tokenId || item.participant_id === `player:${tokenId}`
+        ) || null;
+      if (entry?.kind === "monster") {
+        return monsterIsSpirit(entry.monster_snapshot || monsterByParticipantId.get(tokenId)?.monster_snapshot || null);
+      }
+      return monsterIsSpirit(monsterByParticipantId.get(tokenId)?.monster_snapshot || null);
+    },
+    [initiativeEntries, monsterByParticipantId]
+  );
   const attributeValueForToken = useCallback(
     (tokenId: string | null | undefined, attribute: AttributeKey): number => {
       if (!tokenId) return 0;
@@ -724,6 +740,7 @@ export default function Combat({
   const actorDead = actorState.dead;
   const actorPhysicalBroken = actorState.physicalBroken;
   const actorMentalBroken = actorState.mentalBroken;
+  const actorIsSpirit = tokenIsSpirit(actorTokenId);
   const actorElevation = actorTokenId ? tokenElevationByCharacterId.get(actorTokenId) ?? 0 : 0;
   const isActorCovered = Boolean(currentEntry?.covered);
   const actorRestrictedToCrawl = actorPhysicalBroken;
@@ -921,7 +938,8 @@ export default function Combat({
       !record ||
       (record.value.type !== "Break Free" &&
         record.value.type !== "Taunt (Anger)" &&
-        record.value.type !== "Taunt (Distract)")
+        record.value.type !== "Taunt (Distract)" &&
+        record.value.type !== "Spook")
     ) {
       return null;
     }
@@ -1075,9 +1093,13 @@ export default function Combat({
       ? isDmViewer
       : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
   const opposingReactionCanOppose = opposingReactionCanControlPhase && !actorState.dead;
-  const opposingReactionMode = useMemo<"oppose-break-free" | "oppose-taunt" | null>(() => {
+  const opposingReactionMode = useMemo<"oppose-break-free" | "oppose-taunt" | "oppose-spook" | null>(() => {
     if (!opposingReactionFlag) return null;
-    return opposingReactionFlag.type === "Break Free" ? "oppose-break-free" : "oppose-taunt";
+    return opposingReactionFlag.type === "Break Free"
+      ? "oppose-break-free"
+      : opposingReactionFlag.type === "Spook"
+        ? "oppose-spook"
+        : "oppose-taunt";
   }, [opposingReactionFlag]);
   const opposingReactionRollAttribute = useMemo<AttributeKey | null>(() => {
     if (!opposingReactionFlag) return null;
@@ -1097,7 +1119,8 @@ export default function Combat({
     if (
       maneuver !== "Break Free" &&
       maneuver !== "Taunt (Anger)" &&
-      maneuver !== "Taunt (Distract)"
+      maneuver !== "Taunt (Distract)" &&
+      maneuver !== "Spook"
     ) {
       return null;
     }
@@ -1437,7 +1460,7 @@ export default function Combat({
     }
 
     const applyChainmailPenalty = attack.maneuver === "Shoot";
-    const applyWoodenArmorBonus = attackHasWoodenProperty(attack);
+    const applyWoodenArmorBonus = attackHasWoodenProperty(attack) && !tokenIsSpirit(actorTokenId);
     const adjustProtectionDice = (item: InventoryItem | null | undefined): number => {
       let dice = effectiveProtectionDice(item);
       if (applyChainmailPenalty && isChainmailArmorItem(item)) {
@@ -1484,6 +1507,7 @@ export default function Combat({
     buildSlashFlowAttack,
     slashReactionTargetCharacter,
     actorUsedItemFlags,
+    tokenIsSpirit,
   ]);
   const armorPrompt =
     pendingArmorPrompt &&
@@ -1645,7 +1669,14 @@ export default function Combat({
   );
   const resolvePendingReaction = useCallback(
     async (
-      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "oppose-break-free" | "oppose-taunt",
+      mode:
+        | "pass"
+        | "dodge-stand"
+        | "dodge-prone"
+        | "parry"
+        | "oppose-break-free"
+        | "oppose-taunt"
+        | "oppose-spook",
       parryItem?: { id: string; gearBonus: number; kind: "weapon" | "shield"; name: string }
     ) => {
       if (opposingReactionActive && opposingReactionCanControlPhase) {
@@ -2161,6 +2192,7 @@ export default function Combat({
     );
   }, [selectedTokenId, initiativeEntries]);
   const selectedTargetState = selectedTokenId ? tokenStateById.get(selectedTokenId) || null : null;
+  const selectedTargetIsSpirit = tokenIsSpirit(selectedTokenId);
   const selectedTargetDead = Boolean(selectedTargetState?.dead);
   const selectedTargetPhysicalBroken = Boolean(selectedTargetState?.physicalBroken);
   const selectedTargetMentalBroken = Boolean(selectedTargetState?.mentalBroken);
@@ -2421,10 +2453,11 @@ export default function Combat({
       if (isActorProne || actorHardLockedByHold) return false;
       if (!targetRange) return false;
       if (isSkillBlockedForToken(actorTokenId, "MELEE")) return false;
+      const targetIsSpirit = tokenIsSpirit(targetTokenId);
 
       if (currentEntry.kind === "player") {
         if (!actorCharacter || !character || actorCharacter.id !== character.id) return false;
-        if (targetRange === "Engaged") return true;
+        if (targetRange === "Engaged" && !targetIsSpirit) return true;
         const slotIds = new Set<string>();
         const slots = character.equipment_slots;
         if (slots?.left) slotIds.add(slots.left);
@@ -2435,6 +2468,7 @@ export default function Combat({
           if (!isImplementedItem(item)) return false;
           if (item.item_type !== "Melee Weapon") return false;
           if (!weaponSupportsRange(item.range_band, targetRange)) return false;
+          if (targetIsSpirit && !itemHasProperty(item, "wooden")) return false;
           return (item.gearBonus ?? 0) > 0;
         });
       }
@@ -2442,9 +2476,14 @@ export default function Combat({
       const actorMonster = actorTokenId ? monsterByParticipantId.get(actorTokenId) : null;
       const snapshot = actorMonster?.monster_snapshot;
       if (!snapshot) return false;
-      if (weaponSupportsRange(snapshot.range_band, targetRange)) return true;
+      if (!targetIsSpirit && weaponSupportsRange(snapshot.range_band, targetRange)) return true;
       const meleeWeapons = monsterEquippedMeleeWeapons(snapshot);
-      return meleeWeapons.some((weapon) => weaponSupportsRange(weapon.rangeBand, targetRange) && weapon.gearBonus > 0);
+      return meleeWeapons.some(
+        (weapon) =>
+          weaponSupportsRange(weapon.rangeBand, targetRange) &&
+          weapon.gearBonus > 0 &&
+          (!targetIsSpirit || weapon.properties.includes("wooden"))
+      );
     },
     [
       combatMode,
@@ -2461,6 +2500,7 @@ export default function Combat({
       character,
       monsterByParticipantId,
       isSkillBlockedForToken,
+      tokenIsSpirit,
     ]
   );
   const canAttackWithShootAgainstTarget = useCallback(
@@ -2483,6 +2523,7 @@ export default function Combat({
       const weapon = sourceWeapons.find((w) => w.id === currentReadied.weaponItemId);
       if (!weapon) return false;
       if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return false;
+      if (tokenIsSpirit(targetTokenId) && !itemHasProperty(currentReadied.ammoItem, "wooden")) return false;
       return weaponSupportsRange(weapon.range_band, targetRange);
     },
     [
@@ -2501,6 +2542,7 @@ export default function Combat({
       isActorEngaged,
       actorCharacter,
       character,
+      tokenIsSpirit,
     ]
   );
   const tauntAngerRestrictionEligible =
@@ -2550,6 +2592,7 @@ export default function Combat({
   );
   const canUseEngageFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId) return false;
+    if (actorIsSpirit) return false;
     if (selectedTokenId === actorTokenId) return false;
     if (!isMyTurn) return false;
     if (actorTauntAngerRestricted) return false;
@@ -2565,9 +2608,10 @@ export default function Combat({
     const actorZone = zoneIdAtPoint(zoneRegionMap, actorToken);
     const targetZone = zoneIdAtPoint(zoneRegionMap, targetToken);
     return actorZone !== null && targetZone !== null && actorZone === targetZone;
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, tokenElevationForTokenId]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorEngaged, tokenByCharacterId, zoneRegionMap, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, tokenElevationForTokenId, actorIsSpirit]);
   const canUseRunFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
     if (!(currentEntry?.fast_available || currentEntry?.slow_available)) return false;
@@ -2581,7 +2625,7 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorCovered, actorTauntAngerRestricted]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, currentEntry, isMyTurn, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorCovered, actorTauntAngerRestricted, actorIsSpirit]);
   const selectedFlyMode = useMemo<{ point: ZonePoint; movesZone: boolean } | null>(() => {
     if (!actorTokenId) return null;
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -2603,6 +2647,7 @@ export default function Combat({
   }, [actorTokenId, tokenByCharacterId, isSelectedSelf, selectedZoneTarget, actorZoneId, zoneAdjacency]);
   const canUseFlyFromSelection = useMemo(() => {
     if (!actorHasFlightTrait) return false;
+    if (actorIsSpirit) return false;
     if (!combatMode || !actorTokenId || !isMyTurn) return false;
     if (!selectedFlyMode) return false;
     if (actorTauntAngerRestricted) return false;
@@ -2612,7 +2657,7 @@ export default function Combat({
     if (isActorCovered) return false;
     if (isActorEnemyEngagedForMovement) return false;
     return true;
-  }, [actorHasFlightTrait, combatMode, actorTokenId, isMyTurn, selectedFlyMode, actorTauntAngerRestricted, actorDead, actorRestrictedToCrawl, currentEntry, actorRestrictedToRun, isActorProne, actorMovementLockedByHold, isActorCovered, isActorEnemyEngagedForMovement]);
+  }, [actorHasFlightTrait, combatMode, actorTokenId, isMyTurn, selectedFlyMode, actorTauntAngerRestricted, actorDead, actorRestrictedToCrawl, currentEntry, actorRestrictedToRun, isActorProne, actorMovementLockedByHold, isActorCovered, isActorEnemyEngagedForMovement, actorIsSpirit]);
   const canUseFlyDownFromSelection = canUseFlyFromSelection && actorElevation > 0;
   const canUseFleeFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !currentEntry || !isMyTurn) return false;
@@ -2627,6 +2672,7 @@ export default function Combat({
   }, [combatMode, actorTokenId, currentEntry, isMyTurn, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorMovementLockedByHold, isActorEnemyEngagedForMovement, isSelectedSelf, selectedZoneTarget, isActorCovered, actorTauntAngerRestricted]);
   const canUseCrawlFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedZoneTarget || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || !actorRestrictedToCrawl) return false;
     if (isSkillBlockedForToken(actorTokenId, "MOVE")) return false;
@@ -2641,9 +2687,10 @@ export default function Combat({
     if (actorZone === selectedZoneTarget.zoneId) return false;
     const distance = shortestZoneDistance(actorZone, selectedZoneTarget.zoneId, zoneAdjacency);
     return distance === 1;
-  }, [combatMode, actorTokenId, selectedZoneTarget, isMyTurn, actorDead, actorRestrictedToCrawl, currentEntry, isActorProne, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorCovered, actorTauntAngerRestricted, isSkillBlockedForToken]);
+  }, [combatMode, actorTokenId, selectedZoneTarget, isMyTurn, actorDead, actorRestrictedToCrawl, currentEntry, isActorProne, isActorEnemyEngagedForMovement, tokenByCharacterId, zoneRegionMap, zoneAdjacency, isActorCovered, actorTauntAngerRestricted, isSkillBlockedForToken, actorIsSpirit]);
   const canEnterCoverFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !currentEntry || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (!currentEntry.fast_available && !currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
@@ -2670,9 +2717,11 @@ export default function Combat({
     selectedZoneTarget,
     actorZoneId,
     actorTauntAngerRestricted,
+    actorIsSpirit,
   ]);
   const canExitCoverFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !currentEntry || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (!currentEntry.fast_available && !currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
@@ -2695,6 +2744,7 @@ export default function Combat({
     selectedZoneTarget,
     actorZoneId,
     actorTauntAngerRestricted,
+    actorIsSpirit,
   ]);
   const canUseRetreatFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
@@ -2708,6 +2758,7 @@ export default function Combat({
   }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, currentEntry, isActorEngaged, isFreeRetreatAvailable, isActorProne, actorMovementLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, areTokensEngagedAtSameElevation]);
   const canUseGetUpFromSelection = useMemo(() => {
     if (!combatMode || !actorTokenId || !selectedTokenId || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!isActorProne) return false;
@@ -2715,7 +2766,7 @@ export default function Combat({
     if (isActorGrappling && !actorCanMoveWhileGrappling) return false;
     if (selectedTokenId !== actorTokenId) return false;
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled, actorCanMoveWhileGrappling, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, actorTokenId, selectedTokenId, isMyTurn, isActorProne, currentEntry, isActorGrappling, isActorClinging, isActorGrappled, actorCanMoveWhileGrappling, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorIsSpirit]);
   const canUseFeintFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
     if (selectedTokenId === actorTokenId) return false;
@@ -2728,6 +2779,7 @@ export default function Combat({
   }, [combatMode, currentEntry, isMyTurn, actorTokenId, selectedTokenId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, selectedTargetDead, actorTauntAngerRestricted, areTokensEngagedAtSameElevation]);
   const canUseCoupFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId || !selectedTokenId) return false;
+    if (actorIsSpirit) return false;
     if (selectedTokenId === actorTokenId) return false;
     if (!currentEntry.slow_available) return false;
     if (actorTauntAngerRestricted) return false;
@@ -2737,11 +2789,12 @@ export default function Combat({
     if (selectedTargetDead) return false;
     if (!selectedTargetPhysicalBroken) return false;
     return areTokensEngagedAtSameElevation(actorTokenId, selectedTokenId);
-  }, [combatMode, currentEntry, isMyTurn, actorTokenId, selectedTokenId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, actorSpirit, selectedTargetDead, selectedTargetPhysicalBroken, actorTauntAngerRestricted, areTokensEngagedAtSameElevation]);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, selectedTokenId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, isActorProne, actorHardLockedByHold, actorSpirit, selectedTargetDead, selectedTargetPhysicalBroken, actorTauntAngerRestricted, areTokensEngagedAtSameElevation, actorIsSpirit]);
 
   const swingWeaponOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return [] as Array<{ id: string; name: string }>;
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
+    if (actorIsSpirit) return [];
     if (actorTauntAngerRestricted) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
     if (isActorProne || actorHardLockedByHold) return [];
@@ -2763,7 +2816,7 @@ export default function Combat({
     return monsterEquippedMeleeWeapons(actorMonster.monster_snapshot)
       .filter((weapon) => weapon.wield === "2H")
       .map((weapon) => ({ id: weapon.id, name: weapon.name }));
-  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, actorCharacter, character, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorIsSpirit]);
 
   useEffect(() => {
     setMonsterRollResult(null);
@@ -2939,6 +2992,7 @@ export default function Combat({
 
   const canUseGrappleFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (actorIsSpirit || selectedTargetIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return false;
@@ -2979,10 +3033,13 @@ export default function Combat({
     actorRestrictedToRun,
     actorTauntAngerRestricted,
     isSkillBlockedForToken,
+    actorIsSpirit,
+    selectedTargetIsSpirit,
   ]);
 
   const canUseClingFromSelection = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !currentEntry.slow_available) return false;
+    if (actorIsSpirit || selectedTargetIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return false;
@@ -3014,6 +3071,8 @@ export default function Combat({
     actorRestrictedToRun,
     actorTauntAngerRestricted,
     isSkillBlockedForToken,
+    actorIsSpirit,
+    selectedTargetIsSpirit,
   ]);
 
   const canUseRelease = useMemo(() => {
@@ -3027,12 +3086,13 @@ export default function Combat({
 
   const canUseBreakFree = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !actorTokenId) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (!currentEntry.slow_available) return false;
     if (!(isActorGrappled || isActorClungOnto)) return false;
     return selectedIsActorOrHoldCounterpart;
-  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, currentEntry, isMyTurn, actorTokenId, isActorGrappled, isActorClungOnto, selectedIsActorOrHoldCounterpart, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorIsSpirit]);
 
   const canPass = useMemo(() => {
     if (!currentEntry) return false;
@@ -3080,6 +3140,7 @@ export default function Combat({
   }, [currentEntry, actorTokenCharacter, isLampOilItem]);
   const canUseFlamingLongswordItem = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf || !actorTokenId) return false;
+    if (actorIsSpirit) return false;
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
@@ -3100,9 +3161,11 @@ export default function Combat({
     actorEquippedFlamingLongsword,
     actorLampOilCount,
     actorUsedItemFlags,
+    actorIsSpirit,
   ]);
   const canUseSnuff = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf || !actorTokenId) return false;
+    if (actorIsSpirit) return false;
     if (!currentEntry.slow_available) return false;
     if (actorFlameIntensity <= 0) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
@@ -3122,6 +3185,7 @@ export default function Combat({
     isActorProne,
     actorHardLockedByHold,
     isSkillBlockedForToken,
+    actorIsSpirit,
   ]);
   const setUsedItemFlag = useCallback(
     async (tokenId: string, flag: string, enabled: boolean): Promise<boolean> => {
@@ -3144,6 +3208,7 @@ export default function Combat({
     if (!combatMode || !selectedTokenId || !currentEntry) return false;
     if (!actorTokenId || selectedTokenId !== actorTokenId) return false;
     if (!isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return false;
     if (isActorProne || actorHardLockedByHold) return false;
@@ -3156,7 +3221,7 @@ export default function Combat({
       return false;
     }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
-  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, currentUserTokenId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+  }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, currentUserTokenId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorIsSpirit]);
 
   const monsterDrawGearOptionGroups = useMemo(() => {
     if (!canUseDrawGearFromToken || currentEntry?.kind !== "monster") return [] as GroupedItemDisplay[];
@@ -3176,6 +3241,7 @@ export default function Combat({
     }
     if (!selectedTokenId || !selectedRange) return [];
     if (selectedTokenId === actorTokenId) return [];
+    if (actorIsSpirit) return [];
     if (actorTauntAngerRestricted && selectedTokenId !== actorTauntedAngerById) return [];
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return [];
 
@@ -3213,7 +3279,7 @@ export default function Combat({
       if (slots?.right) slotIds.add(slots.right);
       const inventory = character.inventory || [];
 
-      if (selectedRange === "Engaged") {
+      if (selectedRange === "Engaged" && !selectedTargetIsSpirit) {
         options.push({
           maneuver: "Strike",
           weaponItemId: null,
@@ -3235,6 +3301,8 @@ export default function Combat({
         const isStabWeapon = properties.includes("pointed");
         const baseDamage = Math.max(0, item.damage ?? 0);
         const gearDice = Math.max(0, item.gearBonus ?? 0);
+        const isWooden = properties.includes("wooden");
+        if (selectedTargetIsSpirit && !isWooden) continue;
 
         if (isSlashWeapon) {
           options.push({
@@ -3243,7 +3311,7 @@ export default function Combat({
             weaponName: item.name,
             weaponBaseDamage: baseDamage,
             gearDice,
-            woodenAttack: properties.includes("wooden"),
+            woodenAttack: isWooden,
           });
         }
         if (isStabWeapon) {
@@ -3253,7 +3321,7 @@ export default function Combat({
             weaponName: item.name,
             weaponBaseDamage: baseDamage,
             gearDice,
-            woodenAttack: properties.includes("wooden"),
+            woodenAttack: isWooden,
           });
         }
       }
@@ -3262,7 +3330,7 @@ export default function Combat({
       const snapshot = actorMonster?.monster_snapshot;
       if (!snapshot) return [];
 
-      if (weaponSupportsRange(snapshot.range_band, selectedRange)) {
+      if (!selectedTargetIsSpirit && weaponSupportsRange(snapshot.range_band, selectedRange)) {
         options.push({
           maneuver: "Strike",
           weaponItemId: null,
@@ -3276,6 +3344,7 @@ export default function Combat({
       for (const weapon of meleeWeapons) {
         if (!weaponSupportsRange(weapon.rangeBand, selectedRange)) continue;
         if (weapon.gearBonus <= 0) continue;
+        if (selectedTargetIsSpirit && !weapon.properties.includes("wooden")) continue;
         const isSlashWeapon = weapon.properties.includes("edged") || weapon.properties.includes("blunt");
         const isStabWeapon = weapon.properties.includes("pointed");
         if (isSlashWeapon) {
@@ -3302,7 +3371,7 @@ export default function Combat({
     }
 
     return options;
-  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorGrapplingTargetId, actorClingingTargetId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorTauntedAngerById, isSkillBlockedForToken]);
+  }, [combatMode, currentEntry, isMyTurn, actorCharacter, character, selectedTokenId, selectedRange, actorTokenId, monsterByParticipantId, isActorProne, actorHardLockedByHold, isActorGrappling, isActorClinging, actorGrapplingTargetId, actorClingingTargetId, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted, actorTauntedAngerById, isSkillBlockedForToken, actorIsSpirit, selectedTargetIsSpirit]);
 
   const shoveActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) {
@@ -3310,6 +3379,7 @@ export default function Combat({
     }
     if (!selectedTokenId || !selectedRange || selectedRange !== "Engaged") return [];
     if (selectedTokenId === actorTokenId) return [];
+    if (actorIsSpirit || selectedTargetIsSpirit) return [];
     if (actorTauntAngerRestricted) return [];
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return [];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
@@ -3396,12 +3466,14 @@ export default function Combat({
     actorRestrictedToRun,
     actorTauntAngerRestricted,
     isSkillBlockedForToken,
+    actorIsSpirit,
+    selectedTargetIsSpirit,
   ]);
 
   const disarmActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) {
       return [] as Array<{
-        actorWeaponItemId: string;
+        actorWeaponItemId?: string | null;
         actorWeaponName: string;
         targetItemId: string;
         targetItemName: string;
@@ -3411,6 +3483,7 @@ export default function Combat({
       }>;
     }
     if (!selectedTokenId || !selectedRange || selectedTokenId === actorTokenId) return [];
+    if (actorIsSpirit || selectedTargetIsSpirit) return [];
     if (actorTauntAngerRestricted) return [];
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return [];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
@@ -3423,7 +3496,6 @@ export default function Combat({
           ? monsterEquippedMeleeWeapons(currentEntry.monster_snapshot)
           : [];
     const validWeapons = actorWeapons.filter((weapon) => weaponSupportsRange(weapon.rangeBand, selectedRange));
-    if (validWeapons.length === 0) return [];
 
     const targetHeldItems: InventoryItem[] = selectedTokenId.startsWith("monster:")
       ? (() => {
@@ -3448,7 +3520,7 @@ export default function Combat({
     if (disarmableTargetItems.length === 0) return [];
 
     const options: Array<{
-      actorWeaponItemId: string;
+      actorWeaponItemId?: string | null;
       actorWeaponName: string;
       targetItemId: string;
       targetItemName: string;
@@ -3456,6 +3528,19 @@ export default function Combat({
       bonusDice: number;
       gearDice: number;
     }> = [];
+    if (selectedRange === "Engaged") {
+      for (const targetItem of disarmableTargetItems) {
+        options.push({
+          actorWeaponItemId: null,
+          actorWeaponName: "Disarm",
+          targetItemId: targetItem.id,
+          targetItemName: targetItem.name,
+          requiredSuccesses: targetItem.wield === "2H" ? 2 : 1,
+          bonusDice,
+          gearDice: 0,
+        });
+      }
+    }
     for (const weapon of validWeapons) {
       for (const targetItem of disarmableTargetItems) {
         options.push({
@@ -3490,6 +3575,8 @@ export default function Combat({
     actorRestrictedToRun,
     actorTauntAngerRestricted,
     isSkillBlockedForToken,
+    actorIsSpirit,
+    selectedTargetIsSpirit,
   ]);
 
   const healActionOptions = useMemo(() => {
@@ -3547,7 +3634,7 @@ export default function Combat({
   const tauntActionOptions = useMemo<Array<{ mode: "anger" | "distract"; label: string }>>(() => {
     if (!combatMode || !currentEntry || !isMyTurn) return [] as Array<{ mode: "anger" | "distract"; label: string }>;
     if (!selectedTokenId || selectedTokenId === actorTokenId) return [];
-    if (actorTauntAngerRestricted) return [];
+    if (actorTauntAngerRestricted && selectedTokenId !== actorTauntedAngerById) return [];
     if (!currentEntry.slow_available) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
     if (isActorProne || actorHardLockedByHold) return [];
@@ -3575,6 +3662,38 @@ export default function Combat({
     selectedTargetDead,
     selectedRange,
     isSkillBlockedForToken,
+    actorTauntedAngerById,
+  ]);
+
+  const spookActionOptions = useMemo<Array<{ label: string }>>(() => {
+    if (!combatMode || !currentEntry || !isMyTurn || !actorIsSpirit) return [] as Array<{ label: string }>;
+    if (!selectedTokenId || selectedTokenId === actorTokenId) return [];
+    if (actorTauntAngerRestricted && selectedTokenId !== actorTauntedAngerById) return [];
+    if (!currentEntry.slow_available) return [];
+    if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
+    if (isActorProne || actorHardLockedByHold) return [];
+    if (selectedTargetDead) return [];
+    if (!selectedRange) return [];
+    if (!(selectedRange === "Engaged" || selectedRange === "Near" || selectedRange === "Close")) return [];
+    if (isSkillBlockedForToken(actorTokenId, "PERFORMANCE")) return [];
+    return [{ label: "Spook" }];
+  }, [
+    combatMode,
+    currentEntry,
+    isMyTurn,
+    actorIsSpirit,
+    selectedTokenId,
+    actorTokenId,
+    actorTauntAngerRestricted,
+    actorTauntedAngerById,
+    actorDead,
+    actorRestrictedToCrawl,
+    actorRestrictedToRun,
+    isActorProne,
+    actorHardLockedByHold,
+    selectedTargetDead,
+    selectedRange,
+    isSkillBlockedForToken,
   ]);
 
   const readyOrLoadOptions = useMemo(() => {
@@ -3585,6 +3704,7 @@ export default function Combat({
       hand: "left" | "right" | "both";
     }>;
     if (currentReadied) return [];
+    if (actorIsSpirit) return [];
     if (actorTauntAngerRestricted) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
     if (isActorProne || actorHardLockedByHold) return [];
@@ -3639,10 +3759,12 @@ export default function Combat({
     character,
     currentReadied,
     actorTauntAngerRestricted,
+    actorIsSpirit,
   ]);
 
   const canUseUnready = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !isSelectedSelf) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (!currentReadied) return false;
     if (currentEntry.kind === "player") {
@@ -3660,7 +3782,7 @@ export default function Combat({
       name: currentReadied.weaponName,
     });
     return heldHand !== null;
-  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, currentReadied, actorCharacter, character, actorTauntAngerRestricted]);
+  }, [combatMode, currentEntry, isMyTurn, isSelectedSelf, currentReadied, actorCharacter, character, actorTauntAngerRestricted, actorIsSpirit]);
 
   const aimActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || !selectedTokenId || !selectedRange) return [] as Array<{
@@ -3668,6 +3790,7 @@ export default function Combat({
       weaponName: string;
     }>;
     if (!actorTokenId || selectedTokenId === actorTokenId) return [];
+    if (actorIsSpirit) return [];
     if (!currentEntry.fast_available && !currentEntry.slow_available) return [];
     if (actorTauntAngerRestricted) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
@@ -3702,6 +3825,7 @@ export default function Combat({
     actorCharacter,
     character,
     actorTauntAngerRestricted,
+    actorIsSpirit,
   ]);
 
   const shootActionOptions = useMemo(() => {
@@ -3714,6 +3838,7 @@ export default function Combat({
     }>;
     if (!currentEntry.slow_available) return [];
     if (!actorTokenId || selectedTokenId === actorTokenId) return [];
+    if (actorIsSpirit) return [];
     if (actorTauntAngerRestricted && selectedTokenId !== actorTauntedAngerById) return [];
     if (isSkillBlockedForToken(actorTokenId, "MARKSMANSHIP")) return [];
     if (actorDead || actorRestrictedToCrawl || actorRestrictedToRun) return [];
@@ -3734,6 +3859,7 @@ export default function Combat({
     const weapon = sourceWeapons.find((w) => w.id === currentReadied.weaponItemId);
     if (!weapon) return [];
     if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return [];
+    if (selectedTargetIsSpirit && !itemHasProperty(currentReadied.ammoItem, "wooden")) return [];
     if (!weaponSupportsRange(weapon.range_band, selectedRange)) return [];
     const rangePenalty =
       selectedRange === "Close" ? -1 : selectedRange === "Long" ? -2 : selectedRange === "Distant" ? -3 : 0;
@@ -3776,10 +3902,13 @@ export default function Combat({
     actorTauntAngerRestricted,
     actorTauntedAngerById,
     isSkillBlockedForToken,
+    actorIsSpirit,
+    selectedTargetIsSpirit,
   ]);
 
   const pickUpActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
+    if (actorIsSpirit) return [] as InventoryItem[];
     if (actorTauntAngerRestricted) return [] as InventoryItem[];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
     if (!selectedZoneTarget || !actorTokenId) return [];
@@ -3820,6 +3949,7 @@ export default function Combat({
     actorRestrictedToCrawl,
     actorRestrictedToRun,
     actorTauntAngerRestricted,
+    actorIsSpirit,
   ]);
   const pickUpActionOptionGroups = useMemo(
     () => groupItemsForDisplay(pickUpActionOptions),
@@ -5625,6 +5755,8 @@ export default function Combat({
   }) => {
     if (!selectedTokenId || !currentEntry || !isMyTurn) return;
     if (selectedTokenId === actorTokenId) return;
+    if (actorIsSpirit) return;
+    if (selectedTargetIsSpirit && !option.woodenAttack) return;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return;
     const actingParticipantId = currentEntry.participant_id;
     const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
@@ -5714,6 +5846,7 @@ export default function Combat({
   }) => {
     if (!selectedTokenId || !currentEntry || !isMyTurn || isActorProne) return;
     if (selectedTokenId === actorTokenId) return;
+    if (actorIsSpirit || selectedTargetIsSpirit) return;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return;
     const actingParticipantId = currentEntry.participant_id;
     const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
@@ -5781,7 +5914,7 @@ export default function Combat({
   };
 
   const requestDisarmAction = async (option: {
-    actorWeaponItemId: string;
+    actorWeaponItemId?: string | null;
     actorWeaponName: string;
     targetItemId: string;
     targetItemName: string;
@@ -5791,6 +5924,7 @@ export default function Combat({
   }) => {
     if (!selectedTokenId || !currentEntry || !isMyTurn || isActorProne || !actorTokenId) return;
     if (selectedTokenId === actorTokenId) return;
+    if (actorIsSpirit || selectedTargetIsSpirit) return;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return;
     const actingParticipantId = currentEntry.participant_id;
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -5811,8 +5945,8 @@ export default function Combat({
         attackerCharacterId: actorCharacter.id,
         targetCharacterId: selectedTokenId,
         targetName: selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target",
-        weaponItemId: option.actorWeaponItemId,
-        weaponName: option.actorWeaponName,
+        weaponItemId: option.actorWeaponItemId ?? null,
+        weaponName: option.actorWeaponItemId ? option.actorWeaponName : "Disarm",
         weaponBaseDamage: 0,
         maneuver: "Disarm",
         rollAttribute: "STR",
@@ -5843,7 +5977,9 @@ export default function Combat({
       : rawSuccesses;
 
     setMonsterRollResult({
-      actionLabel: `Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`,
+      actionLabel: option.actorWeaponItemId
+        ? `Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`
+        : `Disarm (${option.targetItemName})`,
       attributeDice,
       skillDice,
       skillIsNegative,
@@ -5855,7 +5991,7 @@ export default function Combat({
       id: `monster-disarm:${Date.now()}:${Math.random().toString(36).slice(2)}`,
       attackerCharacterId: actorTokenId,
       targetCharacterId: selectedTokenId,
-      weaponName: option.actorWeaponName,
+      weaponName: option.actorWeaponItemId ? option.actorWeaponName : "Disarm",
       weaponBaseDamage: 0,
       maneuver: "Disarm",
       totalSuccesses: successes,
@@ -6002,8 +6138,76 @@ export default function Combat({
     setSelectedTokenId(null);
   };
 
+  const requestSpook = async () => {
+    if (!currentEntry || !actorTokenId || !selectedTokenId || !actorIsSpirit) return;
+    if (!currentEntry.slow_available) return;
+    if (isSkillBlockedForToken(actorTokenId, "PERFORMANCE")) return;
+    const didConsume = await consumeAction("slow");
+    if (!didConsume) return;
+    const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+    const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
+    if (!swingCleared) return;
+    const targetName = selectedTokenCharacter?.name || selectedTokenMonster?.name || "Target";
+
+    if (currentEntry.kind === "player") {
+      if (!actorCharacter) return;
+      onQueueMeleeAction?.({
+        id: `spook:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        attackerCharacterId: actorCharacter.id,
+        attackerName: actorCharacter.name,
+        targetCharacterId: selectedTokenId,
+        targetName,
+        weaponItemId: null,
+        weaponName: "Spook",
+        weaponBaseDamage: 0,
+        maneuver: "Spook",
+        rollAttribute: "EMP",
+        rollSkill: "PERFORMANCE",
+        requiredSuccesses: 1,
+        bonusDice: tauntPenalty,
+      });
+      setSelectedTokenId(null);
+      return;
+    }
+
+    const snapshot = currentEntry.monster_snapshot;
+    if (!snapshot || !onResolveMeleeAttack) return;
+    const attributeDice = rollD6Pool(Math.max(0, snapshot.emp ?? 0));
+    const signedSkillPool = monsterSkillDice(snapshot) + tauntPenalty;
+    const skillIsNegative = signedSkillPool < 0;
+    const skillDice = rollD6Pool(Math.abs(signedSkillPool));
+    const gearDice: number[] = [];
+    const rawSuccesses = attributeDice.filter((d) => d === 6).length + skillDice.filter((d) => d === 6).length;
+    const successes = skillIsNegative
+      ? Math.max(0, rawSuccesses - skillDice.filter((d) => d === 6).length * 2)
+      : rawSuccesses;
+
+    setMonsterRollResult({
+      actionLabel: "Spook",
+      attributeDice,
+      skillDice,
+      skillIsNegative,
+      gearDice,
+      successes,
+    });
+
+    await onResolveMeleeAttack({
+      id: `monster-spook:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      attackerCharacterId: actorTokenId,
+      attackerName: currentEntry.name,
+      targetCharacterId: selectedTokenId,
+      weaponName: "Spook",
+      weaponBaseDamage: 0,
+      maneuver: "Spook",
+      totalSuccesses: successes,
+      requiredSuccesses: 1,
+    });
+    setSelectedTokenId(null);
+  };
+
   const requestPickUpAction = async (option: GroupedItemDisplay) => {
     if (!currentEntry || !actorTokenId || !selectedZoneTarget) return;
+    if (actorIsSpirit) return;
     if (actorTauntAngerRestricted) return;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
@@ -6028,18 +6232,18 @@ export default function Combat({
 
   const requestRetreat = async () => {
     if (!canUseRetreatFromSelection || !actorTokenId || !currentEntry) return;
-    if (isSkillBlockedForToken(actorTokenId, "MOVE")) return;
+    if (!actorIsSpirit && isSkillBlockedForToken(actorTokenId, "MOVE")) return;
     const actingParticipantId = currentEntry.participant_id;
     const isFreeRetreat = isFreeRetreatAvailable;
     if (!isFreeRetreat) {
       const didConsume = await consumeFastOrSlow();
       if (!didConsume) return;
     }
-    const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+    const tauntPenalty = actorIsSpirit ? 0 : await consumeTauntPenaltyForToken(actorTokenId);
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
 
-    if (isFreeRetreat) {
+    if (isFreeRetreat || actorIsSpirit) {
       const supabase = createClient();
       const { error: rpcError } = await supabase.rpc("combat_break_engagement_token", {
         p_actor_token_id: actorTokenId,
@@ -6128,7 +6332,7 @@ export default function Combat({
 
   const requestFlee = async () => {
     if (!canUseFleeFromSelection || !actorTokenId || !currentEntry) return;
-    const autoSuccess = closestEnemyRange === null || closestEnemyRange === "Distant";
+    const autoSuccess = actorIsSpirit || closestEnemyRange === null || closestEnemyRange === "Distant";
     if (!autoSuccess && isSkillBlockedForToken(actorTokenId, "MOVE")) return;
     const didConsume = await consumeAction("slow");
     if (!didConsume) return;
@@ -6423,6 +6627,7 @@ export default function Combat({
     hand: "left" | "right" | "both";
   }) => {
     if (!currentEntry || !actorTokenId) return;
+    if (actorIsSpirit) return;
     const didConsume = option.isLoading ? await consumeAction("slow") : await consumeFastOrSlow();
     if (!didConsume) return;
     const preserveAim =
@@ -6500,6 +6705,7 @@ export default function Combat({
 
   const requestAim = async (option: { weaponItemId: string; weaponName: string }) => {
     if (!currentEntry || !actorTokenId || !selectedTokenId) return;
+    if (actorIsSpirit) return;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id, { preserveAim: false });
@@ -6516,6 +6722,7 @@ export default function Combat({
     targetZoneId: number | null;
   }) => {
     if (!currentEntry || !actorTokenId || !selectedTokenId || !currentReadied) return;
+    if (actorIsSpirit) return;
     if (isSkillBlockedForToken(actorTokenId, "MARKSMANSHIP")) return;
     if (isActorCovered) return;
     if (isActorEngaged) return;
@@ -6530,6 +6737,7 @@ export default function Combat({
     const weapon = sourceWeapons.find((item) => item.id === option.weaponItemId) || null;
     if (!weapon) return;
     if (!isAmmoCompatibleWithWeapon(currentReadied.ammoItem, weapon)) return;
+    if (selectedTargetIsSpirit && !itemHasProperty(currentReadied.ammoItem, "wooden")) return;
     const firearmAttack = isFirearmWeapon(weapon);
     const didConsume = await consumeAction("slow");
     if (!didConsume) return;
@@ -6704,6 +6912,7 @@ export default function Combat({
 
   const requestGrappleLike = async (mode: "Grapple" | "Cling") => {
     if (!currentEntry || !actorTokenId || !selectedTokenId || selectedTokenId === actorTokenId) return;
+    if (actorIsSpirit || selectedTargetIsSpirit) return;
     if (mode === "Grapple" && !canUseGrappleFromSelection) return;
     if (mode === "Cling" && !canUseClingFromSelection) return;
     if (isSkillBlockedForToken(actorTokenId, "MELEE")) return;
@@ -6792,6 +7001,7 @@ export default function Combat({
 
   const requestBreakFree = async () => {
     if (!currentEntry || !actorTokenId || !canUseBreakFree) return;
+    if (actorIsSpirit) return;
     const selectedClinger =
       selectedTokenId && actorClungOntoByIds.includes(selectedTokenId) ? selectedTokenId : null;
     const otherTokenId = actorGrappledById || selectedClinger || actorClungOntoByIds[0] || null;
@@ -6866,6 +7076,7 @@ export default function Combat({
 
   const requestRun = async () => {
     if (!selectedZoneTarget) return;
+    if (actorIsSpirit) return;
     if (actorRestrictedToCrawl) {
       await requestCrawlToPoint(selectedZoneTarget.point);
       return;
@@ -6874,6 +7085,7 @@ export default function Combat({
   };
   const requestFly = async (mode: "up" | "down") => {
     if (!actorTokenId || !selectedFlyMode || !currentEntry) return;
+    if (actorIsSpirit) return;
     if (!canUseFlyFromSelection) return;
     if (mode === "down" && !canUseFlyDownFromSelection) return;
 
@@ -6992,6 +7204,7 @@ export default function Combat({
 
   const requestRunToPoint = async (point: ZonePoint, silentInvalid = false): Promise<boolean> => {
     if (!actorTokenId || !combatMode || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (actorTauntAngerRestricted) return false;
     if (actorDead || actorRestrictedToCrawl) return false;
     if (!actorRestrictedToRun && actorMovementLockedByHold) return false;
@@ -7030,6 +7243,7 @@ export default function Combat({
   };
   const requestCrawlToPoint = async (point: ZonePoint): Promise<boolean> => {
     if (!actorTokenId || !combatMode || !isMyTurn) return false;
+    if (actorIsSpirit) return false;
     if (!actorRestrictedToCrawl || actorDead) return false;
     if (isSkillBlockedForToken(actorTokenId, "MOVE")) return false;
     if (!currentEntry?.slow_available) return false;
@@ -7842,11 +8056,13 @@ export default function Combat({
           ))}
           {disarmActionOptions.map((option) => (
             <button
-              key={`disarm-${option.actorWeaponItemId}-${option.targetItemId}`}
+              key={`disarm-${option.actorWeaponItemId ?? "default"}-${option.targetItemId}`}
               onClick={() => void requestDisarmAction(option)}
               className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
-              {`Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`}
+              {option.actorWeaponItemId
+                ? `Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`
+                : `Disarm (${option.targetItemName})`}
             </button>
           ))}
           {healActionOptions.map((option) => (
@@ -7862,6 +8078,15 @@ export default function Combat({
             <button
               key={`taunt-${option.mode}`}
               onClick={() => void requestTaunt(option.mode)}
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
+            >
+              {option.label}
+            </button>
+          ))}
+          {spookActionOptions.map((option) => (
+            <button
+              key="spook"
+              onClick={() => void requestSpook()}
               className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               {option.label}

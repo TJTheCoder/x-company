@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { InventoryItem, ResolvedMeleeAttack } from "@/app/protected/page";
-import { addItemToInventory, isImplementedItem, normalizeInventoryItems } from "@/lib/item-catalog";
+import { addItemToInventory, isImplementedItem, normalizeInventoryItems, splitOneFromStack } from "@/lib/item-catalog";
 import { buildMonsterSnapshot, formatMonsterTooltip } from "@/lib/monsters";
 import type { MonsterSnapshot, MonsterTemplate } from "@/lib/monsters";
 import {
@@ -86,7 +86,6 @@ const {
   hasCompatibleAmmo,
   readiedHandForWeapon,
   consumeFirstCompatibleAmmo,
-  cycleMonsterDrawGear,
 } = combatModel;
 
 const FLAMING_LONGSWORD_PROPERTY = "flaming longsword";
@@ -184,6 +183,89 @@ const groupItemsForDisplay = (items: InventoryItem[]): GroupedItemDisplay[] => {
     });
   }
   return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label));
+};
+
+const isMonsterDrawGearItem = (item: InventoryItem): boolean =>
+  item.item_type === "Armor" ||
+  item.item_type === "Helmet" ||
+  item.wield === "1H" ||
+  item.wield === "2H";
+
+const sanitizeMonsterEquipmentSlots = (
+  slots: MonsterSnapshot["equipment_slots"] | null | undefined,
+  gear: InventoryItem[]
+) => {
+  const next = {
+    armor: slots?.armor ?? null,
+    helmet: slots?.helmet ?? null,
+    left: slots?.left ?? null,
+    right: slots?.right ?? null,
+  };
+  const hasMatch = (value: string | null) => !value || gear.some((item) => slotMatchesItem(value, item));
+  if (!hasMatch(next.armor)) next.armor = null;
+  if (!hasMatch(next.helmet)) next.helmet = null;
+  if (!hasMatch(next.left)) next.left = null;
+  if (!hasMatch(next.right)) next.right = null;
+  return next;
+};
+
+const monsterDrawGearItems = (snapshot: MonsterSnapshot | null | undefined): InventoryItem[] => {
+  if (!snapshot) return [];
+  const gear = snapshot.gear || [];
+  const slots = sanitizeMonsterEquipmentSlots(snapshot.equipment_slots, gear);
+  return gear.filter(
+    (item) =>
+      isMonsterDrawGearItem(item) &&
+      !slotMatchesItem(slots.armor, item) &&
+      !slotMatchesItem(slots.helmet, item) &&
+      !slotMatchesItem(slots.left, item) &&
+      !slotMatchesItem(slots.right, item)
+  );
+};
+
+const equipMonsterDrawGearItem = (
+  snapshot: MonsterSnapshot | null | undefined,
+  itemId: string
+): MonsterSnapshot | null => {
+  if (!snapshot) return null;
+  const sourceGear = snapshot.gear || [];
+  const sourceItem = sourceGear.find((item) => item.id === itemId) || null;
+  if (!sourceItem || !isMonsterDrawGearItem(sourceItem)) return null;
+
+  let nextGear = sourceGear;
+  let equipItem = sourceItem;
+  if ((sourceItem.quantity || 1) > 1) {
+    const split = splitOneFromStack(nextGear, sourceItem.id);
+    if (!split.splitItem) return null;
+    nextGear = split.nextItems;
+    equipItem = split.splitItem;
+  }
+
+  const nextSlots = sanitizeMonsterEquipmentSlots(snapshot.equipment_slots, nextGear);
+
+  if (equipItem.item_type === "Armor") {
+    nextSlots.armor = equipItem.id;
+  } else if (equipItem.item_type === "Helmet") {
+    nextSlots.helmet = equipItem.id;
+  } else if (equipItem.wield === "2H") {
+    nextSlots.left = equipItem.id;
+    nextSlots.right = equipItem.id;
+  } else if (equipItem.wield === "1H") {
+    const twoHandedOccupied = Boolean(nextSlots.left && nextSlots.right && nextSlots.left === nextSlots.right);
+    if (twoHandedOccupied) {
+      nextSlots.left = null;
+      nextSlots.right = null;
+    }
+    if (!nextSlots.left) nextSlots.left = equipItem.id;
+    else if (!nextSlots.right) nextSlots.right = equipItem.id;
+    else nextSlots.left = equipItem.id;
+  }
+
+  return {
+    ...snapshot,
+    gear: nextGear,
+    equipment_slots: sanitizeMonsterEquipmentSlots(nextSlots, nextGear),
+  };
 };
 
 type TalentCarrier = {
@@ -833,12 +915,19 @@ export default function Combat({
     const record = findIncomingDamageMetaFlag(actorUsedItemFlagList);
     return record?.value ?? null;
   }, [actorUsedItemFlagList]);
-  const opposingBreakFreeFlag = useMemo(() => {
+  const opposingReactionFlag = useMemo(() => {
     const record = findOpposingRollFlag(actorUsedItemFlagList);
-    if (!record || record.value.type !== "Break Free") return null;
+    if (
+      !record ||
+      (record.value.type !== "Break Free" &&
+        record.value.type !== "Taunt (Anger)" &&
+        record.value.type !== "Taunt (Distract)")
+    ) {
+      return null;
+    }
     return record.value;
   }, [actorUsedItemFlagList]);
-  const opposingBreakFreeMeta = useMemo(() => {
+  const opposingReactionMeta = useMemo(() => {
     const record = findOpposingRollMetaFlag(actorUsedItemFlagList);
     return record?.value ?? null;
   }, [actorUsedItemFlagList]);
@@ -974,33 +1063,57 @@ export default function Combat({
       slashFlow: true,
     };
   }, [slashIncomingDamage, slashIncomingMeta, actorTokenId, flowManeuverForIncomingType]);
-  const opposingBreakFreeActive =
+  const opposingReactionActive =
     combatMode &&
     Boolean(actorTokenId) &&
-    Boolean(opposingBreakFreeFlag && opposingBreakFreeMeta) &&
-    Math.max(0, opposingBreakFreeFlag?.successes ?? 0) > 0;
-  const opposingBreakFreeCanControlPhase =
-    opposingBreakFreeActive &&
+    Boolean(opposingReactionFlag && opposingReactionMeta) &&
+    Math.max(0, opposingReactionFlag?.successes ?? 0) > 0;
+  const opposingReactionCanControlPhase =
+    opposingReactionActive &&
     Boolean(actorTokenId) &&
     (currentEntry?.kind === "monster"
       ? isDmViewer
       : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
-  const opposingBreakFreeCanOppose = opposingBreakFreeCanControlPhase && !actorState.dead;
-  const buildOpposingBreakFreeAttack = useCallback((): ResolvedMeleeAttack | null => {
-    if (!opposingBreakFreeFlag || !opposingBreakFreeMeta || !actorTokenId) return null;
+  const opposingReactionCanOppose = opposingReactionCanControlPhase && !actorState.dead;
+  const opposingReactionMode = useMemo<"oppose-break-free" | "oppose-taunt" | null>(() => {
+    if (!opposingReactionFlag) return null;
+    return opposingReactionFlag.type === "Break Free" ? "oppose-break-free" : "oppose-taunt";
+  }, [opposingReactionFlag]);
+  const opposingReactionRollAttribute = useMemo<AttributeKey | null>(() => {
+    if (!opposingReactionFlag) return null;
+    return opposingReactionFlag.type === "Break Free" ? "STR" : "WIT";
+  }, [opposingReactionFlag]);
+  const opposingReactionRollSkill = useMemo<string | null>(() => {
+    if (!opposingReactionFlag) return null;
+    return opposingReactionFlag.type === "Break Free" ? "MELEE" : "INSIGHT";
+  }, [opposingReactionFlag]);
+  const opposingReactionLabel = useMemo(() => {
+    if (!opposingReactionFlag) return null;
+    return `Opposing (${opposingReactionFlag.type} ${opposingReactionFlag.successes})`;
+  }, [opposingReactionFlag]);
+  const buildOpposingReactionAttack = useCallback((): ResolvedMeleeAttack | null => {
+    if (!opposingReactionFlag || !opposingReactionMeta || !actorTokenId) return null;
+    const maneuver = opposingReactionFlag.type;
+    if (
+      maneuver !== "Break Free" &&
+      maneuver !== "Taunt (Anger)" &&
+      maneuver !== "Taunt (Distract)"
+    ) {
+      return null;
+    }
     return {
-      id: opposingBreakFreeMeta.attackId,
-      attackerCharacterId: opposingBreakFreeMeta.attackerTokenId,
+      id: opposingReactionMeta.attackId,
+      attackerCharacterId: opposingReactionMeta.attackerTokenId,
       targetCharacterId: actorTokenId,
-      weaponName: opposingBreakFreeMeta.weaponName || "Break Free",
+      weaponName: opposingReactionMeta.weaponName || maneuver,
       weaponBaseDamage: 0,
-      maneuver: "Break Free",
-      totalSuccesses: Math.max(0, opposingBreakFreeFlag.successes),
+      maneuver,
+      totalSuccesses: Math.max(0, opposingReactionFlag.successes),
       requiredSuccesses: 1,
       swingBonusDamage: 0,
       skipReaction: true,
     };
-  }, [opposingBreakFreeFlag, opposingBreakFreeMeta, actorTokenId]);
+  }, [opposingReactionFlag, opposingReactionMeta, actorTokenId]);
   const actorTauntAngerTargetEntry = useMemo(
     () => findEntryForTokenId(actorTauntedAngerById),
     [findEntryForTokenId, actorTauntedAngerById]
@@ -1274,7 +1387,7 @@ export default function Combat({
     ];
   }, [slashIncomingActive, slashIncomingDamage?.type, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
   const shouldShowReactionModal =
-    ((opposingBreakFreeActive && opposingBreakFreeCanControlPhase) ||
+    ((opposingReactionActive && opposingReactionCanControlPhase) ||
       (Boolean(pendingReaction) &&
         REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
         combatMode &&
@@ -1532,18 +1645,19 @@ export default function Combat({
   );
   const resolvePendingReaction = useCallback(
     async (
-      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "oppose-break-free",
+      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "oppose-break-free" | "oppose-taunt",
       parryItem?: { id: string; gearBonus: number; kind: "weapon" | "shield"; name: string }
     ) => {
-      if (opposingBreakFreeActive && opposingBreakFreeCanControlPhase) {
-        const opposingAttack = buildOpposingBreakFreeAttack();
+      if (opposingReactionActive && opposingReactionCanControlPhase) {
+        const opposingAttack = buildOpposingReactionAttack();
         if (!opposingAttack || !actorTokenId) return;
+        if (!opposingReactionMode || !opposingReactionRollAttribute || !opposingReactionRollSkill) return;
         if (!onResolveReactionRoll && !onQueueReactionRoll) return;
 
         if (mode === "pass") {
           if (!onResolveReactionRoll) return;
           await onResolveReactionRoll({
-            id: `oppose-break-free-pass:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            id: `oppose-pass:${Date.now()}:${Math.random().toString(36).slice(2)}`,
             reactionId: `oppose:${opposingAttack.id}`,
             targetCharacterId: opposingAttack.targetCharacterId,
             mode: "pass",
@@ -1554,20 +1668,24 @@ export default function Combat({
           return;
         }
 
-        if (mode !== "oppose-break-free") return;
-        const sizeDelta = sizeForTokenId(actorTokenId) - sizeForTokenId(opposingBreakFreeMeta?.attackerTokenId);
+        if (mode !== opposingReactionMode) return;
+        const sizeDelta =
+          opposingAttack.maneuver === "Break Free"
+            ? sizeForTokenId(actorTokenId) - sizeForTokenId(opposingReactionMeta?.attackerTokenId)
+            : 0;
         const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+        const totalBonusDice = sizeDelta + tauntPenalty;
 
         if (currentEntry?.kind !== "monster" && onQueueReactionRoll) {
           onQueueReactionRoll({
-            id: `oppose-break-free-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            id: `oppose-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
             reactionId: `oppose:${opposingAttack.id}`,
             targetCharacterId: opposingAttack.targetCharacterId,
-            mode: "oppose-break-free",
+            mode: opposingReactionMode,
             rollType: "reaction",
-            rollAttribute: "STR",
-            rollSkill: "MELEE",
-            bonusDice: sizeDelta + tauntPenalty,
+            rollAttribute: opposingReactionRollAttribute,
+            rollSkill: opposingReactionRollSkill,
+            bonusDice: totalBonusDice,
             attack: opposingAttack,
           });
           return;
@@ -1577,9 +1695,12 @@ export default function Combat({
         setIsResolvingReaction(true);
         try {
           const snapshot = currentEntry.monster_snapshot;
-          const attrCount = Math.max(0, snapshot.str ?? 0);
+          const attrCount = Math.max(
+            0,
+            opposingReactionRollAttribute === "STR" ? snapshot.str ?? 0 : snapshot.wit ?? 0
+          );
           const skillBlocked = attrCount <= 0;
-          const signedSkillPool = skillBlocked ? 0 : monsterSkillDice(snapshot) + sizeDelta + tauntPenalty;
+          const signedSkillPool = skillBlocked ? 0 : monsterSkillDice(snapshot) + totalBonusDice;
           const skillCount = Math.abs(signedSkillPool);
           const skillIsNegative = signedSkillPool < 0;
           const attributeDice = rollD6Pool(attrCount);
@@ -1595,7 +1716,7 @@ export default function Combat({
               : rawSuccesses;
           if (isDmViewer) {
             setMonsterRollResult({
-              actionLabel: `Opposing (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`,
+              actionLabel: opposingReactionLabel || "Opposing",
               attributeDice,
               skillDice,
               skillIsNegative,
@@ -1604,10 +1725,10 @@ export default function Combat({
             });
           }
           await onResolveReactionRoll({
-            id: `oppose-break-free-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            id: `oppose-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
             reactionId: `oppose:${opposingAttack.id}`,
             targetCharacterId: opposingAttack.targetCharacterId,
-            mode: "oppose-break-free",
+            mode: opposingReactionMode,
             rollType: "reaction",
             totalSuccesses: successes,
             attack: opposingAttack,
@@ -1939,11 +2060,15 @@ export default function Combat({
       }
     },
     [
-      opposingBreakFreeActive,
-      opposingBreakFreeCanControlPhase,
-      buildOpposingBreakFreeAttack,
-      opposingBreakFreeMeta,
-      opposingBreakFreeFlag,
+      opposingReactionActive,
+      opposingReactionCanControlPhase,
+      buildOpposingReactionAttack,
+      opposingReactionMeta,
+      opposingReactionFlag,
+      opposingReactionMode,
+      opposingReactionRollAttribute,
+      opposingReactionRollSkill,
+      opposingReactionLabel,
       slashReactionPhase,
       slashCanControlPhase,
       buildSlashFlowAttack,
@@ -3032,6 +3157,11 @@ export default function Combat({
     }
     return !!(currentEntry?.fast_available || currentEntry?.slow_available);
   }, [combatMode, selectedTokenId, actorTokenId, currentEntry, isMyTurn, isDmUser, currentUserTokenId, isActorProne, actorHardLockedByHold, actorDead, actorRestrictedToCrawl, actorRestrictedToRun, actorTauntAngerRestricted]);
+
+  const monsterDrawGearOptionGroups = useMemo(() => {
+    if (!canUseDrawGearFromToken || currentEntry?.kind !== "monster") return [] as GroupedItemDisplay[];
+    return groupItemsForDisplay(monsterDrawGearItems(currentEntry.monster_snapshot));
+  }, [canUseDrawGearFromToken, currentEntry]);
 
   const meleeActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || (isActorProne && !actorHardLockedByHold)) {
@@ -4771,83 +4901,48 @@ export default function Combat({
 
   const requestDrawGear = async () => {
     if (!canUseDrawGearFromToken || !currentEntry) return;
-    if (currentEntry.kind === "player") {
-      onRequestDrawGear?.();
-      return;
-    }
+    if (currentEntry.kind !== "player") return;
+    onRequestDrawGear?.();
+  };
+
+  const requestMonsterDrawGearItem = async (option: GroupedItemDisplay) => {
+    if (!canUseDrawGearFromToken || !currentEntry || currentEntry.kind !== "monster" || !isDmUser) return;
+    const candidateIds = option.candidateIds.filter((id) => Boolean(id));
+    if (candidateIds.length === 0) return;
+    const selectedItemId = candidateIds[0];
 
     const actingParticipantId = currentEntry.participant_id;
-    const didConsume = await consumeAction("slow");
+    const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const cleared = await clearSwingForParticipant(actingParticipantId);
     if (!cleared) return;
 
-    if (!isDmUser) return;
-    const monsterId = currentEntry.participant_id;
-    const currentMonster = initiativeMonsters.find((monster) => monster.id === monsterId);
-    if (!currentMonster?.monster_snapshot) return;
+    const latest = await fetchLatestInitiativeState();
+    if (!latest) return;
+    const actorEntry = latest.freshEntries.find((entry) => entry.participant_id === actingParticipantId) || null;
+    const snapshot = actorEntry?.monster_snapshot || null;
+    const nextSnapshot = equipMonsterDrawGearItem(snapshot, selectedItemId);
+    if (!nextSnapshot) return;
 
-    const supabase = createClient();
-
-    const { data: latest, error: latestError } = await supabase
-      .from("combat_state")
-      .select("initiative_entries, initiative_monsters, initiative_current_index")
-      .eq("id", 1)
-      .maybeSingle<{
-        initiative_entries: InitiativeEntry[] | null;
-        initiative_monsters: InitiativeMonster[] | null;
-        initiative_current_index: number | null;
-      }>();
-    if (latestError) {
-      setError(latestError.message);
-      return;
-    }
-
-    const freshEntries = normalizeInitiativeEntries(latest?.initiative_entries);
-    const freshMonsters = Array.isArray(latest?.initiative_monsters) ? latest!.initiative_monsters : [];
-
-    const normalizedFreshMonsters = freshMonsters
-      .map((monster) => {
-        if (!monster || typeof monster !== "object") return null;
-        const m = monster as Partial<InitiativeMonster>;
-        if (typeof m.id !== "string" || typeof m.name !== "string") return null;
-        return {
-          id: m.id,
-          name: m.name,
-          template_id: typeof m.template_id === "string" ? m.template_id : null,
-          icon_url: typeof m.icon_url === "string" ? m.icon_url : null,
-          monster_snapshot:
-            m.monster_snapshot && typeof m.monster_snapshot === "object"
-              ? (m.monster_snapshot as MonsterSnapshot)
-              : null,
-        } as InitiativeMonster;
-      })
-      .filter((monster): monster is InitiativeMonster => !!monster);
-
-    const nextMonsters = normalizedFreshMonsters.map((monster) => {
-      if (monster.id !== monsterId || !monster.monster_snapshot) return monster;
-      return {
-        ...monster,
-        monster_snapshot: cycleMonsterDrawGear(monster.monster_snapshot),
-      };
-    });
-
-    const refreshedMonster = nextMonsters.find((monster) => monster.id === monsterId);
-    const nextEntries = freshEntries.map((entry) =>
-      entry.participant_id === monsterId
-        ? { ...entry, monster_snapshot: refreshedMonster?.monster_snapshot ?? entry.monster_snapshot }
-        : entry
+    const nextEntries = latest.freshEntries.map((entry) =>
+      entry.participant_id === actingParticipantId ? { ...entry, monster_snapshot: nextSnapshot } : entry
+    );
+    const nextMonsters = latest.freshMonsters.map((monster) =>
+      monster.id === actingParticipantId ? { ...monster, monster_snapshot: nextSnapshot } : monster
     );
 
-    setInitiativeMonsters(nextMonsters);
     setInitiativeEntries(nextEntries);
-    setInitiativeCurrentIndex(latest?.initiative_current_index ?? initiativeCurrentIndex);
+    setInitiativeMonsters(nextMonsters);
+    setInitiativeCurrentIndex(latest.freshCurrentIndex);
     await saveInitiativeState(
       nextEntries,
-      latest?.initiative_current_index ?? initiativeCurrentIndex,
+      latest.freshCurrentIndex,
       combatMode,
       nextMonsters,
-      engagements
+      latest.freshEngagements,
+      null,
+      null,
+      latest.freshLoot
     );
   };
 
@@ -7367,22 +7462,22 @@ export default function Combat({
           </div>
         </div>
       )}
-      {shouldShowReactionModal && (pendingReaction || slashReactionPhase || opposingBreakFreeActive) && (
+      {shouldShowReactionModal && (pendingReaction || slashReactionPhase || opposingReactionActive) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 {/** Single label source keeps incoming maneuver names consistent across all flow types. */}
                 {(() => {
-                  if (opposingBreakFreeActive) {
+                  if (opposingReactionActive) {
                     return (
                       <>
                         <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
                         <p className="text-sm text-amber-200/80">
-                          {`Opposing (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`}
+                          {opposingReactionLabel || "Opposing"}
                         </p>
                         <p className="text-xs text-amber-200/70">
-                          Successes Incoming: {opposingBreakFreeFlag?.successes ?? 0}
+                          Successes Incoming: {opposingReactionFlag?.successes ?? 0}
                         </p>
                       </>
                     );
@@ -7406,7 +7501,7 @@ export default function Combat({
               </div>
             </div>
 
-            {opposingBreakFreeActive && !opposingBreakFreeCanOppose && (
+            {opposingReactionActive && !opposingReactionCanOppose && (
               <div className="mt-3 rounded-lg border border-sky-500/30 bg-sky-900/20 px-3 py-2 text-xs text-sky-200/80">
                 Opposing unavailable.
               </div>
@@ -7416,21 +7511,21 @@ export default function Combat({
                 Reaction unavailable (no fast action or restricted).
               </div>
             )}
-            {!opposingBreakFreeActive && !slashReactionPhase && !canDodgeReaction && !canParryReaction && (
+            {!opposingReactionActive && !slashReactionPhase && !canDodgeReaction && !canParryReaction && (
               <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
                 Reaction unavailable (no fast action or restricted).
               </div>
             )}
 
             <div className="mt-4 grid grid-cols-1 gap-2">
-              {opposingBreakFreeActive ? (
+              {opposingReactionActive ? (
                 <>
                   <button
-                    onClick={() => void resolvePendingReaction("oppose-break-free")}
-                    disabled={isResolvingReaction || !opposingBreakFreeCanOppose}
+                    onClick={() => void resolvePendingReaction(opposingReactionMode || "oppose-break-free")}
+                    disabled={isResolvingReaction || !opposingReactionCanOppose || !opposingReactionMode}
                     className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-60"
                   >
-                    {`Oppose (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`}
+                    {opposingReactionLabel ? opposingReactionLabel.replace("Opposing", "Oppose") : "Oppose"}
                   </button>
                 </>
               ) : slashReactionPhase ? (
@@ -7663,7 +7758,7 @@ export default function Combat({
               Use Item (Flaming Longsword)
             </button>
           )}
-          {canUseDrawGearFromToken && (
+          {canUseDrawGearFromToken && currentEntry?.kind === "player" && (
             <button
               onClick={requestDrawGear}
               className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
@@ -7671,6 +7766,15 @@ export default function Combat({
               Draw Gear
             </button>
           )}
+          {monsterDrawGearOptionGroups.map((option) => (
+            <button
+              key={`monster-draw-gear-${option.key}`}
+              onClick={() => void requestMonsterDrawGearItem(option)}
+              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+            >
+              {`Draw Gear (${option.count > 1 ? `${option.label} x${option.count}` : option.label})`}
+            </button>
+          ))}
           {canEnterCoverFromSelection && (
             <button
               onClick={() => void requestEnterCover()}

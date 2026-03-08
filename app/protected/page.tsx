@@ -216,7 +216,8 @@ export type PendingReactionRoll = {
     | "helmet"
     | "naturalArmor"
     | "insight"
-    | "oppose-break-free";
+    | "oppose-break-free"
+    | "oppose-taunt";
   rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
@@ -250,7 +251,8 @@ export type ResolvedReactionRoll = {
     | "helmet"
     | "naturalArmor"
     | "insight"
-    | "oppose-break-free";
+    | "oppose-break-free"
+    | "oppose-taunt";
   rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
   armorSlot?: "armor" | "helmet" | "naturalArmor";
@@ -1527,6 +1529,20 @@ export default function Dashboard() {
   ): maneuver is FlagFlowManeuver | "Grapple Attack" =>
     isFlagFlowManeuver(maneuver) || maneuver === "Grapple Attack";
 
+  type OpposedRollManeuver = "Break Free" | "Taunt (Anger)" | "Taunt (Distract)";
+
+  const isOpposedRollManeuver = (
+    maneuver: ResolvedMeleeAttack["maneuver"]
+  ): maneuver is OpposedRollManeuver =>
+    maneuver === "Break Free" ||
+    maneuver === "Taunt (Anger)" ||
+    maneuver === "Taunt (Distract)";
+
+  const opposingReactionModeForManeuver = (
+    maneuver: OpposedRollManeuver
+  ): "oppose-break-free" | "oppose-taunt" =>
+    maneuver === "Break Free" ? "oppose-break-free" : "oppose-taunt";
+
   const flagFlowManeuverFromIncoming = (incoming: IncomingDamageFlag): FlagFlowManeuver =>
     incoming.type === "Stab"
       ? "Stab"
@@ -1743,7 +1759,7 @@ export default function Dashboard() {
     return true;
   };
 
-  const initializeOpposingBreakFreeFlow = async (params: {
+  const initializeOpposingFlow = async (params: {
     targetTokenId: string;
     attackerTokenId: string;
     opposing: OpposingRollFlag;
@@ -1759,7 +1775,7 @@ export default function Dashboard() {
         initiative_current_index: number | null;
       }>();
     if (error) {
-      console.error("Failed to initialize Break Free opposing flow:", error);
+      console.error("Failed to initialize opposing flow:", error);
       return false;
     }
 
@@ -2448,85 +2464,40 @@ export default function Dashboard() {
     }
 
     if (attack.maneuver === "Taunt (Anger)" || attack.maneuver === "Taunt (Distract)") {
+      if (!attack.skipReaction && successes > 0) {
+        const startedOpposingFlow = await initializeOpposingFlow({
+          targetTokenId: attack.targetCharacterId,
+          attackerTokenId: attack.attackerCharacterId,
+          opposing: {
+            type: attack.maneuver,
+            successes,
+          },
+          meta: {
+            attackerTokenId: attack.attackerCharacterId,
+            attackId: attack.id,
+            weaponName: attack.weaponName,
+          },
+        });
+        if (startedOpposingFlow) {
+          return;
+        }
+      }
+
+      if (!didSucceed) {
+        return;
+      }
+
       const tauntMode: "anger" | "distract" =
         attack.maneuver === "Taunt (Anger)" ? "anger" : "distract";
       const tauntSuccesses = Math.max(1, successes);
       const attackerName = attack.attackerName ?? attack.attackerCharacterId;
-      const tauntPayload = {
+      await applyTauntToCombatState({
         mode: tauntMode,
         attackerCharacterId: attack.attackerCharacterId,
         attackerName,
         targetCharacterId: attack.targetCharacterId,
-        successes: tauntSuccesses,
-      };
-
-      if (attack.targetCharacterId.startsWith("monster:")) {
-        const { data: combatState, error: combatError } = await supabase
-          .from("combat_state")
-          .select("initiative_entries")
-          .eq("id", 1)
-          .maybeSingle<{
-            initiative_entries: Array<{
-              participant_id: string;
-              monster_snapshot?: { wit?: number | null; skill?: number | null; special?: number | null } | null;
-            }> | null;
-          }>();
-        if (combatError || !combatState) {
-          if (combatError) console.error("Failed to load taunt target:", combatError);
-          return;
-        }
-        const entry = (combatState.initiative_entries || []).find(
-          (item) => item.participant_id === attack.targetCharacterId
-        );
-        const snapshot = entry?.monster_snapshot;
-        const witValue = Math.max(0, Number(snapshot?.wit ?? 0));
-        const skillValue = monsterSkillDice(snapshot as Record<string, unknown> | null | undefined);
-        if (witValue > 0) {
-          const insightSuccesses =
-            rollD6Pool(witValue).filter((d) => d === 6).length +
-            rollD6Pool(skillValue).filter((d) => d === 6).length;
-          const remaining = Math.max(0, tauntSuccesses - insightSuccesses);
-          await applyTauntToCombatState({
-            ...tauntPayload,
-            remainingSuccesses: remaining,
-          });
-        } else {
-          await applyTauntToCombatState({
-            ...tauntPayload,
-            remainingSuccesses: tauntSuccesses,
-          });
-        }
-        return;
-      }
-
-      const { data: target, error: targetError } = await supabase
-        .from("characters")
-        .select("id, attributes")
-        .eq("id", attack.targetCharacterId)
-        .maybeSingle<{ id: string; attributes: Attributes | null }>();
-      if (targetError || !target) {
-        if (targetError) console.error("Failed to load taunt target:", targetError);
-        return;
-      }
-      const witValue = Math.max(0, target.attributes?.WIT ?? 0);
-      if (witValue > 0) {
-        queueReactionRoll({
-          id: `insight:${attack.id}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-          reactionId: `insight:${attack.id}`,
-          targetCharacterId: attack.targetCharacterId,
-          mode: "insight",
-          rollType: "insight",
-          rollAttribute: "WIT",
-          rollSkill: "INSIGHT",
-          bonusDice: 0,
-          taunt: tauntPayload,
-        });
-      } else {
-        await applyTauntToCombatState({
-          ...tauntPayload,
-          remainingSuccesses: tauntSuccesses,
-        });
-      }
+        remainingSuccesses: tauntSuccesses,
+      });
       return;
     }
 
@@ -3040,7 +3011,7 @@ export default function Dashboard() {
 
     if (attack.maneuver === "Break Free") {
       if (!attack.skipReaction && successes > 0) {
-        const startedOpposingFlow = await initializeOpposingBreakFreeFlow({
+        const startedOpposingFlow = await initializeOpposingFlow({
           targetTokenId: attack.targetCharacterId,
           attackerTokenId: attack.attackerCharacterId,
           opposing: {
@@ -3889,7 +3860,12 @@ export default function Dashboard() {
     if (!roll.attack) return;
 
     const opposingState = await loadOpposingFlowState(roll.targetCharacterId);
-    if (roll.attack.maneuver === "Break Free" && opposingState) {
+    if (
+      opposingState &&
+      isOpposedRollManeuver(roll.attack.maneuver) &&
+      opposingState.meta.attackId === roll.attack.id &&
+      opposingState.opposing.type === roll.attack.maneuver
+    ) {
       const clearedEntries = clearOpposingFlowFlags(opposingState);
       const updated = await updateSlashFlowState(
         clearedEntries,
@@ -3899,7 +3875,9 @@ export default function Dashboard() {
       if (!updated) return;
 
       const opposingHeld = Math.max(0, opposingState.opposing.successes);
-      const resisted = roll.mode === "oppose-break-free" && Math.max(0, roll.totalSuccesses) >= opposingHeld;
+      const resisted =
+        roll.mode === opposingReactionModeForManeuver(roll.attack.maneuver) &&
+        Math.max(0, roll.totalSuccesses) >= opposingHeld;
       await resolveMeleeAttack({
         ...roll.attack,
         totalSuccesses: resisted ? 0 : Math.max(0, roll.attack.totalSuccesses),

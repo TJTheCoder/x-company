@@ -12,7 +12,10 @@ import {
   PARRIED_FLAG,
   findIncomingDamageFlag,
   findIncomingDamageMetaFlag,
+  findOpposingRollFlag,
+  findOpposingRollMetaFlag,
   isIncomingDamageMetaFlag,
+  isOpposingRollMetaFlag,
 } from "@/lib/combat-flags";
 import artsCatalogData from "../data/arts.json";
 import * as combatModel from "./combat/model";
@@ -830,6 +833,15 @@ export default function Combat({
     const record = findIncomingDamageMetaFlag(actorUsedItemFlagList);
     return record?.value ?? null;
   }, [actorUsedItemFlagList]);
+  const opposingBreakFreeFlag = useMemo(() => {
+    const record = findOpposingRollFlag(actorUsedItemFlagList);
+    if (!record || record.value.type !== "Break Free") return null;
+    return record.value;
+  }, [actorUsedItemFlagList]);
+  const opposingBreakFreeMeta = useMemo(() => {
+    const record = findOpposingRollMetaFlag(actorUsedItemFlagList);
+    return record?.value ?? null;
+  }, [actorUsedItemFlagList]);
   const flowManeuverForIncomingType = useCallback(
     (
       type: string | null | undefined
@@ -962,6 +974,33 @@ export default function Combat({
       slashFlow: true,
     };
   }, [slashIncomingDamage, slashIncomingMeta, actorTokenId, flowManeuverForIncomingType]);
+  const opposingBreakFreeActive =
+    combatMode &&
+    Boolean(actorTokenId) &&
+    Boolean(opposingBreakFreeFlag && opposingBreakFreeMeta) &&
+    Math.max(0, opposingBreakFreeFlag?.successes ?? 0) > 0;
+  const opposingBreakFreeCanControlPhase =
+    opposingBreakFreeActive &&
+    Boolean(actorTokenId) &&
+    (currentEntry?.kind === "monster"
+      ? isDmViewer
+      : Boolean(currentUserTokenId && actorTokenId === currentUserTokenId));
+  const opposingBreakFreeCanOppose = opposingBreakFreeCanControlPhase && !actorState.dead;
+  const buildOpposingBreakFreeAttack = useCallback((): ResolvedMeleeAttack | null => {
+    if (!opposingBreakFreeFlag || !opposingBreakFreeMeta || !actorTokenId) return null;
+    return {
+      id: opposingBreakFreeMeta.attackId,
+      attackerCharacterId: opposingBreakFreeMeta.attackerTokenId,
+      targetCharacterId: actorTokenId,
+      weaponName: opposingBreakFreeMeta.weaponName || "Break Free",
+      weaponBaseDamage: 0,
+      maneuver: "Break Free",
+      totalSuccesses: Math.max(0, opposingBreakFreeFlag.successes),
+      requiredSuccesses: 1,
+      swingBonusDamage: 0,
+      skipReaction: true,
+    };
+  }, [opposingBreakFreeFlag, opposingBreakFreeMeta, actorTokenId]);
   const actorTauntAngerTargetEntry = useMemo(
     () => findEntryForTokenId(actorTauntedAngerById),
     [findEntryForTokenId, actorTauntedAngerById]
@@ -1235,10 +1274,11 @@ export default function Combat({
     ];
   }, [slashIncomingActive, slashIncomingDamage?.type, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
   const shouldShowReactionModal =
-    ((Boolean(pendingReaction) &&
-      REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
-      combatMode &&
-      viewerCanControlReaction) ||
+    ((opposingBreakFreeActive && opposingBreakFreeCanControlPhase) ||
+      (Boolean(pendingReaction) &&
+        REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
+        combatMode &&
+        viewerCanControlReaction) ||
       (slashReactionPhase && slashCanControlPhase)) &&
     combatMode;
   const effectiveProtectionDice = (item: InventoryItem | null | undefined): number => {
@@ -1492,9 +1532,92 @@ export default function Combat({
   );
   const resolvePendingReaction = useCallback(
     async (
-      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry",
+      mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "oppose-break-free",
       parryItem?: { id: string; gearBonus: number; kind: "weapon" | "shield"; name: string }
     ) => {
+      if (opposingBreakFreeActive && opposingBreakFreeCanControlPhase) {
+        const opposingAttack = buildOpposingBreakFreeAttack();
+        if (!opposingAttack || !actorTokenId) return;
+        if (!onResolveReactionRoll && !onQueueReactionRoll) return;
+
+        if (mode === "pass") {
+          if (!onResolveReactionRoll) return;
+          await onResolveReactionRoll({
+            id: `oppose-break-free-pass:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `oppose:${opposingAttack.id}`,
+            targetCharacterId: opposingAttack.targetCharacterId,
+            mode: "pass",
+            rollType: "reaction",
+            totalSuccesses: 0,
+            attack: opposingAttack,
+          });
+          return;
+        }
+
+        if (mode !== "oppose-break-free") return;
+        const sizeDelta = sizeForTokenId(actorTokenId) - sizeForTokenId(opposingBreakFreeMeta?.attackerTokenId);
+        const tauntPenalty = await consumeTauntPenaltyForToken(actorTokenId);
+
+        if (currentEntry?.kind !== "monster" && onQueueReactionRoll) {
+          onQueueReactionRoll({
+            id: `oppose-break-free-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `oppose:${opposingAttack.id}`,
+            targetCharacterId: opposingAttack.targetCharacterId,
+            mode: "oppose-break-free",
+            rollType: "reaction",
+            rollAttribute: "STR",
+            rollSkill: "MELEE",
+            bonusDice: sizeDelta + tauntPenalty,
+            attack: opposingAttack,
+          });
+          return;
+        }
+
+        if (currentEntry?.kind !== "monster" || !currentEntry.monster_snapshot || !onResolveReactionRoll) return;
+        setIsResolvingReaction(true);
+        try {
+          const snapshot = currentEntry.monster_snapshot;
+          const attrCount = Math.max(0, snapshot.str ?? 0);
+          const skillBlocked = attrCount <= 0;
+          const signedSkillPool = skillBlocked ? 0 : monsterSkillDice(snapshot) + sizeDelta + tauntPenalty;
+          const skillCount = Math.abs(signedSkillPool);
+          const skillIsNegative = signedSkillPool < 0;
+          const attributeDice = rollD6Pool(attrCount);
+          const skillDice = skillBlocked ? [] : rollD6Pool(skillCount);
+          const gearDice: number[] = [];
+          const rawSuccesses =
+            attributeDice.filter((d) => d === 6).length +
+            skillDice.filter((d) => d === 6).length;
+          const successes = skillBlocked
+            ? 0
+            : skillIsNegative
+              ? Math.max(0, rawSuccesses - skillDice.filter((d) => d === 6).length * 2)
+              : rawSuccesses;
+          if (isDmViewer) {
+            setMonsterRollResult({
+              actionLabel: `Opposing (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`,
+              attributeDice,
+              skillDice,
+              skillIsNegative,
+              gearDice,
+              successes,
+            });
+          }
+          await onResolveReactionRoll({
+            id: `oppose-break-free-roll:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            reactionId: `oppose:${opposingAttack.id}`,
+            targetCharacterId: opposingAttack.targetCharacterId,
+            mode: "oppose-break-free",
+            rollType: "reaction",
+            totalSuccesses: successes,
+            attack: opposingAttack,
+          });
+        } finally {
+          setIsResolvingReaction(false);
+        }
+        return;
+      }
+
       if (slashReactionPhase && slashCanControlPhase) {
         const slashAttack = buildSlashFlowAttack();
         if (!slashAttack || !actorTokenId) return;
@@ -1816,6 +1939,11 @@ export default function Combat({
       }
     },
     [
+      opposingBreakFreeActive,
+      opposingBreakFreeCanControlPhase,
+      buildOpposingBreakFreeAttack,
+      opposingBreakFreeMeta,
+      opposingBreakFreeFlag,
       slashReactionPhase,
       slashCanControlPhase,
       buildSlashFlowAttack,
@@ -2097,17 +2225,29 @@ export default function Combat({
       }),
     [combatMode, initiativeEntries]
   );
+  const opposingPipelineActive = useMemo(
+    () =>
+      combatMode &&
+      initiativeEntries.some((entry) => {
+        const flags = Array.isArray(entry.used_item_flags)
+          ? entry.used_item_flags.filter((value): value is string => typeof value === "string")
+          : [];
+        return Boolean(findOpposingRollFlag(flags) && findOpposingRollMetaFlag(flags));
+      }),
+    [combatMode, initiativeEntries]
+  );
+  const reactionPipelineActive = incomingPipelineActive || opposingPipelineActive;
   const isMyTurn = useMemo(() => {
     const attackerTurnLockedByReaction =
       combatMode &&
       Boolean(actorTokenId) &&
       pendingReactions.some((reaction) => reaction.attackerCharacterId === actorTokenId);
     if (!currentEntry) return false;
-    if (incomingPipelineActive) return false;
+    if (reactionPipelineActive) return false;
     if (attackerTurnLockedByReaction) return false;
     if (isDmUser) return currentEntry.kind === "monster";
     return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
-  }, [currentEntry, isDmUser, currentUserTokenId, combatMode, actorTokenId, pendingReactions, incomingPipelineActive]);
+  }, [currentEntry, isDmUser, currentUserTokenId, combatMode, actorTokenId, pendingReactions, reactionPipelineActive]);
   const rangeBetweenTokens = useCallback(
     (sourceTokenId: string | null | undefined, targetTokenId: string | null | undefined): CombatRange | null => {
       if (!sourceTokenId || !targetTokenId || sourceTokenId === targetTokenId) return null;
@@ -2771,7 +2911,7 @@ export default function Combat({
 
   const canPass = useMemo(() => {
     if (!currentEntry) return false;
-    if (incomingPipelineActive) return false;
+    if (reactionPipelineActive) return false;
     if (
       combatMode &&
       actorTokenId &&
@@ -2781,7 +2921,7 @@ export default function Combat({
     }
     if (isDmUser) return currentEntry.kind === "monster";
     return Boolean(currentUserTokenId && actorTokenId === currentUserTokenId);
-  }, [currentEntry, currentUserTokenId, isDmUser, combatMode, actorTokenId, pendingReactions, incomingPipelineActive]);
+  }, [currentEntry, currentUserTokenId, isDmUser, combatMode, actorTokenId, pendingReactions, reactionPipelineActive]);
   const actorEquippedFlamingLongsword = useMemo<InventoryItem | null>(() => {
     if (!currentEntry) return null;
     if (currentEntry.kind === "player") {
@@ -3510,6 +3650,7 @@ export default function Combat({
 
   const pickUpActionOptions = useMemo(() => {
     if (!combatMode || !currentEntry || !isMyTurn || actorDead || actorRestrictedToCrawl || actorRestrictedToRun || isActorProne || actorHardLockedByHold) return [] as InventoryItem[];
+    if (actorTauntAngerRestricted) return [] as InventoryItem[];
     if (!(currentEntry.fast_available || currentEntry.slow_available)) return [];
     if (!selectedZoneTarget || !actorTokenId) return [];
     const actorToken = tokenByCharacterId.get(actorTokenId);
@@ -3548,6 +3689,7 @@ export default function Combat({
     actorDead,
     actorRestrictedToCrawl,
     actorRestrictedToRun,
+    actorTauntAngerRestricted,
   ]);
   const pickUpActionOptionGroups = useMemo(
     () => groupItemsForDisplay(pickUpActionOptions),
@@ -4523,7 +4665,7 @@ export default function Combat({
     const noActionsRemaining =
       currentEntry?.fast_available === false &&
       currentEntry?.slow_available === false;
-    const reactionStackOngoing = incomingPipelineActive || pendingReactions.length > 0;
+    const reactionStackOngoing = reactionPipelineActive || pendingReactions.length > 0;
     const pendingResolutionOngoing =
       Boolean(pendingMeleeAction) ||
       Boolean(pendingReactionRoll) ||
@@ -4548,7 +4690,7 @@ export default function Combat({
     currentEntry?.fast_available,
     currentEntry?.slow_available,
     canPass,
-    incomingPipelineActive,
+    reactionPipelineActive,
     pendingReactions.length,
     pendingMeleeAction,
     pendingReactionRoll,
@@ -5767,6 +5909,7 @@ export default function Combat({
 
   const requestPickUpAction = async (option: GroupedItemDisplay) => {
     if (!currentEntry || !actorTokenId || !selectedZoneTarget) return;
+    if (actorTauntAngerRestricted) return;
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
@@ -7158,8 +7301,8 @@ export default function Combat({
                   onClick={() => void handleArtPromptRoll(option.id)}
                   className={`w-full rounded px-3 py-2 text-sm font-semibold transition-colors ${
                     option.kind === "sunder" || option.kind === "lagging-blade"
-                      ? "bg-gradient-to-r from-orange-700 to-gray-100 text-gray-900 hover:from-orange-600 hover:to-white"
-                      : "bg-amber-600 text-gray-950 hover:bg-amber-500"
+                      ? "bg-gradient-to-r from-orange-700 via-amber-500 to-gray-100 text-gray-950 hover:from-orange-600 hover:via-amber-400 hover:to-white"
+                      : "bg-gradient-to-r from-amber-700 via-orange-600 to-red-700 text-amber-50 hover:from-amber-600 hover:via-orange-500 hover:to-red-600"
                   }`}
                 >
                   {option.label}
@@ -7224,13 +7367,26 @@ export default function Combat({
           </div>
         </div>
       )}
-      {shouldShowReactionModal && (pendingReaction || slashReactionPhase) && (
+      {shouldShowReactionModal && (pendingReaction || slashReactionPhase || opposingBreakFreeActive) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
           <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-gray-950/95 p-5 text-amber-100 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 {/** Single label source keeps incoming maneuver names consistent across all flow types. */}
                 {(() => {
+                  if (opposingBreakFreeActive) {
+                    return (
+                      <>
+                        <h3 className="text-lg font-bold text-amber-300">Reaction Available</h3>
+                        <p className="text-sm text-amber-200/80">
+                          {`Opposing (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`}
+                        </p>
+                        <p className="text-xs text-amber-200/70">
+                          Successes Incoming: {opposingBreakFreeFlag?.successes ?? 0}
+                        </p>
+                      </>
+                    );
+                  }
                   const incomingManeuverLabel = flowManeuverForIncomingType(slashIncomingDamage?.type);
                   return (
                     <>
@@ -7250,19 +7406,34 @@ export default function Combat({
               </div>
             </div>
 
+            {opposingBreakFreeActive && !opposingBreakFreeCanOppose && (
+              <div className="mt-3 rounded-lg border border-sky-500/30 bg-sky-900/20 px-3 py-2 text-xs text-sky-200/80">
+                Opposing unavailable.
+              </div>
+            )}
             {slashReactionPhase && !slashCanDodgeReaction && !slashCanParryReaction && (
               <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
                 Reaction unavailable (no fast action or restricted).
               </div>
             )}
-            {!slashReactionPhase && !canDodgeReaction && !canParryReaction && (
+            {!opposingBreakFreeActive && !slashReactionPhase && !canDodgeReaction && !canParryReaction && (
               <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-xs text-amber-200/80">
                 Reaction unavailable (no fast action or restricted).
               </div>
             )}
 
             <div className="mt-4 grid grid-cols-1 gap-2">
-              {slashReactionPhase ? (
+              {opposingBreakFreeActive ? (
+                <>
+                  <button
+                    onClick={() => void resolvePendingReaction("oppose-break-free")}
+                    disabled={isResolvingReaction || !opposingBreakFreeCanOppose}
+                    className="w-full rounded bg-sky-700 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-600 disabled:opacity-60"
+                  >
+                    {`Oppose (Break Free ${opposingBreakFreeFlag?.successes ?? 0})`}
+                  </button>
+                </>
+              ) : slashReactionPhase ? (
                 <>
                   {!slashHasDodged && (
                     <>
@@ -7373,7 +7544,7 @@ export default function Combat({
             </div>
           )}
         </div>
-        {incomingPipelineActive && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
+        {reactionPipelineActive && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
           <div className="mb-3 rounded border border-orange-500/40 bg-orange-900/20 px-3 py-2 text-xs text-orange-200/90">
             Reactions in stack. Please wait for resolution.
           </div>
@@ -7463,7 +7634,7 @@ export default function Combat({
           {canUseBreakFree && (
             <button
               onClick={() => void requestBreakFree()}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               Break Free
             </button>
@@ -7569,7 +7740,7 @@ export default function Combat({
             <button
               key={`disarm-${option.actorWeaponItemId}-${option.targetItemId}`}
               onClick={() => void requestDisarmAction(option)}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               {`Disarm (${option.targetItemName} w/ ${option.actorWeaponName})`}
             </button>
@@ -7578,7 +7749,7 @@ export default function Combat({
             <button
               key={`heal-${option.attribute}`}
               onClick={() => void requestHeal(option)}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               {option.label}
             </button>
@@ -7587,7 +7758,7 @@ export default function Combat({
             <button
               key={`taunt-${option.mode}`}
               onClick={() => void requestTaunt(option.mode)}
-              className="w-full rounded bg-orange-700 px-3 py-2 text-sm font-semibold text-orange-100 hover:bg-orange-600"
+              className="w-full rounded bg-green-700 px-3 py-2 text-sm font-semibold text-green-100 hover:bg-green-600"
             >
               {option.label}
             </button>

@@ -5965,6 +5965,10 @@ declare
   v_other_idx int;
   v_actor_uuid uuid;
   v_actor_owner_email text;
+  v_other_uuid uuid;
+  v_other_owner_email text;
+  v_actor_owned_by_caller boolean := false;
+  v_other_owned_by_caller boolean := false;
   v_actor_clung_ids jsonb := '[]'::jsonb;
   v_has_cling_relationship boolean := false;
   v_has_grapple_relationship boolean := false;
@@ -6015,17 +6019,30 @@ begin
   if not v_is_dm then
     begin
       v_actor_uuid := p_actor_token_id::uuid;
+      select email into v_actor_owner_email
+      from public.characters
+      where id = v_actor_uuid
+      limit 1;
+      v_actor_owned_by_caller :=
+        v_actor_owner_email is not null and lower(v_actor_owner_email) = lower(v_email);
     exception when others then
-      raise exception 'Only player characters can break free';
+      v_actor_owned_by_caller := false;
     end;
 
-    select email into v_actor_owner_email
-    from public.characters
-    where id = v_actor_uuid
-    limit 1;
+    begin
+      v_other_uuid := p_other_token_id::uuid;
+      select email into v_other_owner_email
+      from public.characters
+      where id = v_other_uuid
+      limit 1;
+      v_other_owned_by_caller :=
+        v_other_owner_email is not null and lower(v_other_owner_email) = lower(v_email);
+    exception when others then
+      v_other_owned_by_caller := false;
+    end;
 
-    if v_actor_owner_email is null or lower(v_actor_owner_email) <> lower(v_email) then
-      raise exception 'You can only break free with your own character';
+    if not v_actor_owned_by_caller and not v_other_owned_by_caller then
+      raise exception 'You can only resolve break free involving your own character';
     end if;
   end if;
 

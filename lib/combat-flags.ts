@@ -5,6 +5,8 @@ export const ARTS_CHOSEN_FLAG = "Arts Chosen";
 const INCOMING_PREFIX = "Incoming (";
 const LEGACY_INCOMING_DAMAGE_PREFIX = "Incoming Damage (";
 const INCOMING_META_PREFIX = "__Incoming Meta (";
+const OPPOSING_PREFIX = "Opposing (";
+const OPPOSING_META_PREFIX = "__Opposing Meta (";
 
 export type IncomingDamageFlag = {
   type: string;
@@ -22,6 +24,17 @@ export type IncomingDamageMeta = {
   disarmZoneId?: number | null;
   woodenAttack?: boolean | null;
   firearmAttack?: boolean | null;
+};
+
+export type OpposingRollFlag = {
+  type: string;
+  successes: number;
+};
+
+export type OpposingRollMeta = {
+  attackerTokenId: string;
+  attackId: string;
+  weaponName: string;
 };
 
 const clampInt = (value: number): number => {
@@ -170,3 +183,70 @@ export const findIncomingDamageMetaFlag = (
 
 export const isIncomingDamageMetaFlag = (flag: string): boolean =>
   String(flag || "").trim().startsWith(INCOMING_META_PREFIX);
+
+export const buildOpposingRollFlag = (type: string, successes: number): string => {
+  const normalizedType = String(type || "").trim() || "Unknown";
+  return `${OPPOSING_PREFIX}${normalizedType} ${clampInt(successes)})`;
+};
+
+export const parseOpposingRollFlag = (flag: string): OpposingRollFlag | null => {
+  const raw = String(flag || "").trim();
+  if (!raw.startsWith(OPPOSING_PREFIX) || !raw.endsWith(")")) return null;
+  const body = raw.slice(OPPOSING_PREFIX.length, -1);
+  const match = body.match(/^(.+?)\s+(\d+)$/);
+  if (!match) return null;
+  return {
+    type: match[1].trim(),
+    successes: clampInt(Number.parseInt(match[2], 10)),
+  };
+};
+
+export const findOpposingRollFlag = (
+  flags: string[]
+): { index: number; raw: string; value: OpposingRollFlag } | null => {
+  for (let i = 0; i < flags.length; i += 1) {
+    const parsed = parseOpposingRollFlag(flags[i]);
+    if (parsed) {
+      return { index: i, raw: flags[i], value: parsed };
+    }
+  }
+  return null;
+};
+
+export const buildOpposingRollMetaFlag = (meta: OpposingRollMeta): string => {
+  const serialized = [
+    encodePart(meta.attackerTokenId || ""),
+    encodePart(meta.attackId || ""),
+    encodePart(meta.weaponName || ""),
+  ].join("|");
+  return `${OPPOSING_META_PREFIX}${serialized})`;
+};
+
+export const parseOpposingRollMetaFlag = (flag: string): OpposingRollMeta | null => {
+  const raw = String(flag || "").trim();
+  if (!raw.startsWith(OPPOSING_META_PREFIX) || !raw.endsWith(")")) return null;
+  const body = raw.slice(OPPOSING_META_PREFIX.length, -1);
+  const parts = body.split("|");
+  const [attackerPart, attackPart, weaponPart] = parts;
+  if (!attackerPart || !attackPart) return null;
+  return {
+    attackerTokenId: decodePart(attackerPart),
+    attackId: decodePart(attackPart),
+    weaponName: decodePart(weaponPart || ""),
+  };
+};
+
+export const findOpposingRollMetaFlag = (
+  flags: string[]
+): { index: number; raw: string; value: OpposingRollMeta } | null => {
+  for (let i = 0; i < flags.length; i += 1) {
+    const parsed = parseOpposingRollMetaFlag(flags[i]);
+    if (parsed) {
+      return { index: i, raw: flags[i], value: parsed };
+    }
+  }
+  return null;
+};
+
+export const isOpposingRollMetaFlag = (flag: string): boolean =>
+  String(flag || "").trim().startsWith(OPPOSING_META_PREFIX);

@@ -9,11 +9,18 @@ import {
   PARRIED_FLAG,
   buildIncomingDamageFlag,
   buildIncomingDamageMetaFlag,
+  buildOpposingRollFlag,
+  buildOpposingRollMetaFlag,
   findIncomingDamageFlag,
   findIncomingDamageMetaFlag,
+  findOpposingRollFlag,
+  findOpposingRollMetaFlag,
   isIncomingDamageMetaFlag,
+  isOpposingRollMetaFlag,
   type IncomingDamageFlag,
   type IncomingDamageMeta,
+  type OpposingRollFlag,
+  type OpposingRollMeta,
 } from "@/lib/combat-flags";
 import artsCatalogData from "../../data/arts.json";
 import Character from "../../components/character";
@@ -200,7 +207,16 @@ export type PendingReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "naturalArmor" | "insight";
+  mode:
+    | "pass"
+    | "dodge-stand"
+    | "dodge-prone"
+    | "parry"
+    | "armor"
+    | "helmet"
+    | "naturalArmor"
+    | "insight"
+    | "oppose-break-free";
   rollType?: "reaction" | "armor" | "insight";
   rollAttribute: keyof Attributes;
   rollSkill: string;
@@ -225,7 +241,16 @@ export type ResolvedReactionRoll = {
   id: string;
   reactionId: string;
   targetCharacterId: string;
-  mode: "pass" | "dodge-stand" | "dodge-prone" | "parry" | "armor" | "helmet" | "naturalArmor" | "insight";
+  mode:
+    | "pass"
+    | "dodge-stand"
+    | "dodge-prone"
+    | "parry"
+    | "armor"
+    | "helmet"
+    | "naturalArmor"
+    | "insight"
+    | "oppose-break-free";
   rollType?: "reaction" | "armor" | "insight";
   totalSuccesses: number;
   armorSlot?: "armor" | "helmet" | "naturalArmor";
@@ -816,24 +841,37 @@ export default function Dashboard() {
           ? targetTokenId.startsWith("monster:")
           : Boolean(currentTokenId && tokenMatchesParticipant(targetTokenId, currentTokenId));
       });
-      const hasIncomingFlow = initiativeEntries.some((entry) => {
+      const hasFlagFlow = initiativeEntries.some((entry) => {
         const flags = Array.isArray(entry?.used_item_flags)
           ? entry.used_item_flags.filter((value): value is string => typeof value === "string")
           : [];
         const incomingRecord = findIncomingDamageFlag(flags);
-        const metaRecord = findIncomingDamageMetaFlag(flags);
-        if (!incomingRecord || !metaRecord) return false;
+        const incomingMetaRecord = findIncomingDamageMetaFlag(flags);
+        if (incomingRecord && incomingMetaRecord) {
+          const participantId = String(entry?.participant_id || "").trim();
+          return isDmViewer
+            ? participantId.startsWith("monster:") || incomingMetaRecord.value.attackerTokenId.startsWith("monster:")
+            : Boolean(
+                currentTokenId &&
+                  (tokenMatchesParticipant(participantId, currentTokenId) ||
+                    tokenMatchesParticipant(incomingMetaRecord.value.attackerTokenId, currentTokenId))
+              );
+        }
+
+        const opposingRecord = findOpposingRollFlag(flags);
+        const opposingMetaRecord = findOpposingRollMetaFlag(flags);
+        if (!opposingRecord || !opposingMetaRecord) return false;
         const participantId = String(entry?.participant_id || "").trim();
         return isDmViewer
-          ? participantId.startsWith("monster:") || metaRecord.value.attackerTokenId.startsWith("monster:")
+          ? participantId.startsWith("monster:") || opposingMetaRecord.value.attackerTokenId.startsWith("monster:")
           : Boolean(
               currentTokenId &&
                 (tokenMatchesParticipant(participantId, currentTokenId) ||
-                  tokenMatchesParticipant(metaRecord.value.attackerTokenId, currentTokenId))
+                  tokenMatchesParticipant(opposingMetaRecord.value.attackerTokenId, currentTokenId))
             );
       });
 
-      if (hasPendingReaction || hasIncomingFlow) {
+      if (hasPendingReaction || hasFlagFlow) {
         setActiveTab("combat");
       }
     };
@@ -1419,10 +1457,12 @@ export default function Dashboard() {
     slow_available?: boolean | null;
     fast_footwork_dodge_used?: boolean | null;
     prone?: boolean | null;
+    dead?: boolean | null;
     monster_snapshot?: {
       natural_armor?: number | null;
       gear?: InventoryItem[] | null;
       equipment_slots?: EquipmentSlots | null;
+      dead?: boolean | null;
     } | null;
   };
 
@@ -1437,6 +1477,16 @@ export default function Dashboard() {
     attackerFlags: string[];
     incoming: IncomingDamageFlag;
     meta: IncomingDamageMeta;
+  };
+
+  type OpposingFlowState = {
+    entries: SlashFlowCombatEntry[];
+    currentIndex: number | null;
+    targetIndex: number;
+    targetEntry: SlashFlowCombatEntry;
+    targetFlags: string[];
+    opposing: OpposingRollFlag;
+    meta: OpposingRollMeta;
   };
 
   type SlashProtectionOption = {
@@ -1545,6 +1595,8 @@ export default function Dashboard() {
     if (flag === DODGED_FLAG || flag === PARRIED_FLAG || flag === ARTS_CHOSEN_FLAG) return true;
     if (findIncomingDamageFlag([flag])) return true;
     if (isIncomingDamageMetaFlag(flag)) return true;
+    if (findOpposingRollFlag([flag])) return true;
+    if (isOpposingRollMetaFlag(flag)) return true;
     if (isArmorUsedItemFlag(flag)) return true;
     return false;
   };
@@ -1559,6 +1611,69 @@ export default function Dashboard() {
     next.push(buildIncomingDamageMetaFlag(meta));
     return normalizeFlagList(next);
   };
+
+  const replaceOpposingFlags = (
+    flags: string[],
+    opposing: OpposingRollFlag,
+    meta: OpposingRollMeta
+  ): string[] => {
+    const next = flags.filter((flag) => !findOpposingRollFlag([flag]) && !isOpposingRollMetaFlag(flag));
+    next.push(buildOpposingRollFlag(opposing.type, opposing.successes));
+    next.push(buildOpposingRollMetaFlag(meta));
+    return normalizeFlagList(next);
+  };
+
+  const loadOpposingFlowState = async (targetTokenId: string): Promise<OpposingFlowState | null> => {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: SlashFlowCombatEntry[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (error) {
+      console.error("Failed to load opposing flow state:", error);
+      return null;
+    }
+
+    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
+    if (entries.length === 0) return null;
+
+    const targetIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, targetTokenId)
+    );
+    if (targetIndex < 0) return null;
+
+    const targetEntry = entries[targetIndex];
+    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
+    const opposingRecord = findOpposingRollFlag(targetFlags);
+    const metaRecord = findOpposingRollMetaFlag(targetFlags);
+    if (!opposingRecord || !metaRecord) return null;
+
+    return {
+      entries,
+      currentIndex: data?.initiative_current_index ?? null,
+      targetIndex,
+      targetEntry,
+      targetFlags,
+      opposing: opposingRecord.value,
+      meta: metaRecord.value,
+    };
+  };
+
+  const clearOpposingFlowFlags = (state: OpposingFlowState): SlashFlowCombatEntry[] =>
+    state.entries.map((entry, index) => {
+      if (index !== state.targetIndex) return entry;
+      const nextFlags = normalizeFlagList(entry.used_item_flags).filter(
+        (flag) => !findOpposingRollFlag([flag]) && !isOpposingRollMetaFlag(flag)
+      );
+      return {
+        ...entry,
+        used_item_flags: nextFlags,
+      };
+    });
 
   const loadSlashFlowState = async (targetTokenId: string): Promise<SlashFlowState | null> => {
     const supabase = createClient();
@@ -1626,6 +1741,57 @@ export default function Dashboard() {
       return false;
     }
     return true;
+  };
+
+  const initializeOpposingBreakFreeFlow = async (params: {
+    targetTokenId: string;
+    attackerTokenId: string;
+    opposing: OpposingRollFlag;
+    meta: OpposingRollMeta;
+  }): Promise<boolean> => {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("combat_state")
+      .select("initiative_entries, initiative_current_index")
+      .eq("id", 1)
+      .maybeSingle<{
+        initiative_entries: SlashFlowCombatEntry[] | null;
+        initiative_current_index: number | null;
+      }>();
+    if (error) {
+      console.error("Failed to initialize Break Free opposing flow:", error);
+      return false;
+    }
+
+    const entries = Array.isArray(data?.initiative_entries) ? data!.initiative_entries : [];
+    if (entries.length === 0) return false;
+
+    const targetIndex = entries.findIndex((entry) =>
+      tokenMatchesParticipant(entry.participant_id, params.targetTokenId)
+    );
+    if (targetIndex < 0) return false;
+
+    const targetEntry = entries[targetIndex];
+    if (targetEntry.dead || targetEntry.monster_snapshot?.dead) {
+      return false;
+    }
+
+    const targetFlags = normalizeFlagList(targetEntry.used_item_flags);
+    const nextTargetFlags = replaceOpposingFlags(targetFlags, params.opposing, params.meta);
+    const nextEntries = entries.map((entry, index) =>
+      index === targetIndex
+        ? {
+            ...entry,
+            used_item_flags: nextTargetFlags,
+          }
+        : entry
+    );
+
+    return updateSlashFlowState(
+      nextEntries,
+      data?.initiative_current_index ?? null,
+      params.attackerTokenId
+    );
   };
 
   const resolveSlashProtectionOptions = async (
@@ -2873,6 +3039,25 @@ export default function Dashboard() {
     }
 
     if (attack.maneuver === "Break Free") {
+      if (!attack.skipReaction && successes > 0) {
+        const startedOpposingFlow = await initializeOpposingBreakFreeFlow({
+          targetTokenId: attack.targetCharacterId,
+          attackerTokenId: attack.attackerCharacterId,
+          opposing: {
+            type: "Break Free",
+            successes,
+          },
+          meta: {
+            attackerTokenId: attack.attackerCharacterId,
+            attackId: attack.id,
+            weaponName: attack.weaponName,
+          },
+        });
+        if (startedOpposingFlow) {
+          return;
+        }
+      }
+
       const { error: breakFreeError } = await supabase.rpc("combat_break_free", {
         p_actor_token_id: attack.attackerCharacterId,
         p_other_token_id: attack.targetCharacterId,
@@ -3702,6 +3887,26 @@ export default function Dashboard() {
       return;
     }
     if (!roll.attack) return;
+
+    const opposingState = await loadOpposingFlowState(roll.targetCharacterId);
+    if (roll.attack.maneuver === "Break Free" && opposingState) {
+      const clearedEntries = clearOpposingFlowFlags(opposingState);
+      const updated = await updateSlashFlowState(
+        clearedEntries,
+        opposingState.currentIndex,
+        roll.targetCharacterId
+      );
+      if (!updated) return;
+
+      const opposingHeld = Math.max(0, opposingState.opposing.successes);
+      const resisted = roll.mode === "oppose-break-free" && Math.max(0, roll.totalSuccesses) >= opposingHeld;
+      await resolveMeleeAttack({
+        ...roll.attack,
+        totalSuccesses: resisted ? 0 : Math.max(0, roll.attack.totalSuccesses),
+        skipReaction: true,
+      });
+      return;
+    }
 
     const slashState = await loadSlashFlowState(roll.targetCharacterId);
     const isSlashFlow =

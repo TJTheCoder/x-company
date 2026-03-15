@@ -7354,9 +7354,7 @@ export default function Combat({
         combatMode &&
         actorEntry &&
         !isActorTurn &&
-        fromZone !== null &&
-        toZone !== null &&
-        fromZone !== toZone
+        (fromZone === null || toZone === null || fromZone !== toZone)
       ) {
         return;
       }

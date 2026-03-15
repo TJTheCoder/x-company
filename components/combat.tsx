@@ -3951,22 +3951,14 @@ export default function Combat({
       if (!actor) return [];
       const currentWeight = (actor.inventory || []).reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
       const maxWeight = (actor.max_attributes?.STR ?? actor.attributes?.STR ?? 0) * 2;
-      const slots = actor.equipment_slots || { left: null, right: null, armor: null, helmet: null };
-      return itemsInZone.filter(
-        (item) =>
-          currentWeight + (item.quantity || 1) * item.weight <= maxWeight && canPickUpIntoHands(item, slots)
-      );
+      return itemsInZone.filter((item) => currentWeight + (item.quantity || 1) * item.weight <= maxWeight);
     }
 
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot) return [];
     const currentWeight = (snapshot.gear || []).reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
     const maxWeight = Math.max(0, snapshot.str ?? 0) * 2;
-    const slots = sanitizeMonsterEquipmentSlots(snapshot.equipment_slots, snapshot.gear || []);
-    return itemsInZone.filter(
-      (item) =>
-        currentWeight + (item.quantity || 1) * item.weight <= maxWeight && canPickUpIntoHands(item, slots)
-    );
+    return itemsInZone.filter((item) => currentWeight + (item.quantity || 1) * item.weight <= maxWeight);
   }, [
     combatMode,
     currentEntry,
@@ -6251,20 +6243,38 @@ export default function Combat({
         (drop) => drop.zone_id === selectedZoneTarget.zoneId && drop.item.id === selectedItemId
       )?.item || null;
     if (!selectedItem) return;
+    const supabase = createClient();
     if (currentEntry.kind === "player") {
-      const slots = actorTokenCharacter?.equipment_slots || { left: null, right: null, armor: null, helmet: null };
-      if (!canPickUpIntoHands(selectedItem, slots)) return;
+      const { data: latestCharacter, error: latestCharacterError } = await supabase
+        .from("characters")
+        .select("id, equipment_slots")
+        .eq("id", actorTokenId)
+        .maybeSingle<{ id: string; equipment_slots?: { left?: string | null; right?: string | null } | null }>();
+      if (latestCharacterError || !latestCharacter) {
+        if (latestCharacterError) setError(latestCharacterError.message);
+        return;
+      }
+      const slots = latestCharacter.equipment_slots || { left: null, right: null };
+      if (!canPickUpIntoHands(selectedItem, slots)) {
+        setError("Not enough free hands to pick up that item");
+        return;
+      }
     } else {
-      const snapshot = currentEntry.monster_snapshot;
+      const latest = await fetchLatestInitiativeState();
+      if (!latest) return;
+      const actorEntry = latest.freshEntries.find((entry) => entry.participant_id === currentEntry.participant_id) || null;
+      const snapshot = actorEntry?.monster_snapshot || null;
       const slots = sanitizeMonsterEquipmentSlots(snapshot?.equipment_slots, snapshot?.gear || []);
-      if (!canPickUpIntoHands(selectedItem, slots)) return;
+      if (!canPickUpIntoHands(selectedItem, slots)) {
+        setError("Not enough free hands to pick up that item");
+        return;
+      }
     }
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
     if (!swingCleared) return;
 
-    const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_pick_up_zone_item", {
       p_actor_token_id: actorTokenId,
       p_zone_id: selectedZoneTarget.zoneId,

@@ -109,6 +109,14 @@ const summarizeGearForDisplay = (gear: InventoryItem[]): string => {
     .map((entry) => (entry.count > 1 ? `${entry.label} x${entry.count}` : entry.label))
     .join(", ");
 };
+const resolveMonsterEquippedSlotLabel = (
+  slotValue: string | null | undefined,
+  gear: InventoryItem[]
+): string | null => {
+  if (!slotValue) return null;
+  const match = gear.find((item) => item.id === slotValue || item.name === slotValue) || null;
+  return match?.name || slotValue;
+};
 const artsCatalog = artsCatalogData as Art[];
 const artByName = new Map(artsCatalog.map((art) => [art.name.trim().toLowerCase(), art]));
 const talentsCatalog = talentsCatalogData as Array<{ id: string; name: string }>;
@@ -400,10 +408,10 @@ export function formatMonsterTooltip(snapshot: MonsterSnapshot): string {
     (snapshot.talents || []) as Array<{ id?: string | null; level?: unknown } | null | undefined>
   );
   const equipped = [
-    slots.helmet ? `Helmet: ${slots.helmet}` : null,
-    slots.armor ? `Armor: ${slots.armor}` : null,
-    slots.left ? `Left: ${slots.left}` : null,
-    slots.right ? `Right: ${slots.right}` : null,
+    slots.helmet ? `Helmet: ${resolveMonsterEquippedSlotLabel(slots.helmet, gearList)}` : null,
+    slots.armor ? `Armor: ${resolveMonsterEquippedSlotLabel(slots.armor, gearList)}` : null,
+    slots.left ? `Left: ${resolveMonsterEquippedSlotLabel(slots.left, gearList)}` : null,
+    slots.right ? `Right: ${resolveMonsterEquippedSlotLabel(slots.right, gearList)}` : null,
   ]
     .filter(Boolean)
     .join(", ");

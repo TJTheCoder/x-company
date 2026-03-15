@@ -191,6 +191,32 @@ const isMonsterDrawGearItem = (item: InventoryItem): boolean =>
   item.wield === "1H" ||
   item.wield === "2H";
 
+const emptyHandCount = (
+  slots:
+    | { left?: string | null; right?: string | null }
+    | null
+    | undefined
+): number => {
+  let count = 0;
+  if (!slots?.left) count += 1;
+  if (!slots?.right) count += 1;
+  return count;
+};
+
+const pickupHandsRequired = (item: InventoryItem): number => {
+  if (item.wield === "2H") return 2;
+  if (item.wield === "1H") return 1;
+  return 0;
+};
+
+const canPickUpIntoHands = (
+  item: InventoryItem,
+  slots:
+    | { left?: string | null; right?: string | null }
+    | null
+    | undefined
+): boolean => emptyHandCount(slots) >= pickupHandsRequired(item);
+
 const sanitizeMonsterEquipmentSlots = (
   slots: MonsterSnapshot["equipment_slots"] | null | undefined,
   gear: InventoryItem[]
@@ -3925,14 +3951,22 @@ export default function Combat({
       if (!actor) return [];
       const currentWeight = (actor.inventory || []).reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
       const maxWeight = (actor.max_attributes?.STR ?? actor.attributes?.STR ?? 0) * 2;
-      return itemsInZone.filter((item) => currentWeight + (item.quantity || 1) * item.weight <= maxWeight);
+      const slots = actor.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+      return itemsInZone.filter(
+        (item) =>
+          currentWeight + (item.quantity || 1) * item.weight <= maxWeight && canPickUpIntoHands(item, slots)
+      );
     }
 
     const snapshot = currentEntry.monster_snapshot;
     if (!snapshot) return [];
     const currentWeight = (snapshot.gear || []).reduce((sum, item) => sum + (item.quantity || 1) * item.weight, 0);
     const maxWeight = Math.max(0, snapshot.str ?? 0) * 2;
-    return itemsInZone.filter((item) => currentWeight + (item.quantity || 1) * item.weight <= maxWeight);
+    const slots = sanitizeMonsterEquipmentSlots(snapshot.equipment_slots, snapshot.gear || []);
+    return itemsInZone.filter(
+      (item) =>
+        currentWeight + (item.quantity || 1) * item.weight <= maxWeight && canPickUpIntoHands(item, slots)
+    );
   }, [
     combatMode,
     currentEntry,
@@ -6209,13 +6243,26 @@ export default function Combat({
     if (!currentEntry || !actorTokenId || !selectedZoneTarget) return;
     if (actorIsSpirit) return;
     if (actorTauntAngerRestricted) return;
+    const candidateIds = option.candidateIds.filter((id) => Boolean(id));
+    if (candidateIds.length === 0) return;
+    const selectedItemId = candidateIds[Math.floor(Math.random() * candidateIds.length)];
+    const selectedItem =
+      zoneLoot.find(
+        (drop) => drop.zone_id === selectedZoneTarget.zoneId && drop.item.id === selectedItemId
+      )?.item || null;
+    if (!selectedItem) return;
+    if (currentEntry.kind === "player") {
+      const slots = actorTokenCharacter?.equipment_slots || { left: null, right: null, armor: null, helmet: null };
+      if (!canPickUpIntoHands(selectedItem, slots)) return;
+    } else {
+      const snapshot = currentEntry.monster_snapshot;
+      const slots = sanitizeMonsterEquipmentSlots(snapshot?.equipment_slots, snapshot?.gear || []);
+      if (!canPickUpIntoHands(selectedItem, slots)) return;
+    }
     const didConsume = await consumeFastOrSlow();
     if (!didConsume) return;
     const swingCleared = await clearSwingForParticipant(currentEntry.participant_id);
     if (!swingCleared) return;
-    const candidateIds = option.candidateIds.filter((id) => Boolean(id));
-    if (candidateIds.length === 0) return;
-    const selectedItemId = candidateIds[Math.floor(Math.random() * candidateIds.length)];
 
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("combat_pick_up_zone_item", {

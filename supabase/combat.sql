@@ -5061,10 +5061,14 @@ declare
   v_drop jsonb;
   v_item jsonb;
   v_item_qty int;
+  v_item_wield text;
+  v_required_hands int := 0;
+  v_free_hands int := 0;
   v_merge_ord int;
   v_merge_item jsonb;
   v_actor_snapshot jsonb;
   v_actor_gear jsonb;
+  v_actor_slots jsonb;
   v_monster_id text;
 begin
   if v_email = '' then
@@ -5150,6 +5154,12 @@ begin
   end if;
   v_item := v_drop->'item';
   v_item_qty := greatest(1, coalesce((v_item->>'quantity')::int, 1));
+  v_item_wield := nullif(coalesce(v_item->>'wield', ''), '');
+  v_required_hands := case
+    when v_item_wield = '2H' then 2
+    when v_item_wield = '1H' then 1
+    else 0
+  end;
 
   v_zone_loot := coalesce(
     (
@@ -5170,57 +5180,104 @@ begin
       raise exception 'Actor character not found';
     end;
 
-    select coalesce(inventory, '[]'::jsonb)
-    into v_actor_gear
+    select coalesce(inventory, '[]'::jsonb), coalesce(to_jsonb(equipment_slots), '{}'::jsonb)
+    into v_actor_gear, v_actor_slots
     from public.characters
     where id = v_actor_uuid
     limit 1;
 
-    select e.ord, e.value
-    into v_merge_ord, v_merge_item
-    from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
-    where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
-    order by e.ord
-    limit 1;
-
-    if v_merge_ord is null then
+    if v_required_hands > 0 then
+      v_free_hands := 0;
+      if btrim(coalesce(v_actor_slots->>'left', '')) = '' then
+        v_free_hands := v_free_hands + 1;
+      end if;
+      if btrim(coalesce(v_actor_slots->>'right', '')) = '' then
+        v_free_hands := v_free_hands + 1;
+      end if;
+      if v_free_hands < v_required_hands then
+        raise exception 'Not enough free hands to pick up that item';
+      end if;
       v_actor_gear := coalesce(v_actor_gear, '[]'::jsonb) || jsonb_build_array(v_item);
+      if v_required_hands = 2 then
+        v_actor_slots := jsonb_set(v_actor_slots, '{left}', to_jsonb(p_item_id), true);
+        v_actor_slots := jsonb_set(v_actor_slots, '{right}', to_jsonb(p_item_id), true);
+      elsif btrim(coalesce(v_actor_slots->>'left', '')) = '' then
+        v_actor_slots := jsonb_set(v_actor_slots, '{left}', to_jsonb(p_item_id), true);
+      else
+        v_actor_slots := jsonb_set(v_actor_slots, '{right}', to_jsonb(p_item_id), true);
+      end if;
     else
-      v_merge_item := jsonb_set(
-        v_merge_item,
-        '{quantity}',
-        to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
-        true
-      );
-      v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+      select e.ord, e.value
+      into v_merge_ord, v_merge_item
+      from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
+      where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
+      order by e.ord
+      limit 1;
+
+      if v_merge_ord is null then
+        v_actor_gear := coalesce(v_actor_gear, '[]'::jsonb) || jsonb_build_array(v_item);
+      else
+        v_merge_item := jsonb_set(
+          v_merge_item,
+          '{quantity}',
+          to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
+          true
+        );
+        v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+      end if;
     end if;
 
     update public.characters
-    set inventory = v_actor_gear
+    set inventory = v_actor_gear,
+        equipment_slots = v_actor_slots
     where id = v_actor_uuid;
   else
     v_actor_snapshot := coalesce(v_actor_entry->'monster_snapshot', '{}'::jsonb);
     v_actor_gear := coalesce(v_actor_snapshot->'gear', '[]'::jsonb);
-    select e.ord, e.value
-    into v_merge_ord, v_merge_item
-    from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
-    where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
-    order by e.ord
-    limit 1;
-
-    if v_merge_ord is null then
-      v_actor_gear := v_actor_gear || jsonb_build_array(v_item);
+    v_actor_slots := coalesce(v_actor_snapshot->'equipment_slots', '{}'::jsonb);
+    if v_required_hands > 0 then
+      v_free_hands := 0;
+      if btrim(coalesce(v_actor_slots->>'left', '')) = '' then
+        v_free_hands := v_free_hands + 1;
+      end if;
+      if btrim(coalesce(v_actor_slots->>'right', '')) = '' then
+        v_free_hands := v_free_hands + 1;
+      end if;
+      if v_free_hands < v_required_hands then
+        raise exception 'Not enough free hands to pick up that item';
+      end if;
+      v_actor_gear := coalesce(v_actor_gear, '[]'::jsonb) || jsonb_build_array(v_item);
+      if v_required_hands = 2 then
+        v_actor_slots := jsonb_set(v_actor_slots, '{left}', to_jsonb(p_item_id), true);
+        v_actor_slots := jsonb_set(v_actor_slots, '{right}', to_jsonb(p_item_id), true);
+      elsif btrim(coalesce(v_actor_slots->>'left', '')) = '' then
+        v_actor_slots := jsonb_set(v_actor_slots, '{left}', to_jsonb(p_item_id), true);
+      else
+        v_actor_slots := jsonb_set(v_actor_slots, '{right}', to_jsonb(p_item_id), true);
+      end if;
     else
-      v_merge_item := jsonb_set(
-        v_merge_item,
-        '{quantity}',
-        to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
-        true
-      );
-      v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+      select e.ord, e.value
+      into v_merge_ord, v_merge_item
+      from jsonb_array_elements(v_actor_gear) with ordinality as e(value, ord)
+      where (e.value - 'id' - 'quantity') = (v_item - 'id' - 'quantity')
+      order by e.ord
+      limit 1;
+
+      if v_merge_ord is null then
+        v_actor_gear := v_actor_gear || jsonb_build_array(v_item);
+      else
+        v_merge_item := jsonb_set(
+          v_merge_item,
+          '{quantity}',
+          to_jsonb(greatest(1, coalesce((v_merge_item->>'quantity')::int, 1) + v_item_qty)),
+          true
+        );
+        v_actor_gear := jsonb_set(v_actor_gear, array[(v_merge_ord - 1)::text], v_merge_item, false);
+      end if;
     end if;
 
     v_actor_snapshot := jsonb_set(v_actor_snapshot, '{gear}', v_actor_gear, true);
+    v_actor_snapshot := jsonb_set(v_actor_snapshot, '{equipment_slots}', v_actor_slots, true);
     v_actor_entry := jsonb_set(v_actor_entry, '{monster_snapshot}', v_actor_snapshot, true);
     v_entries := jsonb_set(v_entries, array[v_actor_idx::text], v_actor_entry, false);
 

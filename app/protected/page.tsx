@@ -2065,9 +2065,12 @@ export default function Dashboard() {
       return entry;
     });
 
+    const reactionPhasePreResolved = Boolean(params.preResolveDodged) && Boolean(params.preResolveParried);
+    const nextCurrentIndex = reactionPhasePreResolved ? attackerIndex : targetIndex;
+
     const { error: updateError } = await supabase.rpc("combat_update_flow_state", {
       p_initiative_entries: nextEntries,
-      p_initiative_current_index: targetIndex,
+      p_initiative_current_index: nextCurrentIndex,
       p_actor_token_id: params.attackerTokenId,
     });
     if (updateError) {

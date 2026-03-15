@@ -7343,10 +7343,25 @@ export default function Combat({
     }
     const currentToken = tokenByCharacterId.get(characterId);
     if (currentToken) {
+      const fromZone = zoneIdAtPoint(zoneRegionMap, currentToken);
+      const toZone = zoneIdAtPoint(zoneRegionMap, point);
+      const actorParticipantId = actorEntry?.participant_id ?? null;
+      const isActorTurn =
+        combatMode &&
+        Boolean(actorParticipantId) &&
+        currentEntry?.participant_id === actorParticipantId;
+      if (
+        combatMode &&
+        actorEntry &&
+        !isActorTurn &&
+        fromZone !== null &&
+        toZone !== null &&
+        fromZone !== toZone
+      ) {
+        return;
+      }
       const engaged = engagements.some((edge) => edge.a === characterId || edge.b === characterId);
       if (engaged) {
-        const fromZone = zoneIdAtPoint(zoneRegionMap, currentToken);
-        const toZone = zoneIdAtPoint(zoneRegionMap, point);
         if (fromZone !== null && toZone !== null && fromZone !== toZone) {
           return;
         }

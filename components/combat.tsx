@@ -426,7 +426,6 @@ export default function Combat({
   const handledSlashArtsPhaseRef = useRef<Set<string>>(new Set());
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
-  const autoPassAttemptRef = useRef<string | null>(null);
   const autoResolveReactionPassRef = useRef<string | null>(null);
   const autoClearedBrokenSwingRef = useRef<Set<string>>(new Set());
   const autoClearingBrokenSwingRef = useRef(false);
@@ -5011,46 +5010,6 @@ export default function Combat({
       setError,
     });
   };
-
-  useEffect(() => {
-    const participantId = currentEntry?.participant_id ?? null;
-    const noActionsRemaining =
-      currentEntry?.fast_available === false &&
-      currentEntry?.slow_available === false;
-    const reactionStackOngoing = reactionPipelineActive || pendingReactions.length > 0;
-    const pendingResolutionOngoing =
-      Boolean(pendingMeleeAction) ||
-      Boolean(pendingReactionRoll) ||
-      Boolean(pendingArmorPrompt) ||
-      Boolean(pendingArtPrompt) ||
-      Boolean(pendingArtRoll) ||
-      isResolvingReaction;
-
-    if (!participantId || !canPass || !noActionsRemaining || reactionStackOngoing || pendingResolutionOngoing) {
-      autoPassAttemptRef.current = null;
-      return;
-    }
-    if (autoPassAttemptRef.current === participantId) return;
-    autoPassAttemptRef.current = participantId;
-    const timeoutId = window.setTimeout(() => {
-      if (autoPassAttemptRef.current !== participantId) return;
-      void passTurn();
-    }, 150);
-    return () => window.clearTimeout(timeoutId);
-  }, [
-    currentEntry?.participant_id,
-    currentEntry?.fast_available,
-    currentEntry?.slow_available,
-    canPass,
-    reactionPipelineActive,
-    pendingReactions.length,
-    pendingMeleeAction,
-    pendingReactionRoll,
-    pendingArmorPrompt,
-    pendingArtPrompt,
-    pendingArtRoll,
-    isResolvingReaction,
-  ]);
 
   const engageByTokenIds = async (actorTokenIdValue: string, targetTokenIdValue: string): Promise<boolean> => {
     if (!isDmUser) return false;

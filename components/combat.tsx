@@ -427,6 +427,7 @@ export default function Combat({
   const tauntAngerTurnCheckedParticipantRef = useRef<string | null>(null);
   const startOfTurnEffectsCheckedParticipantRef = useRef<string | null>(null);
   const autoPassAttemptRef = useRef<string | null>(null);
+  const autoResolveReactionPassRef = useRef<string | null>(null);
   const autoClearedBrokenSwingRef = useRef<Set<string>>(new Set());
   const autoClearingBrokenSwingRef = useRef(false);
   const isResizingPanelRef = useRef(false);
@@ -1358,6 +1359,9 @@ export default function Combat({
       })),
     ];
   }, [pendingReaction, reactionManeuver, pendingReactionIsFirearm, character, reactionTargetIsMonster, reactionTargetEntry]);
+  const pendingReactionHasEligibleChoice =
+    Boolean(pendingReaction) &&
+    (canDodgeReaction || (canParryReaction && parryOptions.length > 0));
   const slashReactionTargetIsMonster = currentEntry?.kind === "monster";
   const slashReactionTargetCharacter = actorTokenId ? characterById.get(actorTokenId) || null : null;
   const slashReactionTalentSource = slashReactionTargetIsMonster
@@ -1435,13 +1439,30 @@ export default function Combat({
       })),
     ];
   }, [slashIncomingActive, slashIncomingDamage?.type, slashReactionTargetIsMonster, currentEntry, slashReactionTargetCharacter]);
+  const slashReactionHasEligibleChoice =
+    slashReactionPhase &&
+    ((!slashHasDodged && slashCanDodgeReaction) ||
+      (!slashHasParried && slashCanParryReaction && slashParryOptions.length > 0));
+  const opposingReactionHasEligibleChoice =
+    opposingReactionActive &&
+    opposingReactionCanControlPhase &&
+    opposingReactionCanOppose &&
+    Boolean(opposingReactionMode);
+  const shouldAutoPassReactionPhase =
+    combatMode &&
+    ((opposingReactionActive && opposingReactionCanControlPhase && !opposingReactionHasEligibleChoice) ||
+      (slashReactionPhase && slashCanControlPhase && !slashReactionHasEligibleChoice) ||
+      (Boolean(pendingReaction) &&
+        viewerCanControlReaction &&
+        (!REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) || !pendingReactionHasEligibleChoice)));
   const shouldShowReactionModal =
-    ((opposingReactionActive && opposingReactionCanControlPhase) ||
+    ((opposingReactionActive && opposingReactionCanControlPhase && opposingReactionHasEligibleChoice) ||
       (Boolean(pendingReaction) &&
         REACTION_MANEUVER_SET.has(pendingReaction!.maneuver) &&
         combatMode &&
-        viewerCanControlReaction) ||
-      (slashReactionPhase && slashCanControlPhase)) &&
+        viewerCanControlReaction &&
+        pendingReactionHasEligibleChoice) ||
+      (slashReactionPhase && slashCanControlPhase && slashReactionHasEligibleChoice)) &&
     combatMode;
   const effectiveProtectionDice = (item: InventoryItem | null | undefined): number => {
     if (!item) return 0;
@@ -2157,6 +2178,51 @@ export default function Combat({
       onResolveMeleeAttack,
     ]
   );
+  useEffect(() => {
+    if (!combatMode || isResolvingReaction) {
+      autoResolveReactionPassRef.current = null;
+      return;
+    }
+
+    let autoPassKey: string | null = null;
+    if (!shouldAutoPassReactionPhase) {
+      autoResolveReactionPassRef.current = null;
+      return;
+    }
+    if (opposingReactionActive && opposingReactionCanControlPhase && !opposingReactionHasEligibleChoice) {
+      autoPassKey = `oppose:${opposingReactionFlag?.type || opposingReactionMeta?.attackId || actorTokenId || "unknown"}`;
+    } else if (slashReactionPhase && slashCanControlPhase && !slashReactionHasEligibleChoice) {
+      autoPassKey = `slash:${slashIncomingMeta?.attackId || actorTokenId || "unknown"}`;
+    } else if (
+      pendingReaction &&
+      viewerCanControlReaction &&
+      (!REACTION_MANEUVER_SET.has(pendingReaction.maneuver) || !pendingReactionHasEligibleChoice)
+    ) {
+      autoPassKey = `reaction:${pendingReaction.id}`;
+    }
+
+    if (autoResolveReactionPassRef.current === autoPassKey) return;
+    autoResolveReactionPassRef.current = autoPassKey;
+    void resolvePendingReaction("pass");
+  }, [
+    combatMode,
+    isResolvingReaction,
+    shouldAutoPassReactionPhase,
+    opposingReactionActive,
+    opposingReactionCanControlPhase,
+    opposingReactionHasEligibleChoice,
+    opposingReactionFlag,
+    opposingReactionMeta,
+    actorTokenId,
+    slashReactionPhase,
+    slashCanControlPhase,
+    slashReactionHasEligibleChoice,
+    slashIncomingMeta,
+    pendingReaction,
+    viewerCanControlReaction,
+    pendingReactionHasEligibleChoice,
+    resolvePendingReaction,
+  ]);
   const actorHoldCounterpartIds = useMemo(() => {
     const ids = new Set<string>();
     if (actorGrapplingTargetId) ids.add(actorGrapplingTargetId);
@@ -7923,7 +7989,7 @@ export default function Combat({
             </div>
           )}
         </div>
-        {reactionPipelineActive && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
+        {reactionPipelineActive && !shouldAutoPassReactionPhase && !shouldShowReactionModal && !shouldShowArmorPrompt && !shouldShowArtPrompt && (
           <div className="mb-3 rounded border border-orange-500/40 bg-orange-900/20 px-3 py-2 text-xs text-orange-200/90">
             Reactions in stack. Please wait for resolution.
           </div>
